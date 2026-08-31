@@ -9,6 +9,7 @@ import {
 } from '@safebrowse/shared';
 import * as fs from 'fs';
 import * as path from 'path';
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 
 export type FamilyRole = 'OWNER' | 'PARENT' | 'VIEWER';
@@ -33,13 +34,35 @@ export interface ParentUser {
   notificationPrefs?: ParentNotificationPrefs;
   mfaEnabled?: boolean;
   mfaSecret?: string; // Encrypted with AES-256-GCM
-  mfaRecoveryCodes?: string[]; // Hashed recovery codes
+  pendingMfaSecret?: string; // Encrypted with AES-256-GCM during setup
+  mfaRecoveryCodes?: string[]; // Bcrypt-hashed recovery codes
+  lastUsedTotpStep?: number; // Anti-replay TOTP counter (legacy — use totpLastUsedSteps)
+  totpLastUsedSteps?: Record<string, number>; // Per-purpose TOTP timestep tracking: { [purpose]: timeStep }
+  tokenVersion?: number; // Incremented on password reset to invalidate active JWTs
   emailVerified?: boolean;
   lastLoginAt?: string;
   createdAt: string;
   consentVersion?: string;
   consentTimestamp?: string;
   privacyPolicyVersion?: string;
+}
+
+/**
+ * Persisted MFA challenge record — replaces in-memory consumedMfaTickets Set.
+ * Stores only a hash of the JWT jti — never the raw ticket.
+ */
+export interface MfaChallenge {
+  id: string;          // Same as ticketId embedded in the MFA JWT
+  userId: string;
+  jtiHash: string;     // SHA-256 hash of the JWT jti claim
+  purpose: string;     // e.g. 'mfa_login'
+  createdAt: string;
+  expiresAt: string;
+  consumedAt?: string; // Set when successfully used — cannot be reused
+  invalidatedAt?: string; // Set when proactively cancelled (password reset, logout, etc.)
+  attemptCount: number;   // Number of failed verification attempts
+  ipAddress?: string;
+  userAgent?: string;
 }
 
 export interface Family {
@@ -79,18 +102,22 @@ export interface FamilyInvitation {
 export interface UserSession {
   id: string;
   userId: string;
-  token: string;
+  sessionFamilyId?: string; // Links refresh token family for replay attack mitigation
+  refreshTokenHash: string; // Stored as SHA-256 hash
+  consumedTokenHashes?: string[]; // History of consumed refresh tokens for replay attack detection
   deviceInfo: string;
   ipAddress?: string;
   createdAt: string;
   lastSeenAt: string;
-  isRevoked?: boolean;
+  expiresAt: string;
+  isRevoked: boolean;
+  tokenVersion: number;
 }
 
 export interface PasswordResetToken {
   id: string;
   userId: string;
-  token: string;
+  tokenHash: string; // SHA-256 hash of raw reset token
   expiresAt: string;
   usedAt?: string;
 }
@@ -99,7 +126,7 @@ export interface EmailVerificationToken {
   id: string;
   userId: string;
   email: string;
-  token: string;
+  tokenHash: string; // SHA-256 hash of raw verification token
   expiresAt: string;
   usedAt?: string;
 }
@@ -132,6 +159,7 @@ export class DataStore {
   public userSessions: Map<string, UserSession> = new Map();
   public passwordResetTokens: Map<string, PasswordResetToken> = new Map();
   public emailVerificationTokens: Map<string, EmailVerificationToken> = new Map();
+  public mfaChallenges: Map<string, MfaChallenge> = new Map(); // Persisted MFA challenge records (replaces in-memory Set)
   public familyAuditLogs: FamilyAuditLog[] = [];
   public referrals: Map<string, Referral> = new Map();
 
@@ -167,6 +195,10 @@ export class DataStore {
         userSessions: Array.from(this.userSessions.values()),
         passwordResetTokens: Array.from(this.passwordResetTokens.values()),
         emailVerificationTokens: Array.from(this.emailVerificationTokens.values()),
+        // Persist MFA challenge records — keep only last 1000, prune truly expired+consumed ones
+        mfaChallenges: Array.from(this.mfaChallenges.values())
+          .filter((c) => !c.consumedAt || new Date(c.expiresAt).getTime() > Date.now() - 7 * 24 * 60 * 60 * 1000)
+          .slice(-1000),
         familyAuditLogs: this.familyAuditLogs.slice(-1000),
         referrals: Array.from(this.referrals.values()),
         children: Array.from(this.children.values()),
@@ -199,9 +231,67 @@ export class DataStore {
         if (data.families) data.families.forEach((f: Family) => this.families.set(f.id, f));
         if (data.familyMembers) data.familyMembers.forEach((fm: FamilyMember) => this.familyMembers.set(fm.id, fm));
         if (data.familyInvitations) data.familyInvitations.forEach((fi: FamilyInvitation) => this.familyInvitations.set(fi.id, fi));
-        if (data.userSessions) data.userSessions.forEach((us: UserSession) => this.userSessions.set(us.id, us));
-        if (data.passwordResetTokens) data.passwordResetTokens.forEach((pr: PasswordResetToken) => this.passwordResetTokens.set(pr.id, pr));
-        if (data.emailVerificationTokens) data.emailVerificationTokens.forEach((ev: EmailVerificationToken) => this.emailVerificationTokens.set(ev.id, ev));
+        if (data.userSessions) {
+          data.userSessions.forEach((us: any) => {
+            const session: UserSession = {
+              id: us.id,
+              userId: us.userId,
+              sessionFamilyId: us.sessionFamilyId || us.id,
+              refreshTokenHash: us.refreshTokenHash || (us.token ? crypto.createHash('sha256').update(us.token).digest('hex') : ''),
+              consumedTokenHashes: Array.isArray(us.consumedTokenHashes) ? us.consumedTokenHashes : [],
+              deviceInfo: us.deviceInfo || 'Unknown Device',
+              ipAddress: us.ipAddress,
+              createdAt: us.createdAt || new Date().toISOString(),
+              lastSeenAt: us.lastSeenAt || new Date().toISOString(),
+              expiresAt: us.expiresAt || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+              isRevoked: Boolean(us.isRevoked),
+              tokenVersion: us.tokenVersion || 1,
+            };
+            this.userSessions.set(session.id, session);
+          });
+        }
+        if (data.passwordResetTokens) {
+          data.passwordResetTokens.forEach((pr: any) => {
+            this.passwordResetTokens.set(pr.id, {
+              id: pr.id,
+              userId: pr.userId,
+              tokenHash: pr.tokenHash || (pr.token ? crypto.createHash('sha256').update(pr.token).digest('hex') : ''),
+              expiresAt: pr.expiresAt,
+              usedAt: pr.usedAt,
+            });
+          });
+        }
+        if (data.emailVerificationTokens) {
+          data.emailVerificationTokens.forEach((ev: any) => {
+            this.emailVerificationTokens.set(ev.id, {
+              id: ev.id,
+              userId: ev.userId,
+              email: ev.email,
+              tokenHash: ev.tokenHash || (ev.token ? crypto.createHash('sha256').update(ev.token).digest('hex') : ''),
+              expiresAt: ev.expiresAt,
+              usedAt: ev.usedAt,
+            });
+          });
+        }
+        // Load persisted MFA challenge records (survives restart — prevents replay attack after restart)
+        if (data.mfaChallenges) {
+          data.mfaChallenges.forEach((c: any) => {
+            const challenge: MfaChallenge = {
+              id: c.id,
+              userId: c.userId,
+              jtiHash: c.jtiHash,
+              purpose: c.purpose,
+              createdAt: c.createdAt,
+              expiresAt: c.expiresAt,
+              consumedAt: c.consumedAt,
+              invalidatedAt: c.invalidatedAt,
+              attemptCount: c.attemptCount || 0,
+              ipAddress: c.ipAddress,
+              userAgent: c.userAgent,
+            };
+            this.mfaChallenges.set(challenge.id, challenge);
+          });
+        }
         if (data.familyAuditLogs) this.familyAuditLogs = data.familyAuditLogs;
         if (data.referrals) data.referrals.forEach((r: Referral) => this.referrals.set(r.id, r));
         if (data.children) data.children.forEach((c: Child) => this.children.set(c.id, c));
