@@ -1,0 +1,73 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Local databases and data stores
+data/
+packages/backend/data/
+*.sqlite
+*.sqlite3
+*.db
+safebrowse-db.json
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Backups and snapshots
+backups/
+*.bak
+*.backup
+*.snapshot
+
+# Build and compilation outputs
+dist/
+build/
+out/
+*.tsbuildinfo
+.turbo/
+.cache/
+.vite/
+
+# Android signing keys & build artifacts
+*.jks
+*.keystore
+*.p12
+*.pem
+*.aab
+*.apk
+packages/agent-android/.gradle/
+packages/agent-android/build/
+packages/agent-android/app/build/
+packages/agent-android/local.properties
+packages/agent-android/.idea/
+
+# Windows certificates & signing material
+*.pfx
+*.cer
+*.crt
+*.key
+*.snk
+*.pfx.json
+
+# IDE & OS-generated files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+[Dd]esktop.ini
+.DS_Store
+.directory
