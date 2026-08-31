@@ -500,6 +500,17 @@ class ApiClient {
     return res.json();
   }
 
+  async updateFamily(payload: { familyId: string; name?: string; requireMfa?: boolean; approvalRule?: string }) {
+    const res = await fetch(`${API_BASE}/family`, {
+      method: 'PATCH',
+      headers: this.getHeaders(),
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to update family settings');
+    return data;
+  }
+
   async inviteParent(familyId: string, email: string, role: string) {
     const res = await fetch(`${API_BASE}/family/invitations`, {
       method: 'POST',
@@ -519,6 +530,17 @@ class ApiClient {
     return res.json();
   }
 
+  async changeFamilyMemberRole(memberId: string, familyId: string, role: 'PARENT' | 'VIEWER') {
+    const res = await fetch(`${API_BASE}/family/members/${memberId}/role`, {
+      method: 'PATCH',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ familyId, role }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to change member role');
+    return data;
+  }
+
   async removeFamilyMember(memberId: string, familyId: string) {
     const res = await fetch(`${API_BASE}/family/members/${memberId}?familyId=${familyId}`, {
       method: 'DELETE',
@@ -527,11 +549,11 @@ class ApiClient {
     return res.json();
   }
 
-  async transferOwnership(familyId: string, newOwnerUserId: string) {
+  async transferOwnership(familyId: string, newOwnerUserId: string, password?: string, otpCode?: string) {
     const res = await fetch(`${API_BASE}/family/transfer-ownership`, {
       method: 'POST',
       headers: this.getHeaders(),
-      body: JSON.stringify({ familyId, newOwnerUserId }),
+      body: JSON.stringify({ familyId, newOwnerUserId, password, otpCode }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Transfer failed');
@@ -543,13 +565,59 @@ class ApiClient {
     return res.json();
   }
 
+  // --- Canonical Admin Endpoints ---
+  async getAdminMetrics() {
+    const res = await fetch(`${API_BASE}/admin/metrics`, { headers: this.getHeaders() });
+    if (!res.ok) throw new Error('Forbidden. System administrator privilege required.');
+    return res.json();
+  }
+
+  async getAdminFleet() {
+    const res = await fetch(`${API_BASE}/admin/fleet`, { headers: this.getHeaders() });
+    if (!res.ok) throw new Error('Forbidden. System administrator privilege required.');
+    return res.json();
+  }
+
+  async getAdminAudit() {
+    const res = await fetch(`${API_BASE}/admin/audit`, { headers: this.getHeaders() });
+    if (!res.ok) throw new Error('Forbidden. System administrator privilege required.');
+    return res.json();
+  }
+
+  async getAdminSupport() {
+    const res = await fetch(`${API_BASE}/admin/support`, { headers: this.getHeaders() });
+    if (!res.ok) throw new Error('Forbidden. System administrator privilege required.');
+    return res.json();
+  }
+
+  async dispatchAdminRollback(targetVersion: string, reason?: string) {
+    const res = await fetch(`${API_BASE}/admin/rollback`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ targetVersion, reason }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Rollback failed');
+    return data;
+  }
+
+  async bootstrapDevAdmin() {
+    const res = await fetch(`${API_BASE}/admin/bootstrap-dev`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Bootstrap failed');
+    return data;
+  }
+
   async getOperationsFleet() {
-    const res = await fetch(`${API_BASE}/operations/fleet`, { headers: this.getHeaders() });
+    const res = await fetch(`${API_BASE}/admin/fleet`, { headers: this.getHeaders() });
     return res.json();
   }
 
   async dispatchRollback(targetVersion: string, reason?: string) {
-    const res = await fetch(`${API_BASE}/operations/rollback`, {
+    const res = await fetch(`${API_BASE}/admin/rollback`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ targetVersion, reason }),

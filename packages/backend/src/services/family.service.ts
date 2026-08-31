@@ -1,7 +1,8 @@
 import { db, Family, FamilyMember, FamilyInvitation, FamilyRole, FamilyAuditLog } from '../db/store';
 import { nanoid } from 'nanoid';
 import crypto from 'crypto';
-import { wsManager } from './websocket.service';
+import { hashToken, verifyStepUpAuth } from '../utils/security';
+import { rbacService, FamilyPermission } from './rbac.service';
 
 export interface FamilyOverview {
   family: Family;
@@ -16,7 +17,7 @@ export interface FamilyOverview {
     joinedAt: string;
     isOwner: boolean;
   }>;
-  invitations: FamilyInvitation[];
+  invitations: Array<Omit<FamilyInvitation, 'tokenHash'>>;
   stats: {
     childrenCount: number;
     devicesCount: number;
@@ -47,7 +48,7 @@ export class FamilyService {
       name: familyName,
       ownerUserId: userId,
       requireMfa: false,
-      approvalRule: 'ANY_PARENT',
+      approvalRule: 'OWNER_OR_PARENT',
       createdAt: now,
       updatedAt: now,
     };
@@ -94,14 +95,21 @@ export class FamilyService {
       }
     }
 
-    const invitations = Array.from(db.familyInvitations.values()).filter(
+    const rawInvitations = Array.from(db.familyInvitations.values()).filter(
       (inv) => inv.familyId === family.id && inv.status === 'PENDING'
     );
+
+    // Sanitize invitations list to never expose tokenHash
+    const invitations = rawInvitations.map(({ tokenHash, ...rest }) => rest);
 
     const myMembership = membersList.find((m) => m.userId === userId);
     const myRole = myMembership ? myMembership.role : 'OWNER';
 
-    const children = Array.from(db.children.values()).filter((c) => c.parentId === family.ownerUserId);
+    // A family has access to all children created by any member of the family or associated with owner
+    const memberUserIds = membersList.map((m) => m.userId);
+    const children = Array.from(db.children.values()).filter((c) =>
+      memberUserIds.includes(c.parentId) || c.parentId === family.ownerUserId
+    );
     const childIds = children.map((c) => c.id);
     const devices = Array.from(db.devices.values()).filter((d) => childIds.includes(d.childId));
 
@@ -119,29 +127,42 @@ export class FamilyService {
   }
 
   /**
-   * Update family settings
+   * Update family settings (Name, MFA Requirement, Approval Rule)
    */
   public updateFamily(
     familyId: string,
     actorUserId: string,
-    updates: { name?: string; requireMfa?: boolean; approvalRule?: 'ANY_PARENT' | 'OWNER_ONLY' }
+    updates: { name?: string; requireMfa?: boolean; approvalRule?: 'OWNER_ONLY' | 'OWNER_OR_PARENT' }
   ): Family {
     const family = db.families.get(familyId);
     if (!family) throw new Error('Family not found.');
 
-    const membership = Array.from(db.familyMembers.values()).find(
-      (m) => m.familyId === familyId && m.userId === actorUserId
-    );
-    if (!membership || (membership.role !== 'OWNER' && membership.role !== 'PARENT')) {
-      throw new Error('Forbidden. Only authorized parents can edit family settings.');
+    const membership = rbacService.getFamilyMembership(actorUserId, familyId);
+    if (!membership) {
+      throw new Error('Forbidden. You do not belong to this family.');
     }
 
-    if (updates.name) family.name = updates.name.trim();
+    if (!rbacService.hasFamilyPermission(actorUserId, familyId, FamilyPermission.FAMILY_SETTINGS_MANAGE)) {
+      throw new Error('Forbidden. Only authorized family managers can edit family settings.');
+    }
+
+    if (updates.name && updates.name.trim()) {
+      family.name = updates.name.trim();
+    }
+
     if (typeof updates.requireMfa === 'boolean') {
-      if (membership.role !== 'OWNER') throw new Error('Only the Family Owner can enforce MFA requirements.');
+      if (membership.role !== 'OWNER') {
+        throw new Error('Only the Family Owner can enforce MFA requirements.');
+      }
       family.requireMfa = updates.requireMfa;
     }
-    if (updates.approvalRule) family.approvalRule = updates.approvalRule;
+
+    if (updates.approvalRule) {
+      if (membership.role !== 'OWNER') {
+        throw new Error('Only the Family Owner can change request approval rules.');
+      }
+      family.approvalRule = updates.approvalRule;
+    }
 
     family.updatedAt = new Date().toISOString();
     db.families.set(familyId, family);
@@ -153,27 +174,28 @@ export class FamilyService {
   }
 
   /**
-   * Invite a Co-Parent to the Family
+   * Invite a Co-Parent or Viewer to the Family
    */
   public inviteParent(
     familyId: string,
     actorUserId: string,
     email: string,
     role: FamilyRole = 'PARENT'
-  ): FamilyInvitation {
+  ): FamilyInvitation & { token: string } {
     const family = db.families.get(familyId);
     if (!family) throw new Error('Family not found.');
 
-    const membership = Array.from(db.familyMembers.values()).find(
-      (m) => m.familyId === familyId && m.userId === actorUserId
-    );
-    if (!membership || membership.role !== 'OWNER') {
-      throw new Error('Forbidden. Only the Family Owner can invite new co-parents.');
+    if (!rbacService.hasFamilyPermission(actorUserId, familyId, FamilyPermission.FAMILY_MEMBER_INVITE)) {
+      throw new Error('Forbidden. Insufficient permissions to invite new family members.');
+    }
+
+    if (role === 'OWNER') {
+      throw new Error('Cannot invite a user as OWNER. Use ownership transfer instead.');
     }
 
     const normalizedEmail = email.toLowerCase().trim();
 
-    // Check if user is already a member
+    // Check if user is already an active member of this family
     const existingMember = Array.from(db.familyMembers.values()).find((m) => {
       if (m.familyId === familyId) {
         const u = db.users.get(m.userId);
@@ -185,7 +207,20 @@ export class FamilyService {
       throw new Error('User is already a member of this family.');
     }
 
-    const token = `inv_${crypto.randomBytes(24).toString('hex')}`;
+    // Check for duplicate pending active invitation
+    const duplicatePending = Array.from(db.familyInvitations.values()).find(
+      (inv) =>
+        inv.familyId === familyId &&
+        inv.email.toLowerCase() === normalizedEmail &&
+        inv.status === 'PENDING' &&
+        new Date(inv.expiresAt) > new Date()
+    );
+    if (duplicatePending) {
+      throw new Error('An active pending invitation already exists for this email address.');
+    }
+
+    const rawToken = `inv_${crypto.randomBytes(24).toString('hex')}`;
+    const tokenHash = hashToken(rawToken);
     const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(); // 48 hours
 
     const invitation: FamilyInvitation = {
@@ -193,7 +228,7 @@ export class FamilyService {
       familyId,
       email: normalizedEmail,
       role,
-      token,
+      tokenHash,
       expiresAt,
       status: 'PENDING',
       invitedByUserId: actorUserId,
@@ -212,16 +247,25 @@ export class FamilyService {
       `Invited '${normalizedEmail}' as ${role}`
     );
 
-    return invitation;
+    return {
+      ...invitation,
+      token: rawToken,
+    };
   }
 
   /**
-   * Accept an Invitation to join a family
+   * Accept an Invitation to join a family (Single-Use Hashed Token Validation)
    */
-  public acceptInvitation(token: string, acceptingUserId: string): { family: Family; role: FamilyRole } {
-    const cleanToken = token.trim();
+  public acceptInvitation(rawToken: string, acceptingUserId: string): { family: Family; role: FamilyRole } {
+    if (!rawToken || typeof rawToken !== 'string' || !rawToken.trim()) {
+      throw new Error('Invalid invitation token.');
+    }
+
+    const cleanToken = rawToken.trim();
+    const tokenHash = hashToken(cleanToken);
+
     const invitation = Array.from(db.familyInvitations.values()).find(
-      (inv) => inv.token === cleanToken && inv.status === 'PENDING'
+      (inv) => inv.tokenHash === tokenHash && inv.status === 'PENDING'
     );
 
     if (!invitation) {
@@ -272,6 +316,7 @@ export class FamilyService {
       }
     }
 
+    // Mark invitation ACCEPTED atomically (Single-use invariant)
     invitation.status = 'ACCEPTED';
     invitation.acceptedAt = new Date().toISOString();
     db.familyInvitations.set(invitation.id, invitation);
@@ -296,8 +341,10 @@ export class FamilyService {
     if (!invitation) throw new Error('Invitation not found.');
 
     const family = db.families.get(invitation.familyId);
-    if (!family || family.ownerUserId !== actorUserId) {
-      throw new Error('Forbidden. Only the Family Owner can revoke invitations.');
+    if (!family) throw new Error('Family not found.');
+
+    if (!rbacService.hasFamilyPermission(actorUserId, family.id, FamilyPermission.FAMILY_MEMBER_INVITE)) {
+      throw new Error('Forbidden. Insufficient permissions to revoke invitations.');
     }
 
     invitation.status = 'REVOKED';
@@ -310,14 +357,23 @@ export class FamilyService {
   }
 
   /**
-   * Remove a Co-Parent Member
+   * Change member role (e.g. PARENT <-> VIEWER)
    */
-  public removeMember(familyId: string, memberId: string, actorUserId: string) {
+  public changeMemberRole(
+    familyId: string,
+    memberId: string,
+    newRole: FamilyRole,
+    actorUserId: string
+  ): FamilyMember {
     const family = db.families.get(familyId);
     if (!family) throw new Error('Family not found.');
 
-    if (family.ownerUserId !== actorUserId) {
-      throw new Error('Forbidden. Only the Family Owner can remove members.');
+    if (!rbacService.hasFamilyPermission(actorUserId, familyId, FamilyPermission.FAMILY_ROLE_CHANGE)) {
+      throw new Error('Forbidden. Only the Family Owner can change member roles.');
+    }
+
+    if (newRole === 'OWNER') {
+      throw new Error('Cannot assign OWNER role directly. Use transferOwnership instead.');
     }
 
     const member = db.familyMembers.get(memberId);
@@ -325,8 +381,54 @@ export class FamilyService {
       throw new Error('Member not found in this family.');
     }
 
-    if (member.userId === family.ownerUserId) {
+    if (member.userId === family.ownerUserId || member.role === 'OWNER') {
+      throw new Error('Cannot change the role of the Family Owner.');
+    }
+
+    const oldRole = member.role;
+    member.role = newRole;
+    db.familyMembers.set(memberId, member);
+    db.save();
+
+    const targetUser = db.users.get(member.userId);
+    const actor = db.users.get(actorUserId);
+    this.logAudit(
+      familyId,
+      actorUserId,
+      actor?.name || 'Owner',
+      'MEMBER_ROLE_CHANGED',
+      `Changed role of ${targetUser?.name || 'Member'} from ${oldRole} to ${newRole}`
+    );
+
+    return member;
+  }
+
+  /**
+   * Remove a Family Member (Cannot remove the final OWNER)
+   */
+  public removeMember(familyId: string, memberId: string, actorUserId: string) {
+    const family = db.families.get(familyId);
+    if (!family) throw new Error('Family not found.');
+
+    if (!rbacService.hasFamilyPermission(actorUserId, familyId, FamilyPermission.FAMILY_MEMBER_REMOVE)) {
+      throw new Error('Forbidden. Only authorized family managers can remove members.');
+    }
+
+    const member = db.familyMembers.get(memberId);
+    if (!member || member.familyId !== familyId) {
+      throw new Error('Member not found in this family.');
+    }
+
+    if (member.userId === family.ownerUserId || member.role === 'OWNER') {
       throw new Error('Cannot remove the Family Owner. Please transfer ownership first.');
+    }
+
+    // Prevent leaving if user is the sole owner
+    const remainingOwners = Array.from(db.familyMembers.values()).filter(
+      (m) => m.familyId === familyId && m.role === 'OWNER' && m.id !== memberId
+    );
+    if (remainingOwners.length === 0) {
+      throw new Error('Cannot remove the final Family Owner.');
     }
 
     const removedUser = db.users.get(member.userId);
@@ -367,11 +469,12 @@ export class FamilyService {
     const currentOwner = db.users.get(currentOwnerUserId);
     if (!currentOwner) throw new Error('Current owner user not found.');
 
-    // Step-up authentication if credentials provided
-    if (password) {
-      const { verifyStepUpAuth } = require('../utils/security');
-      verifyStepUpAuth(currentOwner, password, otpCode);
+    // Step-up authentication is strictly required
+    if (!password) {
+      throw new Error('Step-up authentication required: password must be provided.');
     }
+
+    verifyStepUpAuth(currentOwner, password, otpCode);
 
     const newOwnerMembership = Array.from(db.familyMembers.values()).find(
       (m) => m.familyId === familyId && m.userId === newOwnerUserId
@@ -421,17 +524,26 @@ export class FamilyService {
    * Get Family Audit Logs
    */
   public getAuditLogs(familyId: string, actorUserId: string): FamilyAuditLog[] {
-    const membership = Array.from(db.familyMembers.values()).find(
-      (m) => m.familyId === familyId && m.userId === actorUserId
-    );
+    const membership = rbacService.getFamilyMembership(actorUserId, familyId);
     if (!membership) {
       throw new Error('Forbidden. You do not belong to this family.');
+    }
+
+    if (!rbacService.hasFamilyPermission(actorUserId, familyId, FamilyPermission.FAMILY_AUDIT_READ)) {
+      throw new Error('Forbidden. Insufficient permissions to view family audit logs.');
     }
 
     return db.familyAuditLogs.filter((log) => log.familyId === familyId).reverse();
   }
 
-  public logAudit(familyId: string, actorUserId: string, actorName: string, action: string, details: string, childId?: string) {
+  public logAudit(
+    familyId: string,
+    actorUserId: string,
+    actorName: string,
+    action: string,
+    details: string,
+    childId?: string
+  ) {
     const log: FamilyAuditLog = {
       id: `log-${nanoid(10)}`,
       familyId,

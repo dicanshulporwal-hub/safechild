@@ -12,6 +12,7 @@ import * as path from 'path';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 
+export type SystemRole = 'SYSTEM_ADMIN' | 'USER';
 export type FamilyRole = 'OWNER' | 'PARENT' | 'VIEWER';
 
 export interface ParentNotificationPrefs {
@@ -27,6 +28,7 @@ export interface ParentUser {
   email: string;
   passwordHash: string;
   name: string;
+  systemRole?: SystemRole; // SYSTEM_ADMIN or USER (defaults to USER)
   mobileNumber?: string;
   profilePhoto?: string;
   timezone?: string;
@@ -70,7 +72,7 @@ export interface Family {
   name: string;
   ownerUserId: string;
   requireMfa: boolean;
-  approvalRule: 'ANY_PARENT' | 'OWNER_ONLY';
+  approvalRule: 'OWNER_ONLY' | 'OWNER_OR_PARENT';
   createdAt: string;
   updatedAt: string;
 }
@@ -90,7 +92,7 @@ export interface FamilyInvitation {
   familyId: string;
   email: string;
   role: FamilyRole;
-  token: string;
+  tokenHash: string; // SHA-256 hash of raw invitation token
   expiresAt: string;
   status: InvitationStatus;
   invitedByUserId: string;
@@ -131,6 +133,16 @@ export interface EmailVerificationToken {
   usedAt?: string;
 }
 
+export interface SystemAuditLog {
+  id: string;
+  actorUserId: string;
+  actorEmail: string;
+  action: string;
+  details: string;
+  ipAddress?: string;
+  timestamp: string;
+}
+
 export interface FamilyAuditLog {
   id: string;
   familyId: string;
@@ -161,6 +173,7 @@ export class DataStore {
   public emailVerificationTokens: Map<string, EmailVerificationToken> = new Map();
   public mfaChallenges: Map<string, MfaChallenge> = new Map(); // Persisted MFA challenge records (replaces in-memory Set)
   public familyAuditLogs: FamilyAuditLog[] = [];
+  public systemAuditLogs: SystemAuditLog[] = [];
   public referrals: Map<string, Referral> = new Map();
 
   public children: Map<string, Child> = new Map();
@@ -200,6 +213,7 @@ export class DataStore {
           .filter((c) => !c.consumedAt || new Date(c.expiresAt).getTime() > Date.now() - 7 * 24 * 60 * 60 * 1000)
           .slice(-1000),
         familyAuditLogs: this.familyAuditLogs.slice(-1000),
+        systemAuditLogs: this.systemAuditLogs.slice(-1000),
         referrals: Array.from(this.referrals.values()),
         children: Array.from(this.children.values()),
         devices: Array.from(this.devices.values()),
@@ -230,7 +244,24 @@ export class DataStore {
         }
         if (data.families) data.families.forEach((f: Family) => this.families.set(f.id, f));
         if (data.familyMembers) data.familyMembers.forEach((fm: FamilyMember) => this.familyMembers.set(fm.id, fm));
-        if (data.familyInvitations) data.familyInvitations.forEach((fi: FamilyInvitation) => this.familyInvitations.set(fi.id, fi));
+        if (data.familyInvitations) {
+          data.familyInvitations.forEach((fi: any) => {
+            const invitation: FamilyInvitation = {
+              id: fi.id,
+              familyId: fi.familyId,
+              email: fi.email,
+              role: fi.role,
+              tokenHash: fi.tokenHash || (fi.token ? crypto.createHash('sha256').update(fi.token).digest('hex') : ''),
+              expiresAt: fi.expiresAt,
+              status: fi.status,
+              invitedByUserId: fi.invitedByUserId,
+              createdAt: fi.createdAt,
+              acceptedAt: fi.acceptedAt,
+              revokedAt: fi.revokedAt,
+            };
+            this.familyInvitations.set(invitation.id, invitation);
+          });
+        }
         if (data.userSessions) {
           data.userSessions.forEach((us: any) => {
             const session: UserSession = {
@@ -293,6 +324,7 @@ export class DataStore {
           });
         }
         if (data.familyAuditLogs) this.familyAuditLogs = data.familyAuditLogs;
+        if (data.systemAuditLogs) this.systemAuditLogs = data.systemAuditLogs;
         if (data.referrals) data.referrals.forEach((r: Referral) => this.referrals.set(r.id, r));
         if (data.children) data.children.forEach((c: Child) => this.children.set(c.id, c));
         if (data.devices) data.devices.forEach((d: Device) => this.devices.set(d.id, d));
@@ -346,7 +378,7 @@ export class DataStore {
         name: "Sarah's Family",
         ownerUserId: demoParent.id,
         requireMfa: false,
-        approvalRule: 'ANY_PARENT',
+        approvalRule: 'OWNER_OR_PARENT',
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };

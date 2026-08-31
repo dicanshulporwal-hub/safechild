@@ -43,6 +43,18 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
   const [childName, setChildName] = useState('');
   const [childAge, setChildAge] = useState('');
 
+  const [isSystemAdmin, setIsSystemAdmin] = useState(false);
+
+  React.useEffect(() => {
+    import('../api/client').then(({ api }) => {
+      api.getProfile?.().then((p: any) => {
+        if (p?.systemRole === 'SYSTEM_ADMIN') {
+          setIsSystemAdmin(true);
+        }
+      }).catch(() => {});
+    });
+  }, []);
+
   const handleCreateChild = (e: React.FormEvent) => {
     e.preventDefault();
     if (!childName.trim()) return;
@@ -89,12 +101,16 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
       icon: Gift,
       badge: undefined,
     },
-    {
-      to: '/admin/operations',
-      label: 'Beta Operations',
-      icon: Activity,
-      badge: undefined,
-    },
+    ...(isSystemAdmin
+      ? [
+          {
+            to: '/admin/operations',
+            label: 'System Admin',
+            icon: Activity,
+            badge: undefined,
+          },
+        ]
+      : []),
     {
       to: '/status',
       label: 'System Status',

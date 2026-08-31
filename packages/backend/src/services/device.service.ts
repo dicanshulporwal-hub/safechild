@@ -202,13 +202,23 @@ export class DeviceService {
   /**
    * Revoke device credentials permanently
    */
-  public revokeDevice(deviceId: string, parentId: string) {
+  /**
+   * Revoke device credentials permanently (Requires DEVICE_MANAGE permission in device's family)
+   */
+  public revokeDevice(deviceId: string, actorUserId: string) {
     const device = db.devices.get(deviceId) as ExtendedDevice | undefined;
     if (!device) {
       throw new Error('Device not found.');
     }
-    if (device.parentId !== parentId) {
-      throw new Error('Forbidden. You do not own this device.');
+
+    const { rbacService, FamilyPermission } = require('./rbac.service');
+    const family = rbacService.getFamilyForDevice(deviceId);
+    if (!family || !rbacService.getFamilyMembership(actorUserId, family.id)) {
+      throw new Error('Forbidden. You do not belong to the family that owns this device.');
+    }
+
+    if (!rbacService.hasFamilyPermission(actorUserId, family.id, FamilyPermission.DEVICE_MANAGE)) {
+      throw new Error('Forbidden. Insufficient permissions to revoke device credentials.');
     }
 
     device.isRevoked = true;
@@ -291,8 +301,17 @@ export class DeviceService {
   }
 
   public getDevicesForParent(parentId: string): ExtendedDevice[] {
+    const { familyService } = require('./family.service');
+    const family = familyService.getOrCreateUserFamily(parentId);
+    const children = Array.from(db.children.values()).filter(
+      (c) => c.parentId === parentId || c.parentId === family.ownerUserId
+    );
+    const childIds = children.map((c) => c.id);
+
     const now = Date.now();
-    const parentDevices = (Array.from(db.devices.values()) as ExtendedDevice[]).filter((d) => d.parentId === parentId);
+    const parentDevices = (Array.from(db.devices.values()) as ExtendedDevice[]).filter(
+      (d) => childIds.includes(d.childId) || d.parentId === parentId
+    );
 
     return parentDevices.map((dev) => {
       const lastHb = new Date(dev.lastHeartbeatAt).getTime();
@@ -313,13 +332,20 @@ export class DeviceService {
     });
   }
 
-  public removeDevice(deviceId: string, parentId: string) {
+  public removeDevice(deviceId: string, actorUserId: string) {
     const device = db.devices.get(deviceId);
     if (!device) {
       throw new Error('Device not found.');
     }
-    if (device.parentId !== parentId) {
-      throw new Error('Forbidden. You do not own this device.');
+
+    const { rbacService, FamilyPermission } = require('./rbac.service');
+    const family = rbacService.getFamilyForDevice(deviceId);
+    if (!family || !rbacService.getFamilyMembership(actorUserId, family.id)) {
+      throw new Error('Forbidden. You do not belong to the family that owns this device.');
+    }
+
+    if (!rbacService.hasFamilyPermission(actorUserId, family.id, FamilyPermission.DEVICE_MANAGE)) {
+      throw new Error('Forbidden. Insufficient permissions to remove devices.');
     }
 
     db.devices.delete(deviceId);

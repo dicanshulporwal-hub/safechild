@@ -14,9 +14,15 @@ export const FamilyManagementPage: React.FC = () => {
   const [generatedInvite, setGeneratedInvite] = useState<any>(null);
   const [inviting, setInviting] = useState(false);
 
-  // Ownership transfer
+  // Approval Rule state
+  const [approvalRule, setApprovalRule] = useState<'OWNER_ONLY' | 'OWNER_OR_PARENT'>('OWNER_OR_PARENT');
+  const [savingSettings, setSavingSettings] = useState(false);
+
+  // Ownership transfer state
   const [newOwnerId, setNewOwnerId] = useState('');
   const [showTransferConfirm, setShowTransferConfirm] = useState(false);
+  const [stepUpPassword, setStepUpPassword] = useState('');
+  const [stepUpOtp, setStepUpOtp] = useState('');
   const [transferring, setTransferring] = useState(false);
 
   useEffect(() => {
@@ -30,7 +36,10 @@ export const FamilyManagementPage: React.FC = () => {
         api.getFamily().catch(() => null),
         api.getFamilyAudit().catch(() => ({ logs: [] })),
       ]);
-      if (fam) setFamilyData(fam);
+      if (fam) {
+        setFamilyData(fam);
+        setApprovalRule(fam.family?.approvalRule || 'OWNER_OR_PARENT');
+      }
       if (aData) setAuditLogs(aData.logs || []);
     } catch (e) {
       console.error('Error fetching family:', e);
@@ -66,6 +75,17 @@ export const FamilyManagementPage: React.FC = () => {
     }
   };
 
+  const handleRoleChange = async (memberId: string, role: 'PARENT' | 'VIEWER') => {
+    if (!familyData) return;
+    try {
+      await api.changeFamilyMemberRole(memberId, familyData.family.id, role);
+      showToast(`Member role updated to ${role}.`, 'success');
+      fetchFamily();
+    } catch (e: any) {
+      showToast(e.message || 'Failed to update role', 'error');
+    }
+  };
+
   const handleRemoveMember = async (memberId: string) => {
     if (!familyData) return;
     try {
@@ -77,13 +97,37 @@ export const FamilyManagementPage: React.FC = () => {
     }
   };
 
+  const handleSaveApprovalRule = async (rule: 'OWNER_ONLY' | 'OWNER_OR_PARENT') => {
+    if (!familyData) return;
+    setSavingSettings(true);
+    try {
+      await api.updateFamily({
+        familyId: familyData.family.id,
+        approvalRule: rule,
+      });
+      setApprovalRule(rule);
+      showToast('Family approval rule updated.', 'success');
+      fetchFamily();
+    } catch (e: any) {
+      showToast(e.message || 'Failed to update rule', 'error');
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
   const handleTransferOwnership = async () => {
     if (!familyData || !newOwnerId) return;
+    if (!stepUpPassword) {
+      showToast('Password is required for step-up authentication.', 'error');
+      return;
+    }
     setTransferring(true);
     try {
-      await api.transferOwnership(familyData.family.id, newOwnerId);
+      await api.transferOwnership(familyData.family.id, newOwnerId, stepUpPassword, stepUpOtp || undefined);
       showToast('Family ownership transferred successfully!', 'success');
       setShowTransferConfirm(false);
+      setStepUpPassword('');
+      setStepUpOtp('');
       fetchFamily();
     } catch (e: any) {
       showToast(e.message || 'Transfer failed', 'error');
@@ -111,16 +155,16 @@ export const FamilyManagementPage: React.FC = () => {
         <div className="flex items-center justify-between pb-3 border-b border-slate-800">
           <div>
             <h2 className="text-sm font-bold text-white uppercase tracking-wider">Parents & Guardians</h2>
-            <p className="text-xs text-slate-400">Co-parents who have shared management over the family's children</p>
+            <p className="text-xs text-slate-400">Co-parents and viewers who have access to family children</p>
           </div>
           <span className="text-xs bg-slate-800 text-slate-300 px-3 py-1 rounded-full font-bold">
-            {familyData?.members?.length || 1} Parent{familyData?.members?.length > 1 ? 's' : ''}
+            {familyData?.members?.length || 1} Member{familyData?.members?.length > 1 ? 's' : ''}
           </span>
         </div>
 
         <div className="space-y-2.5">
           {familyData?.members?.map((m: any) => (
-            <div key={m.id} className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between">
+            <div key={m.memberId || m.id} className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between">
               <div className="flex items-center gap-3.5">
                 <div className="w-10 h-10 rounded-full bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-sm font-bold text-emerald-400">
                   {m.name ? m.name.charAt(0).toUpperCase() : 'P'}
@@ -131,7 +175,9 @@ export const FamilyManagementPage: React.FC = () => {
                     <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
                       m.role === 'OWNER'
                         ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                        : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                        : m.role === 'PARENT'
+                        ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                        : 'bg-slate-800 text-slate-400 border border-slate-700'
                     }`}>
                       {m.role}
                     </span>
@@ -146,29 +192,85 @@ export const FamilyManagementPage: React.FC = () => {
               </div>
 
               {isOwner && m.role !== 'OWNER' && (
-                <button
-                  onClick={() => handleRemoveMember(m.id)}
-                  className="text-xs font-semibold text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 px-3 py-1.5 rounded-lg border border-rose-500/30 transition"
-                >
-                  Remove
-                </button>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={m.role}
+                    onChange={(e) => handleRoleChange(m.memberId || m.id, e.target.value as any)}
+                    className="bg-slate-900 border border-slate-700 text-slate-300 text-xs rounded-lg px-2 py-1 focus:outline-none"
+                  >
+                    <option value="PARENT">Parent</option>
+                    <option value="VIEWER">Viewer</option>
+                  </select>
+                  <button
+                    onClick={() => handleRemoveMember(m.memberId || m.id)}
+                    className="text-xs font-semibold text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 px-3 py-1.5 rounded-lg border border-rose-500/30 transition"
+                  >
+                    Remove
+                  </button>
+                </div>
               )}
             </div>
           ))}
         </div>
       </section>
 
-      {/* Section 2: Invite Co-Parent Form */}
+      {/* Section 2: Family Request Approval Rule Settings */}
       {isOwner && (
         <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
           <div className="pb-3 border-b border-slate-800">
-            <h2 className="text-sm font-bold text-white uppercase tracking-wider">Invite Co-Parent</h2>
-            <p className="text-xs text-slate-400">Send an expiring, one-time invitation link to your spouse or co-guardian</p>
+            <h2 className="text-sm font-bold text-white uppercase tracking-wider">Access Request Approval Rule</h2>
+            <p className="text-xs text-slate-400">Configure which family members can approve website and screen time requests</p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-xl">
+            <label className={`p-4 rounded-xl border cursor-pointer transition ${
+              approvalRule === 'OWNER_OR_PARENT'
+                ? 'bg-emerald-500/10 border-emerald-500/40 text-white'
+                : 'bg-slate-950/40 border-slate-800 text-slate-400'
+            }`}>
+              <input
+                type="radio"
+                name="approvalRule"
+                checked={approvalRule === 'OWNER_OR_PARENT'}
+                onChange={() => handleSaveApprovalRule('OWNER_OR_PARENT')}
+                disabled={savingSettings}
+                className="sr-only"
+              />
+              <div className="text-xs font-bold text-emerald-400">Owner or Any Parent (Default)</div>
+              <div className="text-[11px] text-slate-400 mt-1">Both Family Owner and authorized Parents can approve requests.</div>
+            </label>
+
+            <label className={`p-4 rounded-xl border cursor-pointer transition ${
+              approvalRule === 'OWNER_ONLY'
+                ? 'bg-amber-500/10 border-amber-500/40 text-white'
+                : 'bg-slate-950/40 border-slate-800 text-slate-400'
+            }`}>
+              <input
+                type="radio"
+                name="approvalRule"
+                checked={approvalRule === 'OWNER_ONLY'}
+                onChange={() => handleSaveApprovalRule('OWNER_ONLY')}
+                disabled={savingSettings}
+                className="sr-only"
+              />
+              <div className="text-xs font-bold text-amber-400">Owner Only</div>
+              <div className="text-[11px] text-slate-400 mt-1">Only the Family Owner can grant approvals or bonus time.</div>
+            </label>
+          </div>
+        </section>
+      )}
+
+      {/* Section 3: Invite Co-Parent Form */}
+      {isOwner && (
+        <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
+          <div className="pb-3 border-b border-slate-800">
+            <h2 className="text-sm font-bold text-white uppercase tracking-wider">Invite Member</h2>
+            <p className="text-xs text-slate-400">Send an expiring, one-time invitation link to your spouse or guardian</p>
           </div>
 
           <form onSubmit={handleSendInvite} className="space-y-4 max-w-lg">
             <div>
-              <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Co-Parent Email</label>
+              <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Email Address</label>
               <input
                 type="email"
                 required
@@ -195,7 +297,7 @@ export const FamilyManagementPage: React.FC = () => {
                     className="sr-only"
                   />
                   <div className="text-xs font-bold text-emerald-400">Parent (Full Controls)</div>
-                  <div className="text-[11px] text-slate-400 mt-1">Can approve requests, edit website rules, and pause internet</div>
+                  <div className="text-[11px] text-slate-400 mt-1">Can manage rules, pause internet, and approve requests</div>
                 </label>
 
                 <label className={`p-3 rounded-xl border cursor-pointer transition ${
@@ -211,7 +313,7 @@ export const FamilyManagementPage: React.FC = () => {
                     className="sr-only"
                   />
                   <div className="text-xs font-bold text-indigo-400">Viewer (Read Only)</div>
-                  <div className="text-[11px] text-slate-400 mt-1">Can view protection status and child activity, cannot change rules</div>
+                  <div className="text-[11px] text-slate-400 mt-1">Can view protection status and activity, cannot change rules</div>
                 </label>
               </div>
             </div>
@@ -252,7 +354,7 @@ export const FamilyManagementPage: React.FC = () => {
         </section>
       )}
 
-      {/* Section 3: Pending Invitations */}
+      {/* Section 4: Pending Invitations */}
       {familyData?.invitations?.length > 0 && (
         <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
           <div className="pb-3 border-b border-slate-800">
@@ -288,7 +390,7 @@ export const FamilyManagementPage: React.FC = () => {
         </section>
       )}
 
-      {/* Section 4: Family Activity Audit Feed */}
+      {/* Section 5: Family Activity Audit Feed */}
       <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
         <div className="pb-3 border-b border-slate-800">
           <h2 className="text-sm font-bold text-white uppercase tracking-wider">Family Audit Trail</h2>
@@ -314,7 +416,7 @@ export const FamilyManagementPage: React.FC = () => {
         </div>
       </section>
 
-      {/* Section 5: Transfer Family Ownership */}
+      {/* Section 6: Transfer Family Ownership with Mandatory Step-Up */}
       {isOwner && familyData?.members?.length > 1 && (
         <section className="bg-slate-900 border border-rose-900/40 rounded-2xl p-6 space-y-4 shadow-xl">
           <div className="pb-3 border-b border-slate-800">
@@ -349,11 +451,36 @@ export const FamilyManagementPage: React.FC = () => {
 
           {showTransferConfirm && (
             <div className="p-4 bg-rose-500/10 border border-rose-500/30 rounded-xl space-y-3 animate-fadeIn">
-              <div className="text-xs font-bold text-rose-300">⚠️ Confirm Irreversible Ownership Transfer</div>
+              <div className="text-xs font-bold text-rose-300">🔐 Step-Up Authentication Required</div>
               <p className="text-xs text-slate-300">
-                Are you sure you want to transfer family ownership? Only the new owner will be able to delete the family or remove co-parents.
+                Please enter your current account password and MFA code (if enabled) to authenticate this irreversible ownership transfer.
               </p>
-              <div className="flex gap-2">
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-300 mb-1">Your Password</label>
+                  <input
+                    type="password"
+                    required
+                    value={stepUpPassword}
+                    onChange={(e) => setStepUpPassword(e.target.value)}
+                    placeholder="Enter current password"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-rose-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-300 mb-1">TOTP / Recovery Code (if MFA active)</label>
+                  <input
+                    type="text"
+                    value={stepUpOtp}
+                    onChange={(e) => setStepUpOtp(e.target.value)}
+                    placeholder="6-digit OTP or recovery code"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-rose-500"
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-2 pt-2">
                 <button
                   onClick={() => setShowTransferConfirm(false)}
                   className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold rounded-lg"
@@ -362,10 +489,10 @@ export const FamilyManagementPage: React.FC = () => {
                 </button>
                 <button
                   onClick={handleTransferOwnership}
-                  disabled={transferring}
-                  className="px-4 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold rounded-lg shadow"
+                  disabled={transferring || !stepUpPassword}
+                  className="px-4 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold rounded-lg shadow disabled:opacity-50"
                 >
-                  {transferring ? 'Transferring...' : 'Yes, Transfer Ownership'}
+                  {transferring ? 'Verifying & Transferring...' : 'Verify Step-Up & Transfer Ownership'}
                 </button>
               </div>
             </div>

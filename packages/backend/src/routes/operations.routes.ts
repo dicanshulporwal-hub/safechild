@@ -1,17 +1,20 @@
 import { Router } from 'express';
 import { db } from '../db/store';
 import { authMiddleware, AuthenticatedRequest } from '../middleware/auth';
-import { deviceService } from '../services/device.service';
+import { requireVerifiedEmail } from '../middleware/requireVerifiedEmail';
+import { requireSystemAdmin } from '../middleware/rbac';
 import { notificationService } from '../services/notification.service';
 import { timelineService } from '../services/timeline.service';
 import { policyService } from '../services/policy.service';
 import { evaluatePolicyDetailed } from '@safebrowse/shared';
+import { rbacService, FamilyPermission, SystemPermission } from '../services/rbac.service';
 
 export const operationsRouter = Router();
 
-// Beta Operations Dashboard Metrics (Internal Admin / Operator view)
-operationsRouter.get('/metrics', authMiddleware, (req: AuthenticatedRequest, res) => {
-  const familiesCount = db.users.size;
+// Beta Operations Dashboard Metrics — Protected by SYSTEM_ADMIN role
+operationsRouter.get('/metrics', authMiddleware, requireVerifiedEmail, requireSystemAdmin(SystemPermission.SYSTEM_OPERATIONS_READ), (req: AuthenticatedRequest, res) => {
+  const familiesCount = db.families.size;
+  const usersCount = db.users.size;
   const childrenCount = db.children.size;
   const allDevices = Array.from(db.devices.values());
   const devicesCount = allDevices.length;
@@ -38,6 +41,7 @@ operationsRouter.get('/metrics', authMiddleware, (req: AuthenticatedRequest, res
 
   res.json({
     familiesCount,
+    usersCount,
     childrenCount,
     devicesCount,
     healthBreakdown: {
@@ -52,20 +56,36 @@ operationsRouter.get('/metrics', authMiddleware, (req: AuthenticatedRequest, res
 });
 
 // Notifications feed for authenticated parent
-operationsRouter.get('/notifications', authMiddleware, (req: AuthenticatedRequest, res) => {
+operationsRouter.get('/notifications', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
   const list = notificationService.getNotificationsForParent(req.userId!);
   res.json(list);
 });
 
-// Protection Timeline for child
-operationsRouter.get('/timeline/:childId', authMiddleware, (req: AuthenticatedRequest, res) => {
+// Protection Timeline for child (Requires family membership & CHILD_READ)
+operationsRouter.get('/timeline/:childId', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
+  const family = rbacService.getFamilyForChild(req.params.childId);
+  if (!family || !rbacService.getFamilyMembership(req.userId!, family.id)) {
+    return res.status(403).json({ error: 'Forbidden: You do not belong to this family.' });
+  }
+  if (!rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.CHILD_READ)) {
+    return res.status(403).json({ error: 'Forbidden: Insufficient family permissions.' });
+  }
+
   const list = timelineService.getEventsForChild(req.params.childId);
   res.json(list);
 });
 
-// Policy Simulator API (Evaluates domain against child's real policy engine)
-operationsRouter.post('/simulator/:childId', authMiddleware, (req: AuthenticatedRequest, res) => {
+// Policy Simulator API (Evaluates domain against child's real policy engine - Requires family membership & POLICY_READ)
+operationsRouter.post('/simulator/:childId', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
   try {
+    const family = rbacService.getFamilyForChild(req.params.childId);
+    if (!family || !rbacService.getFamilyMembership(req.userId!, family.id)) {
+      return res.status(403).json({ error: 'Forbidden: You do not belong to this family.' });
+    }
+    if (!rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.POLICY_READ)) {
+      return res.status(403).json({ error: 'Forbidden: Insufficient family permissions.' });
+    }
+
     const { domain, time } = req.body;
     if (!domain) {
       return res.status(400).json({ error: 'domain is required for simulation.' });
@@ -93,7 +113,7 @@ operationsRouter.get('/status', (req, res) => {
       { name: 'Policy Synchronization Engine', status: 'OPERATIONAL', syncRate: '99.92%' },
       { name: 'DNS Filtering Engine', status: 'OPERATIONAL', avgLookupMs: 0.04 },
       { name: 'High-Value Alerting Service', status: 'OPERATIONAL', queueSize: 0 },
-      { name: 'Beta Support & Rollback Gateway', status: 'OPERATIONAL', targetRelease: '1.0.0' },
+      { name: 'Admin Fleet & Operations Gateway', status: 'OPERATIONAL', targetRelease: '1.1.0' },
     ],
   });
 });

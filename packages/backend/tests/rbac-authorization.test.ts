@@ -1,0 +1,492 @@
+import { describe, it, before, after } from 'node:test';
+import assert from 'node:assert';
+import http from 'node:http';
+import { app } from '../src/server';
+import { db, ParentUser } from '../src/db/store';
+import { authService } from '../src/services/auth.service';
+import { familyService } from '../src/services/family.service';
+import { childService } from '../src/services/child.service';
+import { deviceService } from '../src/services/device.service';
+import { policyService } from '../src/services/policy.service';
+import { requestService } from '../src/services/request.service';
+import { usageService } from '../src/services/usage.service';
+import { rbacService, SystemPermission, FamilyPermission } from '../src/services/rbac.service';
+import { nanoid } from 'nanoid';
+
+describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization Suite', () => {
+  let testServer: http.Server;
+  let baseUrl: string;
+
+  // Family A Entities
+  let ownerAId: string;
+  let ownerAToken: string;
+  let parentAId: string;
+  let parentAToken: string;
+  let viewerAId: string;
+  let viewerAToken: string;
+  let familyAId: string;
+  let childAId: string;
+  let deviceAId: string;
+  let deviceAToken: string;
+
+  // Family B Entities
+  let ownerBId: string;
+  let ownerBToken: string;
+  let familyBId: string;
+  let childBId: string;
+
+  // System Admin Entity
+  let adminId: string;
+  let adminToken: string;
+
+  const testPassword = 'SafeBrowse-Password-15Chars!';
+
+  const makeRequest = async (
+    method: string,
+    endpoint: string,
+    headers: Record<string, string> = {},
+    body?: any
+  ): Promise<{ status: number; body: any; headers: http.IncomingHttpHeaders }> => {
+    return new Promise((resolve, reject) => {
+      const url = new URL(endpoint, baseUrl);
+      const reqHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...headers,
+      };
+
+      const payload = body ? JSON.stringify(body) : undefined;
+      if (payload) {
+        reqHeaders['Content-Length'] = Buffer.byteLength(payload).toString();
+      }
+
+      const req = http.request(
+        url,
+        {
+          method,
+          headers: reqHeaders,
+        },
+        (res) => {
+          let rawData = '';
+          res.on('data', (chunk) => {
+            rawData += chunk;
+          });
+          res.on('end', () => {
+            let parsedBody = {};
+            try {
+              parsedBody = rawData ? JSON.parse(rawData) : {};
+            } catch (e) {
+              parsedBody = { raw: rawData };
+            }
+            resolve({ status: res.statusCode || 500, body: parsedBody, headers: res.headers });
+          });
+        }
+      );
+
+      req.on('error', reject);
+      if (payload) {
+        req.write(payload);
+      }
+      req.end();
+    });
+  };
+
+  before(async () => {
+    testServer = http.createServer(app);
+    await new Promise<void>((resolve) => {
+      testServer.listen(0, '127.0.0.1', () => {
+        const address = testServer.address() as any;
+        baseUrl = `http://127.0.0.1:${address.port}`;
+        resolve();
+      });
+    });
+
+    // 1. Setup Family A: Owner, Parent, Viewer, Child, Device
+    const uOwnerA = authService.register(`owner-a-${nanoid(6)}@safebrowse.io`, testPassword, 'Owner A');
+    authService.verifyEmail(uOwnerA.emailVerificationToken);
+    ownerAId = uOwnerA.user.id;
+    ownerAToken = uOwnerA.accessToken;
+
+    const famA = familyService.getOrCreateUserFamily(ownerAId);
+    familyAId = famA.id;
+
+    // Create Child A
+    const { child: cA } = childService.createChild(ownerAId, 'Child A', 10);
+    childAId = cA.id;
+
+    // Pair Device A
+    const pairA = deviceService.generatePairingCode(ownerAId, childAId);
+    const { device: devA } = deviceService.pairDevice(pairA.code, 'Device A', 'windows', '1.0.0');
+    deviceAId = devA.id;
+    deviceAToken = devA.deviceToken;
+
+    // Invite & register Parent A
+    const invParentA = familyService.inviteParent(familyAId, ownerAId, `parent-a-${nanoid(6)}@safebrowse.io`, 'PARENT');
+    const uParentA = authService.register(invParentA.email, testPassword, 'Parent A');
+    authService.verifyEmail(uParentA.emailVerificationToken);
+    parentAId = uParentA.user.id;
+    parentAToken = uParentA.accessToken;
+    familyService.acceptInvitation(invParentA.token, parentAId);
+
+    // Invite & register Viewer A
+    const invViewerA = familyService.inviteParent(familyAId, ownerAId, `viewer-a-${nanoid(6)}@safebrowse.io`, 'VIEWER');
+    const uViewerA = authService.register(invViewerA.email, testPassword, 'Viewer A');
+    authService.verifyEmail(uViewerA.emailVerificationToken);
+    viewerAId = uViewerA.user.id;
+    viewerAToken = uViewerA.accessToken;
+    familyService.acceptInvitation(invViewerA.token, viewerAId);
+
+    // 2. Setup Family B: Owner, Child
+    const uOwnerB = authService.register(`owner-b-${nanoid(6)}@safebrowse.io`, testPassword, 'Owner B');
+    authService.verifyEmail(uOwnerB.emailVerificationToken);
+    ownerBId = uOwnerB.user.id;
+    ownerBToken = uOwnerB.accessToken;
+
+    const famB = familyService.getOrCreateUserFamily(ownerBId);
+    familyBId = famB.id;
+
+    const { child: cB } = childService.createChild(ownerBId, 'Child B', 12);
+    childBId = cB.id;
+
+    // 3. Setup System Administrator
+    const uAdmin = authService.register(`admin-${nanoid(6)}@safebrowse.io`, testPassword, 'System Administrator');
+    authService.verifyEmail(uAdmin.emailVerificationToken);
+    adminId = uAdmin.user.id;
+    adminToken = uAdmin.accessToken;
+    rbacService.bootstrapDevAdmin(adminId);
+  });
+
+  after(() => {
+    if (testServer) {
+      testServer.close();
+    }
+  });
+
+  describe('1. System Admin vs Family Roles Isolation', () => {
+    it('1. should reject normal parent accessing system-admin endpoints (403)', async () => {
+      const res = await makeRequest('GET', '/api/admin/metrics', {
+        Authorization: `Bearer ${parentAToken}`,
+      });
+      assert.strictEqual(res.status, 403);
+      assert.match(res.body.error, /System administrator privilege required/i);
+    });
+
+    it('2. should reject Family OWNER accessing system-admin endpoints (403 - Owner is not System Admin)', async () => {
+      const res = await makeRequest('GET', '/api/admin/fleet', {
+        Authorization: `Bearer ${ownerAToken}`,
+      });
+      assert.strictEqual(res.status, 403);
+      assert.match(res.body.error, /System administrator privilege required/i);
+    });
+
+    it('3. should allow SYSTEM_ADMIN to access protected administrative operations (200)', async () => {
+      const res = await makeRequest('GET', '/api/admin/metrics', {
+        Authorization: `Bearer ${adminToken}`,
+      });
+      assert.strictEqual(res.status, 200);
+      assert.ok(res.body.devicesCount !== undefined);
+      assert.ok(res.body.healthBreakdown !== undefined);
+    });
+
+    it('3b. should record append-only audit event on privileged admin rollback', async () => {
+      const res = await makeRequest(
+        'POST',
+        '/api/admin/rollback',
+        { Authorization: `Bearer ${adminToken}` },
+        { targetVersion: '1.0.0', reason: 'Automated test emergency rollback' }
+      );
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.success, true);
+
+      // Verify audit log
+      const auditRes = await makeRequest('GET', '/api/admin/audit', {
+        Authorization: `Bearer ${adminToken}`,
+      });
+      assert.strictEqual(auditRes.status, 200);
+      assert.ok(Array.isArray(auditRes.body.logs));
+      const hasRollbackLog = auditRes.body.logs.some((l: any) => l.action === 'EMERGENCY_ROLLBACK_TRIGGERED');
+      assert.strictEqual(hasRollbackLog, true);
+    });
+  });
+
+  describe('2. Family Role Permissions & Co-Parent Access', () => {
+    it('4. should allow OWNER to manage family members (change role and settings)', async () => {
+      // OWNER updates family settings
+      const patchRes = await makeRequest(
+        'PATCH',
+        '/api/family',
+        { Authorization: `Bearer ${ownerAToken}` },
+        { familyId: familyAId, name: "Family A (Updated by Owner)" }
+      );
+      assert.strictEqual(patchRes.status, 200);
+      assert.strictEqual(patchRes.body.family.name, "Family A (Updated by Owner)");
+    });
+
+    it('5. should allow PARENT to manage permitted child resources (add rule, update pause)', async () => {
+      const res = await makeRequest(
+        'POST',
+        `/api/policies/child/${childAId}/rules`,
+        { Authorization: `Bearer ${parentAToken}` },
+        { domain: 'minecraft.net', action: 'BLOCK', reason: 'School hours block' }
+      );
+      assert.strictEqual(res.status, 200);
+      assert.ok(res.body.rules.some((r: any) => r.domain === 'minecraft.net'));
+    });
+
+    it('6. should reject VIEWER mutating child policies with 403 Forbidden', async () => {
+      const res = await makeRequest(
+        'POST',
+        `/api/policies/child/${childAId}/rules`,
+        { Authorization: `Bearer ${viewerAToken}` },
+        { domain: 'roblox.com', action: 'BLOCK' }
+      );
+      assert.strictEqual(res.status, 403);
+      assert.match(res.body.error, /Forbidden/i);
+    });
+
+    it('6b. should reject VIEWER mutating screen-time budgets with 403 Forbidden', async () => {
+      const res = await makeRequest(
+        'POST',
+        `/api/usage/child/${childAId}/budget`,
+        { Authorization: `Bearer ${viewerAToken}` },
+        { target: 'youtube.com', targetType: 'DOMAIN', dailyLimitMinutes: 30 }
+      );
+      assert.strictEqual(res.status, 403);
+      assert.match(res.body.error, /Forbidden/i);
+    });
+  });
+
+  describe('3. Access Request Approval & Family Rules', () => {
+    let requestId: string;
+
+    before(async () => {
+      // Child A creates request from Device A
+      const reqRes = await makeRequest(
+        'POST',
+        '/api/requests',
+        { 'x-device-id': deviceAId, 'x-device-token': deviceAToken },
+        { domain: 'scratch.mit.edu', reason: 'Coding homework' }
+      );
+      requestId = reqRes.body.id;
+    });
+
+    it('7. should reject VIEWER attempting to approve an access request with 403', async () => {
+      const res = await makeRequest(
+        'POST',
+        `/api/requests/${requestId}/resolve`,
+        { Authorization: `Bearer ${viewerAToken}` },
+        { action: 'APPROVE', duration: '30m' }
+      );
+      assert.strictEqual(res.status, 403);
+      assert.match(res.body.error, /Forbidden/i);
+    });
+
+    it('8a. should reject PARENT approval when family approval rule is set to OWNER_ONLY', async () => {
+      // Set approval rule to OWNER_ONLY
+      await makeRequest(
+        'PATCH',
+        '/api/family',
+        { Authorization: `Bearer ${ownerAToken}` },
+        { familyId: familyAId, approvalRule: 'OWNER_ONLY' }
+      );
+
+      const res = await makeRequest(
+        'POST',
+        `/api/requests/${requestId}/resolve`,
+        { Authorization: `Bearer ${parentAToken}` },
+        { action: 'APPROVE', duration: '30m' }
+      );
+      assert.strictEqual(res.status, 403);
+      assert.match(res.body.error, /requires the Family Owner/i);
+    });
+
+    it('8b. should allow PARENT approval when family approval rule is set to OWNER_OR_PARENT', async () => {
+      // Set approval rule back to OWNER_OR_PARENT
+      await makeRequest(
+        'PATCH',
+        '/api/family',
+        { Authorization: `Bearer ${ownerAToken}` },
+        { familyId: familyAId, approvalRule: 'OWNER_OR_PARENT' }
+      );
+
+      const res = await makeRequest(
+        'POST',
+        `/api/requests/${requestId}/resolve`,
+        { Authorization: `Bearer ${parentAToken}` },
+        { action: 'APPROVE', duration: '30m' }
+      );
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.request.status, 'APPROVED');
+    });
+  });
+
+  describe('4. Cross-Family Isolation & Tenancy Verification', () => {
+    it('9a. should reject Parent A accessing Child B profile (403/404)', async () => {
+      const res = await makeRequest('GET', `/api/children/${childBId}`, {
+        Authorization: `Bearer ${parentAToken}`,
+      });
+      assert.strictEqual(res.status, 403);
+    });
+
+    it('9b. should reject Parent A mutating Child B policy (403)', async () => {
+      const res = await makeRequest(
+        'POST',
+        `/api/policies/child/${childBId}/rules`,
+        { Authorization: `Bearer ${parentAToken}` },
+        { domain: 'cross-site.com', action: 'BLOCK' }
+      );
+      assert.strictEqual(res.status, 403);
+    });
+
+    it('9c. should reject Parent B accessing Device A (403/404)', async () => {
+      const res = await makeRequest('POST', `/api/devices/${deviceAId}/diagnostics`, {
+        Authorization: `Bearer ${ownerBToken}`,
+      });
+      assert.strictEqual(res.status, 403);
+    });
+
+    it('9d. should reject Parent B modifying Child A usage budget (403)', async () => {
+      const res = await makeRequest(
+        'POST',
+        `/api/usage/child/${childAId}/budget`,
+        { Authorization: `Bearer ${ownerBToken}` },
+        { target: 'youtube.com', targetType: 'DOMAIN', dailyLimitMinutes: 20 }
+      );
+      assert.strictEqual(res.status, 403);
+    });
+  });
+
+  describe('5. Family Ownership Transfer & Invariants', () => {
+    it('10. should prevent removal or demotion of the final Family OWNER', async () => {
+      const membership = Array.from(db.familyMembers.values()).find(
+        (m) => m.familyId === familyAId && m.userId === ownerAId
+      )!;
+
+      const res = await makeRequest('DELETE', `/api/family/members/${membership.id}?familyId=${familyAId}`, {
+        Authorization: `Bearer ${ownerAToken}`,
+      });
+      assert.strictEqual(res.status, 403);
+      assert.match(res.body.error, /Cannot remove the Family Owner/i);
+    });
+
+    it('11. should reject ownership transfer without step-up authentication password (403)', async () => {
+      const res = await makeRequest(
+        'POST',
+        '/api/family/transfer-ownership',
+        { Authorization: `Bearer ${ownerAToken}` },
+        { familyId: familyAId, newOwnerUserId: parentAId }
+      );
+      assert.strictEqual(res.status, 403);
+      assert.match(res.body.error, /password must be provided|step-up/i);
+    });
+
+    it('12. should succeed ownership transfer with valid step-up password and persist single-owner invariant', async () => {
+      const res = await makeRequest(
+        'POST',
+        '/api/family/transfer-ownership',
+        { Authorization: `Bearer ${ownerAToken}` },
+        { familyId: familyAId, newOwnerUserId: parentAId, password: testPassword }
+      );
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.success, true);
+
+      // Verify Family A owner is now Parent A
+      const fam = db.families.get(familyAId)!;
+      assert.strictEqual(fam.ownerUserId, parentAId);
+
+      // Invariant: Exactly ONE active owner in Family A
+      const owners = Array.from(db.familyMembers.values()).filter(
+        (m) => m.familyId === familyAId && m.role === 'OWNER'
+      );
+      assert.strictEqual(owners.length, 1);
+      assert.strictEqual(owners[0].userId, parentAId);
+
+      // Old owner is now PARENT
+      const oldOwnerMem = Array.from(db.familyMembers.values()).find(
+        (m) => m.familyId === familyAId && m.userId === ownerAId
+      )!;
+      assert.strictEqual(oldOwnerMem.role, 'PARENT');
+    });
+  });
+
+  describe('6. Invitation Token Cryptography & Lifecycle', () => {
+    let invitationToken: string;
+    let inviteId: string;
+    let inviteEmail: string;
+
+    it('14. should generate hashed, expiring, single-use invitation token', async () => {
+      inviteEmail = `new-member-${nanoid(6)}@safebrowse.io`;
+      // Parent A is now the OWNER
+      const res = await makeRequest(
+        'POST',
+        '/api/family/invitations',
+        { Authorization: `Bearer ${parentAToken}` },
+        { familyId: familyAId, email: inviteEmail, role: 'VIEWER' }
+      );
+      assert.strictEqual(res.status, 200);
+      assert.ok(res.body.invitation);
+      assert.ok(res.body.invitation.token); // Raw token returned for delivery
+      invitationToken = res.body.invitation.token;
+      inviteId = res.body.invitation.id;
+
+      // Stored record in DB must hold SHA-256 hash — NOT raw token
+      const storedInv = db.familyInvitations.get(inviteId)!;
+      assert.ok(storedInv.tokenHash);
+      assert.notStrictEqual(storedInv.tokenHash, invitationToken);
+    });
+
+    it('14b. should allow recipient to accept invitation and atomically consume it', async () => {
+      const uNew = authService.register(inviteEmail, testPassword, 'New Viewer');
+      authService.verifyEmail(uNew.emailVerificationToken);
+
+      const acceptRes = await makeRequest(
+        'POST',
+        '/api/family/invitations/accept',
+        { Authorization: `Bearer ${uNew.accessToken}` },
+        { token: invitationToken }
+      );
+      assert.strictEqual(acceptRes.status, 200);
+      assert.strictEqual(acceptRes.body.success, true);
+      assert.strictEqual(acceptRes.body.role, 'VIEWER');
+
+      // Replay attempt must fail (Single-use invariant)
+      const replayRes = await makeRequest(
+        'POST',
+        '/api/family/invitations/accept',
+        { Authorization: `Bearer ${uNew.accessToken}` },
+        { token: invitationToken }
+      );
+      assert.strictEqual(replayRes.status, 400);
+      assert.match(replayRes.body.error, /Invalid or expired/i);
+    });
+
+    it('15. should reject acceptance of a revoked invitation', async () => {
+      const revokeEmail = `revoked-${nanoid(6)}@safebrowse.io`;
+      const invRes = await makeRequest(
+        'POST',
+        '/api/family/invitations',
+        { Authorization: `Bearer ${parentAToken}` },
+        { familyId: familyAId, email: revokeEmail, role: 'PARENT' }
+      );
+      const token = invRes.body.invitation.token;
+      const id = invRes.body.invitation.id;
+
+      // Revoke
+      await makeRequest('DELETE', `/api/family/invitations/${id}`, {
+        Authorization: `Bearer ${parentAToken}`,
+      });
+
+      // Attempt accept
+      const uRev = authService.register(revokeEmail, testPassword, 'Revoked User');
+      authService.verifyEmail(uRev.emailVerificationToken);
+
+      const acceptRes = await makeRequest(
+        'POST',
+        '/api/family/invitations/accept',
+        { Authorization: `Bearer ${uRev.accessToken}` },
+        { token }
+      );
+      assert.strictEqual(acceptRes.status, 400);
+      assert.match(acceptRes.body.error, /Invalid or expired/i);
+    });
+  });
+});

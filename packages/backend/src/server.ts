@@ -11,6 +11,7 @@ import { policyRouter } from './routes/policy.routes';
 import { requestRouter } from './routes/request.routes';
 import { activityRouter } from './routes/activity.routes';
 import { operationsRouter } from './routes/operations.routes';
+import { adminRouter } from './routes/admin.routes';
 import { feedbackRouter } from './routes/feedback.routes';
 import { supportRouter } from './routes/support.routes';
 import { usageRouter } from './routes/usage.routes';
@@ -65,6 +66,7 @@ app.use('/api/activity', activityRouter);
 app.use('/api/family', authMiddleware, requireVerifiedEmail, familyRouter);
 app.use('/api/referrals', authMiddleware, requireVerifiedEmail, referralRouter);
 app.use('/api/operations', authMiddleware, requireVerifiedEmail, operationsRouter);
+app.use('/api/admin', adminRouter);
 app.use('/api/feedback', authMiddleware, requireVerifiedEmail, feedbackRouter);
 app.use('/api/support', authMiddleware, requireVerifiedEmail, supportRouter);
 

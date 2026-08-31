@@ -10,6 +10,7 @@ import { wsManager } from './websocket.service';
 import { policyService } from './policy.service';
 import { familyService } from './family.service';
 import { usageService } from './usage.service';
+import { rbacService, FamilyPermission } from './rbac.service';
 
 export interface ExtendedAccessRequest extends AccessRequest {
   resolvedByUserId?: string;
@@ -60,11 +61,11 @@ export class RequestService {
   }
 
   /**
-   * Parent resolves access request with strict multi-parent tenancy validation
+   * Parent resolves access request with strict family role and approval rule enforcement
    */
   public resolveRequest(
     requestId: string,
-    parentId: string,
+    actorUserId: string,
     action: 'APPROVE' | 'DENY',
     duration?: TemporaryApprovalDuration
   ): { request: ExtendedAccessRequest; policy?: any } {
@@ -78,30 +79,26 @@ export class RequestService {
       throw new Error('Child profile not found.');
     }
 
-    // Validate if parentId is owner OR authorized family member of child's family
-    const childFamilies = Array.from(db.familyMembers.values())
-      .filter((m) => m.userId === child.parentId)
-      .map((m) => m.familyId);
+    const family = rbacService.getFamilyForRequest(requestId);
+    if (!family || !rbacService.getFamilyMembership(actorUserId, family.id)) {
+      throw new Error('Forbidden. You do not belong to the family associated with this request.');
+    }
 
-    const isAuthorized =
-      child.parentId === parentId ||
-      Array.from(db.familyMembers.values()).some(
-        (m) => m.userId === parentId && childFamilies.includes(m.familyId)
-      );
-
-    if (!isAuthorized) {
-      throw new Error('Forbidden. You do not have permission to resolve requests for this child.');
+    // Role & Approval Rule Validation
+    const approvalCheck = rbacService.canApproveRequest(actorUserId, requestId);
+    if (!approvalCheck.allowed) {
+      throw new Error(`Forbidden: ${approvalCheck.reason}`);
     }
 
     if (request.status !== 'PENDING') {
       throw new Error('REQUEST_ALREADY_RESOLVED: This request has already been processed by another parent.');
     }
 
-    const actor = db.users.get(parentId);
+    const actor = db.users.get(actorUserId);
     const actorName = actor ? actor.name : 'Parent';
 
     request.resolvedAt = new Date().toISOString();
-    request.resolvedByUserId = parentId;
+    request.resolvedByUserId = actorUserId;
     request.resolvedByName = actorName;
 
     let updatedPolicy = null;
@@ -123,9 +120,9 @@ export class RequestService {
         if (budget) {
           const minutes = duration === '1h' ? 60 : duration === '30m' ? 30 : 15;
           if (duration === 'today') {
-            usageService.setUnlimitedToday(request.childId, budget.id, parentId);
+            usageService.setUnlimitedToday(request.childId, budget.id, actorUserId);
           } else {
-            usageService.addBonusTime(request.childId, budget.id, minutes, parentId);
+            usageService.addBonusTime(request.childId, budget.id, minutes, actorUserId);
           }
         }
       }
@@ -145,10 +142,10 @@ export class RequestService {
     db.requests.set(request.id, request as any);
     db.save();
 
-    // Log in Family Audit Trail with full metadata
+    // Log in Family Audit Trail
     familyService.logAudit(
-      childFamilies[0] || 'fam-default',
-      parentId,
+      family.id,
+      actorUserId,
       actorName,
       'REQUEST_RESOLVED',
       JSON.stringify({
