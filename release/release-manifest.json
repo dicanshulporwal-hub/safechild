@@ -1,0 +1,37 @@
+{
+  "stage": "Stage 11",
+  "step": "Step 3 - System Admin RBAC and Family Authorization",
+  "timestamp": "2026-08-31T12:03:37.551Z",
+  "branch": "security/stage11-step3-rbac",
+  "commitHash": "b928dd485052b19c3339dd83bf4a1bba58fca595",
+  "archive": {
+    "filename": "safebrowse-stage11-step3-review.zip",
+    "sizeBytes": 326090,
+    "sizeKb": "318.4",
+    "sha256": "86d9f841f3fbd279649c32e83bef491e5c20c2e331c656666feeaf552a88b6fd"
+  },
+  "testResults": {
+    "totalTests": 75,
+    "passed": 75,
+    "failed": 0,
+    "suites": 21,
+    "step3RbacTestsPassed": 16,
+    "step2IdentityTestsPassed": 28,
+    "policyEngineTestsPassed": 8,
+    "stage3EdgeCaseTestsPassed": 23
+  },
+  "probeResults": {
+    "parentAccessedSystemAdmin": false,
+    "familyOwnerTreatedAsSystemAdmin": false,
+    "viewerMutatedPolicy": false,
+    "viewerApprovedRequest": false,
+    "parentBypassedOwnerOnlyApproval": false,
+    "crossFamilyChildAccessed": false,
+    "crossFamilyDeviceAccessed": false,
+    "crossFamilyUsageChanged": false,
+    "finalOwnerRemoved": false,
+    "ownershipTransferredWithoutStepUp": false,
+    "invitationReused": false
+  },
+  "securityStatus": "CERTIFIED_SECURE"
+}
