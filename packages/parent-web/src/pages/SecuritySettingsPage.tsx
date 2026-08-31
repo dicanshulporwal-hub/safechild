@@ -24,7 +24,7 @@ export const SecuritySettingsPage: React.FC = () => {
   const [savingPassword, setSavingPassword] = useState(false);
 
   // MFA states
-  const [mfaSetupData, setMfaSetupData] = useState<{ secret: string; otpAuthUrl: string; qrPlaceholder: string } | null>(null);
+  const [mfaSetupData, setMfaSetupData] = useState<{ secret: string; otpAuthUrl: string; qrDataUrl?: string; qrPlaceholder?: string } | null>(null);
   const [otpCode, setOtpCode] = useState('');
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [disableMfaPassword, setDisableMfaPassword] = useState('');
@@ -240,7 +240,7 @@ export const SecuritySettingsPage: React.FC = () => {
                 <h3 className="text-xs font-bold uppercase text-indigo-400">Step-by-Step MFA Setup</h3>
                 <div className="flex flex-col md:flex-row items-center gap-6">
                   <img
-                    src={mfaSetupData.qrPlaceholder}
+                    src={mfaSetupData.qrDataUrl || mfaSetupData.qrPlaceholder}
                     alt="MFA QR Code"
                     className="w-36 h-36 bg-white p-2 rounded-xl shadow"
                   />

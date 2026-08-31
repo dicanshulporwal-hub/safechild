@@ -2,23 +2,22 @@ import { Router } from 'express';
 import { requestService } from '../services/request.service';
 import { deviceService } from '../services/device.service';
 import { authMiddleware, AuthenticatedRequest } from '../middleware/auth';
+import { requireVerifiedEmail } from '../middleware/requireVerifiedEmail';
 import { childService } from '../services/child.service';
+
+import { deviceAuthMiddleware, AuthenticatedDeviceRequest } from '../middleware/deviceAuth';
 
 export const requestRouter = Router();
 
-// Child creates access request from blocked screen
-requestRouter.post('/', (req, res) => {
+// Child creates access request from blocked screen (Device authentication required)
+requestRouter.post('/', deviceAuthMiddleware, (req: AuthenticatedDeviceRequest, res) => {
   try {
-    const { childId, deviceId, domain, reason } = req.body;
-    if (!childId || !deviceId || !domain) {
-      return res.status(400).json({ error: 'childId, deviceId and domain are required.' });
+    const { domain, reason } = req.body;
+    if (!domain) {
+      return res.status(400).json({ error: 'domain is required.' });
     }
 
-    if (deviceService.isDeviceRevoked(deviceId)) {
-      return res.status(403).json({ error: 'Forbidden. Device credentials have been revoked.' });
-    }
-
-    const request = requestService.createRequest(childId, deviceId, domain, reason);
+    const request = requestService.createRequest(req.childId!, req.deviceId!, domain, reason);
     res.json(request);
   } catch (e: any) {
     res.status(400).json({ error: e.message });
@@ -26,7 +25,7 @@ requestRouter.post('/', (req, res) => {
 });
 
 // Parent resolves access request with strict tenancy validation
-requestRouter.post('/:id/resolve', authMiddleware, (req: AuthenticatedRequest, res) => {
+requestRouter.post('/:id/resolve', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
   try {
     const { action, duration } = req.body;
     if (!action || !['APPROVE', 'DENY'].includes(action)) {
@@ -44,13 +43,13 @@ requestRouter.post('/:id/resolve', authMiddleware, (req: AuthenticatedRequest, r
 });
 
 // Get pending requests for parent
-requestRouter.get('/pending', authMiddleware, (req: AuthenticatedRequest, res) => {
+requestRouter.get('/pending', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
   const requests = requestService.getPendingRequestsForParent(req.userId!);
   res.json(requests);
 });
 
 // Get all requests for a child
-requestRouter.get('/child/:childId', authMiddleware, (req: AuthenticatedRequest, res) => {
+requestRouter.get('/child/:childId', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
   const child = childService.getChild(req.params.childId);
   if (!child || child.parentId !== req.userId) {
     return res.status(404).json({ error: 'Child not found.' });

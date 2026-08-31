@@ -1,5 +1,7 @@
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
+import { generateSecret, generateURI, generateSync, verifySync } from 'otplib';
+import QRCode from 'qrcode';
 import { ParentUser } from '../db/store';
 
 export function getEncryptionKeyBuffer(): Buffer {
@@ -15,6 +17,14 @@ export function getEncryptionKeyBuffer(): Buffer {
   }
   const key = envKey || 'dev-only-safebrowse-mfa-aes256-key-32b!';
   return crypto.createHash('sha256').update(key).digest();
+}
+
+export function hashToken(rawToken: string): string {
+  return crypto.createHash('sha256').update(rawToken).digest('hex');
+}
+
+export function generateCryptoToken(prefix: string = ''): string {
+  return `${prefix}${crypto.randomBytes(32).toString('hex')}`;
 }
 
 const COMMON_PASSWORDS_BLACKLIST = new Set([
@@ -99,15 +109,135 @@ export function decryptMfaSecret(encryptedPayload: string): string {
 }
 
 /**
+ * Generate standards-compliant 160-bit Base32 MFA secret
+ */
+export function generateBase32Secret(): string {
+  return generateSecret({ length: 20 });
+}
+
+/**
+ * Generate standards-compliant otpauth URI
+ */
+export function generateOtpAuthUri(email: string, secret: string, issuer: string = 'SafeBrowse Family'): string {
+  return generateURI({
+    strategy: 'totp',
+    secret,
+    label: email,
+    issuer,
+    digits: 6,
+    period: 30,
+  });
+}
+
+/**
+ * Generate local offline QR code data URL (PNG)
+ */
+export async function generateLocalQrDataUrl(otpAuthUrl: string): Promise<string> {
+  return QRCode.toDataURL(otpAuthUrl, {
+    errorCorrectionLevel: 'M',
+    margin: 2,
+    width: 240,
+    color: {
+      dark: '#0f172a',
+      light: '#ffffff',
+    },
+  });
+}
+
+export interface TotpVerificationResult {
+  valid: boolean;
+  acceptedTimeStep?: number;
+}
+
+/**
+ * Returns the TOTP 30-second time step counter for a given Unix timestamp in seconds (or Date.now()).
+ */
+export function getCurrentTotpTimeStep(timeSec?: number): number {
+  const t = timeSec !== undefined ? timeSec : Math.floor(Date.now() / 1000);
+  return Math.floor(t / 30);
+}
+
+/**
+ * Generate a 6-digit TOTP code for a specific timestep or timestamp (supports controlled clock testing)
+ */
+export function generateTotpAtStep(secret: string, step: number): string {
+  return (generateSync as any)({
+    strategy: 'totp',
+    secret,
+    digits: 6,
+    period: 30,
+    epoch: step * 30,
+  });
+}
+
+/**
+ * Generate a 6-digit TOTP code for the current time (or specified timestamp in seconds)
+ */
+export function generateCurrentTotp(secret: string, timeSec?: number): string {
+  const step = getCurrentTotpTimeStep(timeSec);
+  return generateTotpAtStep(secret, step);
+}
+
+/**
+ * Verify TOTP token against permitted timestep window [current, current-1, current+1]
+ * and return the exact matching acceptedTimeStep.
+ */
+export function verifyTotpToken(
+  secret: string,
+  token: string,
+  timeSec?: number
+): TotpVerificationResult {
+  if (!token || !/^\d{6}$/.test(token.trim())) {
+    return { valid: false };
+  }
+  const cleanToken = token.trim();
+  const currentStep = getCurrentTotpTimeStep(timeSec);
+
+  // Permitted tolerance offsets: current step (0), past step (-1), future step (+1)
+  const windowOffsets = [0, -1, 1];
+
+  for (const offset of windowOffsets) {
+    const candidateStep = currentStep + offset;
+    try {
+      const candidateCode = generateTotpAtStep(secret, candidateStep);
+      if (candidateCode === cleanToken) {
+        return {
+          valid: true,
+          acceptedTimeStep: candidateStep,
+        };
+      }
+    } catch {
+      // Continue checking next window offset
+    }
+  }
+
+  return { valid: false };
+}
+
+/**
+ * Structured result from step-up authentication — tells caller which method was used
+ * so it can atomically consume a recovery code or record the consumed TOTP timestep.
+ */
+export interface StepUpResult {
+  method: 'TOTP' | 'RECOVERY_CODE';
+  recoveryCodeIndex?: number; // Index in user.mfaRecoveryCodes[] to splice — callers must do the splice
+  totpTimeStep?: number;      // Exact accepted TOTP time step that was verified — callers must persist this
+}
+
+/**
  * Step-up authentication validation:
- * Requires current password and, if MFA is enabled, 6-digit TOTP verification.
+ * Password is ALWAYS mandatory.
+ * When MFA is enabled, a 6-digit TOTP or recovery code is ALWAYS mandatory.
+ * Returns StepUpResult with exact acceptedTimeStep so callers can atomically consume credentials.
  */
 export function verifyStepUpAuth(
   user: ParentUser,
-  password?: string,
-  otpCode?: string
-): void {
-  if (!password) {
+  password: string,
+  otpCode?: string,
+  timeSec?: number
+): StepUpResult {
+  // Password is unconditionally required — no conditional check
+  if (!password || typeof password !== 'string' || password.trim() === '') {
     throw new Error('Step-up authentication failed: Current password is required.');
   }
 
@@ -116,41 +246,39 @@ export function verifyStepUpAuth(
   }
 
   if (user.mfaEnabled) {
-    if (!otpCode) {
-      throw new Error('Step-up authentication failed: 6-digit MFA code is required for this action.');
+    if (!otpCode || typeof otpCode !== 'string' || otpCode.trim() === '') {
+      throw new Error('Step-up authentication failed: MFA verification code is required for this action.');
     }
-    // Verify TOTP
     if (!user.mfaSecret) {
       throw new Error('MFA configuration error.');
     }
+    const cleanOtp = otpCode.trim().toUpperCase();
     const decryptedSecret = decryptMfaSecret(user.mfaSecret);
-    const expectedOtp = generateTotp(decryptedSecret);
-    if (otpCode.trim() !== expectedOtp) {
-      throw new Error('Step-up authentication failed: Invalid MFA verification code.');
+
+    // 1. Try TOTP first and get exact accepted time step
+    const totpResult = verifyTotpToken(decryptedSecret, cleanOtp, timeSec);
+    if (totpResult.valid && totpResult.acceptedTimeStep !== undefined) {
+      return {
+        method: 'TOTP',
+        totpTimeStep: totpResult.acceptedTimeStep,
+      };
     }
+
+    // 2. Fall back to recovery code check
+    if (user.mfaRecoveryCodes && user.mfaRecoveryCodes.length > 0) {
+      for (let i = 0; i < user.mfaRecoveryCodes.length; i++) {
+        if (bcrypt.compareSync(cleanOtp, user.mfaRecoveryCodes[i])) {
+          return {
+            method: 'RECOVERY_CODE',
+            recoveryCodeIndex: i,
+          };
+        }
+      }
+    }
+
+    throw new Error('Step-up authentication failed: Invalid MFA verification code.');
   }
-}
 
-/**
- * TOTP verification helper
- */
-export function generateTotp(secret: string, timeStep: number = 30): string {
-  const epoch = Math.floor(Date.now() / 1000);
-  const time = Math.floor(epoch / timeStep);
-  const timeBuffer = Buffer.alloc(8);
-  timeBuffer.writeBigInt64BE(BigInt(time));
-
-  const hmac = crypto.createHmac('sha1', Buffer.from(secret, 'hex'));
-  hmac.update(timeBuffer);
-  const digest = hmac.digest();
-
-  const offset = digest[digest.length - 1] & 0xf;
-  const binary =
-    ((digest[offset] & 0x7f) << 24) |
-    ((digest[offset + 1] & 0xff) << 16) |
-    ((digest[offset + 2] & 0xff) << 8) |
-    (digest[offset + 3] & 0xff);
-
-  const otp = (binary % 1000000).toString().padStart(6, '0');
-  return otp;
+  // No MFA enabled — password alone suffices
+  return { method: 'TOTP' };
 }

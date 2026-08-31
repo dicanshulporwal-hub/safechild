@@ -1,13 +1,14 @@
 import { Router } from 'express';
 import { deviceService } from '../services/device.service';
 import { authMiddleware, AuthenticatedRequest } from '../middleware/auth';
+import { requireVerifiedEmail } from '../middleware/requireVerifiedEmail';
 import { childService } from '../services/child.service';
 import { pairingRateLimiter } from '../middleware/rate-limiter';
 
 export const deviceRouter = Router();
 
-// Generate pairing code for a child (Parent auth required + Rate Limiting)
-deviceRouter.post('/pairing-code', authMiddleware, pairingRateLimiter, (req: AuthenticatedRequest, res) => {
+// Generate pairing code for a child (Parent auth required + Email Verified + Rate Limiting)
+deviceRouter.post('/pairing-code', authMiddleware, requireVerifiedEmail, pairingRateLimiter, (req: AuthenticatedRequest, res) => {
   try {
     const { childId } = req.body;
     if (!childId) {
@@ -41,17 +42,16 @@ deviceRouter.post('/claim', pairingRateLimiter, (req, res) => {
   }
 });
 
-// Periodic heartbeat from child agent
-deviceRouter.post('/heartbeat', (req, res) => {
+import { deviceAuthMiddleware, AuthenticatedDeviceRequest } from '../middleware/deviceAuth';
+
+// Periodic heartbeat from child agent (Device authentication required)
+deviceRouter.post('/heartbeat', deviceAuthMiddleware, (req: AuthenticatedDeviceRequest, res) => {
   try {
-    const { deviceId, deviceToken, activePolicyVersion, enforcementActive, platform, agentVersion } = req.body;
-    if (!deviceId || !deviceToken) {
-      return res.status(400).json({ error: 'deviceId and deviceToken are required.' });
-    }
+    const { activePolicyVersion, enforcementActive, platform, agentVersion } = req.body;
 
     const response = deviceService.processHeartbeat({
-      deviceId,
-      deviceToken,
+      deviceId: req.deviceId!,
+      deviceToken: req.device!.deviceToken,
       activePolicyVersion: activePolicyVersion || 1,
       enforcementActive: enforcementActive !== false,
       platform: platform || 'windows',
@@ -65,7 +65,7 @@ deviceRouter.post('/heartbeat', (req, res) => {
 });
 
 // Revoke lost/compromised device credentials
-deviceRouter.post('/:id/revoke', authMiddleware, (req: AuthenticatedRequest, res) => {
+deviceRouter.post('/:id/revoke', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
   try {
     deviceService.revokeDevice(req.params.id, req.userId!);
     res.json({ success: true, message: 'Device credentials permanently revoked.' });
@@ -92,13 +92,13 @@ deviceRouter.post('/:id/rotate-token', (req, res) => {
 });
 
 // Get all devices for parent
-deviceRouter.get('/', authMiddleware, (req: AuthenticatedRequest, res) => {
+deviceRouter.get('/', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
   const devices = deviceService.getDevicesForParent(req.userId!);
   res.json(devices);
 });
 
 // Get devices for a specific child
-deviceRouter.get('/child/:childId', authMiddleware, (req: AuthenticatedRequest, res) => {
+deviceRouter.get('/child/:childId', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
   const child = childService.getChild(req.params.childId);
   if (!child || child.parentId !== req.userId) {
     return res.status(404).json({ error: 'Child not found.' });
@@ -108,7 +108,7 @@ deviceRouter.get('/child/:childId', authMiddleware, (req: AuthenticatedRequest, 
 });
 
 // Self-Diagnostics ("Run Protection Check") - Parent diagnostic verification
-deviceRouter.post('/:id/diagnostics', authMiddleware, (req: AuthenticatedRequest, res) => {
+deviceRouter.post('/:id/diagnostics', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
   try {
     const device = deviceService.getDevice(req.params.id);
     if (!device || device.parentId !== req.userId) {
@@ -159,7 +159,7 @@ deviceRouter.post('/:id/diagnostics', authMiddleware, (req: AuthenticatedRequest
 });
 
 // Remove / unpair device
-deviceRouter.delete('/:id', authMiddleware, (req: AuthenticatedRequest, res) => {
+deviceRouter.delete('/:id', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
   try {
     deviceService.removeDevice(req.params.id, req.userId!);
     res.json({ success: true });

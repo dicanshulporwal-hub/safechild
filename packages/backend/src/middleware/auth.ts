@@ -3,20 +3,31 @@ import { authService } from '../services/auth.service';
 
 export interface AuthenticatedRequest extends Request {
   userId?: string;
+  sessionId?: string;
+  tokenVersion?: number;
 }
 
 export function authMiddleware(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  let token: string | undefined;
+
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Unauthorized. Token missing.' });
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.split(' ')[1];
+  } else if ((req as any).cookies && (req as any).cookies.accessToken) {
+    token = (req as any).cookies.accessToken;
   }
 
-  const token = authHeader.split(' ')[1];
+  if (!token) {
+    return res.status(401).json({ error: 'Unauthorized. Authentication token missing.' });
+  }
+
   try {
     const decoded = authService.verifyToken(token);
     req.userId = decoded.userId;
+    req.sessionId = decoded.sessionId;
+    req.tokenVersion = decoded.tokenVersion;
     next();
-  } catch (e) {
-    return res.status(401).json({ error: 'Unauthorized. Invalid token.' });
+  } catch (e: any) {
+    return res.status(401).json({ error: e.message || 'Unauthorized. Invalid, expired or revoked token.' });
   }
 }

@@ -7,6 +7,8 @@ node_modules/
 .env
 .env.*
 !.env.example
+!.env.production.example
+!.env*.example
 
 # Local databases and data stores
 data/

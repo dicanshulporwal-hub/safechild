@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { policyService } from '../services/policy.service';
 import { authMiddleware, AuthenticatedRequest } from '../middleware/auth';
+import { requireVerifiedEmail } from '../middleware/requireVerifiedEmail';
 import { childService } from '../services/child.service';
 import { deviceService } from '../services/device.service';
 import { db } from '../db/store';
@@ -8,7 +9,7 @@ import { db } from '../db/store';
 export const policyRouter = Router();
 
 // Get policy for a child (Parent auth)
-policyRouter.get('/child/:childId', authMiddleware, (req: AuthenticatedRequest, res) => {
+policyRouter.get('/child/:childId', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
   const child = childService.getChild(req.params.childId);
   if (!child || child.parentId !== req.userId) {
     return res.status(404).json({ error: 'Child profile not found.' });
@@ -17,19 +18,12 @@ policyRouter.get('/child/:childId', authMiddleware, (req: AuthenticatedRequest, 
   res.json(policy);
 });
 
-// Get policy for a child device (Device fetches during sync)
-policyRouter.get('/device/:deviceId', (req, res) => {
-  const device = db.devices.get(req.params.deviceId);
-  if (!device) {
-    return res.status(404).json({ error: 'Device not found.' });
-  }
+import { deviceAuthMiddleware, AuthenticatedDeviceRequest } from '../middleware/deviceAuth';
 
-  if (deviceService.isDeviceRevoked(device.id)) {
-    return res.status(403).json({ error: 'Forbidden. Device credentials have been revoked.' });
-  }
-
+// Get policy for a child device (Device fetches during sync - Device authentication required)
+policyRouter.get('/device/:deviceId', deviceAuthMiddleware, (req: AuthenticatedDeviceRequest, res) => {
   try {
-    const result = policyService.getPolicyForDevice(req.params.deviceId);
+    const result = policyService.getPolicyForDevice(req.deviceId!);
     res.json(result);
   } catch (e: any) {
     res.status(404).json({ error: e.message });
@@ -37,7 +31,7 @@ policyRouter.get('/device/:deviceId', (req, res) => {
 });
 
 // Add or update website rule (Parent auth)
-policyRouter.post('/child/:childId/rules', authMiddleware, (req: AuthenticatedRequest, res) => {
+policyRouter.post('/child/:childId/rules', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
   try {
     const { domain, action, reason, duration } = req.body;
     if (!domain || !action) {
@@ -63,7 +57,7 @@ policyRouter.post('/child/:childId/rules', authMiddleware, (req: AuthenticatedRe
 });
 
 // Delete a rule (Parent auth)
-policyRouter.delete('/child/:childId/rules/:ruleId', authMiddleware, (req: AuthenticatedRequest, res) => {
+policyRouter.delete('/child/:childId/rules/:ruleId', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
   try {
     const child = childService.getChild(req.params.childId);
     if (!child || child.parentId !== req.userId) {
@@ -78,7 +72,7 @@ policyRouter.delete('/child/:childId/rules/:ruleId', authMiddleware, (req: Authe
 });
 
 // Pause / unpause internet for a child (Parent auth)
-policyRouter.post('/child/:childId/pause', authMiddleware, (req: AuthenticatedRequest, res) => {
+policyRouter.post('/child/:childId/pause', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
   try {
     const { isPaused, duration } = req.body;
     const child = childService.getChild(req.params.childId);
@@ -98,7 +92,7 @@ policyRouter.post('/child/:childId/pause', authMiddleware, (req: AuthenticatedRe
 });
 
 // Update Category Controls (Parent auth)
-policyRouter.post('/child/:childId/categories', authMiddleware, (req: AuthenticatedRequest, res) => {
+policyRouter.post('/child/:childId/categories', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
   try {
     const { categoryControls } = req.body;
     const child = childService.getChild(req.params.childId);
@@ -118,7 +112,7 @@ policyRouter.post('/child/:childId/categories', authMiddleware, (req: Authentica
 });
 
 // Toggle Study Mode (Parent auth)
-policyRouter.post('/child/:childId/study-mode', authMiddleware, (req: AuthenticatedRequest, res) => {
+policyRouter.post('/child/:childId/study-mode', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
   try {
     const { active } = req.body;
     const child = childService.getChild(req.params.childId);
@@ -141,7 +135,7 @@ policyRouter.post('/child/:childId/study-mode', authMiddleware, (req: Authentica
 });
 
 // Update Bedtime Schedule (Parent auth)
-policyRouter.post('/child/:childId/bedtime', authMiddleware, (req: AuthenticatedRequest, res) => {
+policyRouter.post('/child/:childId/bedtime', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res) => {
   try {
     const { bedtime } = req.body;
     const child = childService.getChild(req.params.childId);

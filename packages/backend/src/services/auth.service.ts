@@ -1,14 +1,17 @@
-import { db, ParentUser, UserSession, EmailVerificationToken, PasswordResetToken } from '../db/store';
+import { db, ParentUser, UserSession, EmailVerificationToken, PasswordResetToken, MfaChallenge } from '../db/store';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { nanoid } from 'nanoid';
 import { familyService } from './family.service';
+import { mailService } from './mail.service';
 import {
   validatePasswordPolicy,
-  encryptMfaSecret,
   decryptMfaSecret,
-  generateTotp,
+  verifyTotpToken,
+  getCurrentTotpTimeStep,
+  hashToken,
+  generateCryptoToken,
 } from '../utils/security';
 
 export function getJwtSecret(): string {
@@ -27,50 +30,230 @@ export function getJwtSecret(): string {
 
 export interface LoginResult {
   user?: ParentUser;
-  token?: string;
+  accessToken?: string;
+  refreshToken?: string;
+  token?: string; // Backwards compatibility for existing clients
   mfaRequired?: boolean;
   mfaTicket?: string;
   emailVerificationPending?: boolean;
 }
 
-// In-memory rate limiting for login attempts
+// In-memory rate limiting for authentication attempts
 interface RateLimitRecord {
   attempts: number;
   lockedUntil: number;
 }
-const loginRateLimits = new Map<string, RateLimitRecord>();
+const authRateLimits = new Map<string, RateLimitRecord>();
+
+// NOTE: MFA challenge replay protection is now persisted in db.mfaChallenges (see store.ts).
+// The previous process-local consumedMfaTickets Set has been removed.
+// This means MFA challenge state survives server restarts.
 
 export class AuthService {
   /**
-   * Check and increment login rate limit
+   * Check and increment rate limit for a given key
    */
-  private checkRateLimit(key: string): void {
+  public checkRateLimit(key: string, maxAttempts: number = 5, lockDurationMs: number = 15 * 60 * 1000): void {
     const now = Date.now();
-    const record = loginRateLimits.get(key);
+    const record = authRateLimits.get(key);
     if (record) {
       if (record.lockedUntil > now) {
         const remainingSec = Math.ceil((record.lockedUntil - now) / 1000);
-        throw new Error(`Too many failed login attempts. Account temporarily locked for ${remainingSec}s.`);
+        throw new Error(`Too many failed attempts. Rate limited for ${remainingSec}s.`);
       }
-      if (record.lockedUntil <= now && record.attempts >= 5) {
-        // Reset after lockout expiry
-        loginRateLimits.delete(key);
+      if (record.lockedUntil <= now && record.attempts >= maxAttempts) {
+        authRateLimits.delete(key);
       }
     }
   }
 
-  private recordFailedAttempt(key: string): void {
+  public recordFailedAttempt(key: string, maxAttempts: number = 5, lockDurationMs: number = 15 * 60 * 1000): void {
     const now = Date.now();
-    const record = loginRateLimits.get(key) || { attempts: 0, lockedUntil: 0 };
+    const record = authRateLimits.get(key) || { attempts: 0, lockedUntil: 0 };
     record.attempts += 1;
-    if (record.attempts >= 5) {
-      record.lockedUntil = now + 15 * 60 * 1000; // 15 minute lockout
+    if (record.attempts >= maxAttempts) {
+      record.lockedUntil = now + lockDurationMs;
     }
-    loginRateLimits.set(key, record);
+    authRateLimits.set(key, record);
   }
 
-  private clearRateLimit(key: string): void {
-    loginRateLimits.delete(key);
+  public clearRateLimit(key: string): void {
+    authRateLimits.delete(key);
+  }
+
+  /**
+   * Sign short-lived Access Token (15 minutes) with HS256 and strict claims.
+   * Includes jti (unique token ID), sub, sessionId, tokenVersion, issuer, audience.
+   */
+  public signAccessToken(userId: string, sessionId: string, tokenVersion: number = 1): string {
+    return jwt.sign(
+      {
+        userId,
+        sessionId,
+        tokenVersion,
+        jti: `at_${nanoid(20)}`,
+      },
+      getJwtSecret(),
+      {
+        algorithm: 'HS256',
+        issuer: 'safebrowse-auth',
+        audience: 'safebrowse-client',
+        expiresIn: '15m',
+        subject: userId,
+      }
+    );
+  }
+
+  /**
+   * Create an authenticated session with rotating refresh token
+   */
+  public createSession(
+    userId: string,
+    userAgent: string = 'Web Browser',
+    ipAddress?: string,
+    existingFamilyId?: string
+  ): { accessToken: string; refreshToken: string; session: UserSession } {
+    const user = db.users.get(userId);
+    const tokenVersion = user?.tokenVersion || 1;
+
+    const rawRefreshToken = generateCryptoToken('rt_');
+    const refreshTokenHash = hashToken(rawRefreshToken);
+    const sessionId = `sess_${nanoid(16)}`;
+    const sessionFamilyId = existingFamilyId || `sfam_${nanoid(16)}`;
+
+    const session: UserSession = {
+      id: sessionId,
+      userId,
+      sessionFamilyId,
+      refreshTokenHash,
+      consumedTokenHashes: [],
+      deviceInfo: userAgent,
+      ipAddress,
+      createdAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), // 30 days
+      isRevoked: false,
+      tokenVersion,
+    };
+
+    db.userSessions.set(sessionId, session);
+    db.save();
+
+    const accessToken = this.signAccessToken(userId, sessionId, tokenVersion);
+
+    return {
+      accessToken,
+      refreshToken: rawRefreshToken,
+      session,
+    };
+  }
+
+  /**
+   * Refresh session with atomic single-use refresh-token rotation and replay attack mitigation
+   */
+  public refreshSession(
+    rawRefreshToken: string,
+    userAgent: string = 'Web Browser',
+    ipAddress?: string
+  ): { accessToken: string; refreshToken: string } {
+    if (!rawRefreshToken || typeof rawRefreshToken !== 'string') {
+      throw new Error('Refresh token is required.');
+    }
+
+    const providedHash = hashToken(rawRefreshToken);
+
+    // Look up session matching this refresh token hash or search consumed tokens for replay attack
+    let matchingSession: UserSession | undefined;
+    let isReplayAttack = false;
+
+    for (const session of db.userSessions.values()) {
+      if (session.refreshTokenHash === providedHash) {
+        matchingSession = session;
+        break;
+      }
+      if (session.consumedTokenHashes && session.consumedTokenHashes.includes(providedHash)) {
+        matchingSession = session;
+        isReplayAttack = true;
+        break;
+      }
+    }
+
+    // REPLAY ATTACK DETECTION:
+    // If not found, if already revoked, or if a consumed token was presented:
+    if (!matchingSession || matchingSession.isRevoked || isReplayAttack) {
+      if (matchingSession && (matchingSession.isRevoked || isReplayAttack)) {
+        // A consumed or revoked token was replayed -> revoke entire token family
+        const familyId = matchingSession.sessionFamilyId;
+        if (familyId) {
+          for (const s of db.userSessions.values()) {
+            if (s.sessionFamilyId === familyId) {
+              s.isRevoked = true;
+              db.userSessions.set(s.id, s);
+            }
+          }
+        } else {
+          matchingSession.isRevoked = true;
+          db.userSessions.set(matchingSession.id, matchingSession);
+        }
+        const user = db.users.get(matchingSession.userId);
+        if (user) {
+          user.tokenVersion = (user.tokenVersion || 1) + 1;
+          const family = familyService.getOrCreateUserFamily(user.id);
+          familyService.logAudit(
+            family.id,
+            user.id,
+            user.name,
+            'SESSION_REFRESH_REPLAY_ATTACK',
+            `Security Incident: Refresh token replay attack detected. All active sessions in family revoked.`
+          );
+        }
+        db.save();
+      }
+      throw new Error('Invalid, expired or revoked refresh token. Please log in again.');
+    }
+
+    // Check expiry
+    if (new Date(matchingSession.expiresAt).getTime() <= Date.now()) {
+      matchingSession.isRevoked = true;
+      db.save();
+      throw new Error('Refresh token has expired. Please log in again.');
+    }
+
+    // Verify user existence and active status
+    const user = db.users.get(matchingSession.userId);
+    if (!user) {
+      matchingSession.isRevoked = true;
+      db.save();
+      throw new Error('User not found.');
+    }
+
+    // Check token version consistency
+    if (matchingSession.tokenVersion !== (user.tokenVersion || 1)) {
+      matchingSession.isRevoked = true;
+      db.save();
+      throw new Error('Session has been invalidated due to password reset or global logout.');
+    }
+
+    // Record consumed token in rotation history
+    matchingSession.consumedTokenHashes = matchingSession.consumedTokenHashes || [];
+    matchingSession.consumedTokenHashes.push(providedHash);
+
+    // ATOMIC ROTATION: Generate new refresh token, update hash, invalidate previous token immediately
+    const newRefreshToken = generateCryptoToken('rt_');
+    matchingSession.refreshTokenHash = hashToken(newRefreshToken);
+    matchingSession.lastSeenAt = new Date().toISOString();
+    if (userAgent) matchingSession.deviceInfo = userAgent;
+    if (ipAddress) matchingSession.ipAddress = ipAddress;
+
+    db.userSessions.set(matchingSession.id, matchingSession);
+    db.save();
+
+    const newAccessToken = this.signAccessToken(user.id, matchingSession.id, user.tokenVersion || 1);
+
+    return {
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken,
+    };
   }
 
   /**
@@ -82,7 +265,7 @@ export class AuthService {
     name: string,
     userAgent: string = 'Web Browser',
     ipAddress?: string
-  ): { user: ParentUser; token: string; emailVerificationToken: string } {
+  ): { user: ParentUser; accessToken: string; refreshToken: string; token: string; emailVerificationToken: string } {
     const normalizedEmail = email.toLowerCase().trim();
 
     // Enforce Password Policy (NIST 800-63B standard)
@@ -98,121 +281,52 @@ export class AuthService {
     const passwordHash = bcrypt.hashSync(password, salt);
 
     const user: ParentUser = {
-      id: `parent-${nanoid(10)}`,
+      id: `user-${nanoid(10)}`,
       email: normalizedEmail,
       passwordHash,
       name: name.trim(),
-      mobileNumber: '',
-      timezone: 'UTC',
-      language: 'en-US',
-      notificationPrefs: {
-        emailAlerts: true,
-        pushNotifications: true,
-        requestAlerts: true,
-        tamperAlerts: true,
-        weeklySummary: true,
-      },
-      mfaEnabled: false,
       emailVerified: false,
-      lastLoginAt: new Date().toISOString(),
+      mfaEnabled: false,
+      tokenVersion: 1,
       createdAt: new Date().toISOString(),
     };
 
     db.users.set(user.id, user);
 
-    // Auto-create default family
+    // Automatically create and link primary family with OWNER role
     familyService.getOrCreateUserFamily(user.id);
 
-    // Generate email verification token (48h expiry)
-    const evTokenString = `ev_${crypto.randomBytes(24).toString('hex')}`;
-    const evToken: EmailVerificationToken = {
+    // Issue cryptographic single-use Email Verification Token
+    const rawEvToken = generateCryptoToken('ev_');
+    const evTokenRecord: EmailVerificationToken = {
       id: `evt-${nanoid(10)}`,
       userId: user.id,
       email: normalizedEmail,
-      token: evTokenString,
-      expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(),
+      tokenHash: hashToken(rawEvToken),
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     };
-    db.emailVerificationTokens.set(evToken.id, evToken);
-
-    const token = this.generateToken(user.id);
-
-    // Register active session
-    const session: UserSession = {
-      id: `sess-${nanoid(10)}`,
-      userId: user.id,
-      token,
-      deviceInfo: userAgent,
-      ipAddress,
-      createdAt: new Date().toISOString(),
-      lastSeenAt: new Date().toISOString(),
-    };
-    db.userSessions.set(session.id, session);
+    db.emailVerificationTokens.set(evTokenRecord.id, evTokenRecord);
     db.save();
 
-    return { user, token, emailVerificationToken: evTokenString };
+    // Dispatch verification email via mail provider (captures in dev outbox, throws if provider missing in prod)
+    mailService.sendVerificationEmail(user.email, rawEvToken);
+
+    // Create session
+    const { accessToken, refreshToken } = this.createSession(user.id, userAgent, ipAddress);
+
+    return {
+      user,
+      accessToken,
+      refreshToken,
+      token: accessToken,
+      emailVerificationToken: rawEvToken,
+    };
   }
 
   /**
-   * Verify email with verification token
-   */
-  public verifyEmail(tokenString: string): { success: boolean; email: string } {
-    const ev = Array.from(db.emailVerificationTokens.values()).find(
-      (t) => t.token === tokenString && !t.usedAt
-    );
-
-    if (!ev) {
-      throw new Error('Invalid or expired email verification token.');
-    }
-
-    if (new Date(ev.expiresAt).getTime() < Date.now()) {
-      throw new Error('Email verification token has expired. Please request a new one.');
-    }
-
-    const user = db.users.get(ev.userId);
-    if (!user) {
-      throw new Error('User not found.');
-    }
-
-    user.emailVerified = true;
-    ev.usedAt = new Date().toISOString();
-    db.users.set(user.id, user);
-    db.emailVerificationTokens.set(ev.id, ev);
-    db.save();
-
-    return { success: true, email: user.email };
-  }
-
-  /**
-   * Resend email verification
-   */
-  public resendEmailVerification(email: string): { token: string } {
-    const normalizedEmail = email.toLowerCase().trim();
-    const user = Array.from(db.users.values()).find((u) => u.email.toLowerCase() === normalizedEmail);
-    if (!user) {
-      // Generic non-revealing response
-      return { token: 'generic-dispatched' };
-    }
-
-    if (user.emailVerified) {
-      throw new Error('This email address is already verified.');
-    }
-
-    const evTokenString = `ev_${crypto.randomBytes(24).toString('hex')}`;
-    const evToken: EmailVerificationToken = {
-      id: `evt-${nanoid(10)}`,
-      userId: user.id,
-      email: normalizedEmail,
-      token: evTokenString,
-      expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(),
-    };
-    db.emailVerificationTokens.set(evToken.id, evToken);
-    db.save();
-
-    return { token: evTokenString };
-  }
-
-  /**
-   * Parent Login with rate limiting, Bcrypt verification and MFA challenge
+   * Primary Login endpoint:
+   * If MFA is enabled, returns single-use MFA challenge ticket.
+   * If MFA is not enabled, issues authenticated session tokens.
    */
   public login(
     email: string,
@@ -221,216 +335,535 @@ export class AuthService {
     ipAddress?: string
   ): LoginResult {
     const normalizedEmail = email.toLowerCase().trim();
-    const rateLimitKey = `${normalizedEmail}_${ipAddress || 'unknown'}`;
-    this.checkRateLimit(rateLimitKey);
+    const rateLimitKey = `login:${normalizedEmail}:${ipAddress || 'unknown'}`;
+
+    this.checkRateLimit(rateLimitKey, 5, 15 * 60 * 1000);
 
     const user = Array.from(db.users.values()).find((u) => u.email.toLowerCase() === normalizedEmail);
-
     if (!user) {
-      this.recordFailedAttempt(rateLimitKey);
+      this.recordFailedAttempt(rateLimitKey, 5, 15 * 60 * 1000);
       throw new Error('Invalid email or password.');
     }
 
-    // Constant-time bcrypt password verification
-    const isValid = bcrypt.compareSync(password, user.passwordHash);
-    if (!isValid) {
-      this.recordFailedAttempt(rateLimitKey);
+    if (!bcrypt.compareSync(password, user.passwordHash)) {
+      this.recordFailedAttempt(rateLimitKey, 5, 15 * 60 * 1000);
+      const family = familyService.getOrCreateUserFamily(user.id);
+      familyService.logAudit(family.id, user.id, user.name, 'LOGIN_FAILED', 'Failed login attempt: invalid password.');
       throw new Error('Invalid email or password.');
     }
 
     this.clearRateLimit(rateLimitKey);
 
-    // Check MFA
+    // If MFA is enabled, issue short-lived single-use MFA challenge ticket (5 minutes)
     if (user.mfaEnabled) {
-      const mfaTicket = jwt.sign({ userId: user.id, mfaPending: true, jti: nanoid(12) }, getJwtSecret(), { expiresIn: '5m' });
+      const ticketId = `ticket_${nanoid(20)}`;
+      const jti = `mfa_${nanoid(24)}`;
+      const mfaTicket = jwt.sign(
+        {
+          userId: user.id,
+          purpose: 'mfa_challenge',
+          ticketId,
+          jti,
+        },
+        getJwtSecret(),
+        {
+          algorithm: 'HS256',
+          issuer: 'safebrowse-auth',
+          audience: 'safebrowse-mfa',
+          expiresIn: '5m',
+        }
+      );
+
+      // Create persisted MFA challenge record (survives restart — replaces in-memory Set)
+      const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+      const challenge: MfaChallenge = {
+        id: ticketId,
+        userId: user.id,
+        jtiHash: hashToken(jti),
+        purpose: 'mfa_login',
+        createdAt: new Date().toISOString(),
+        expiresAt,
+        attemptCount: 0,
+        ipAddress,
+        userAgent,
+      };
+      db.mfaChallenges.set(ticketId, challenge);
+      db.save();
+
       return {
         mfaRequired: true,
         mfaTicket,
       };
     }
 
+    // MFA is not enabled: create session & issue tokens
     user.lastLoginAt = new Date().toISOString();
     db.users.set(user.id, user);
 
-    const token = this.generateToken(user.id);
+    const { accessToken, refreshToken } = this.createSession(user.id, userAgent, ipAddress);
 
-    // Record session
-    const session: UserSession = {
-      id: `sess-${nanoid(10)}`,
-      userId: user.id,
-      token,
-      deviceInfo: userAgent,
-      ipAddress,
-      createdAt: new Date().toISOString(),
-      lastSeenAt: new Date().toISOString(),
+    const family = familyService.getOrCreateUserFamily(user.id);
+    familyService.logAudit(family.id, user.id, user.name, 'LOGIN_SUCCESS', `User logged in from ${userAgent}.`);
+
+    return {
+      user,
+      accessToken,
+      refreshToken,
+      token: accessToken,
+      emailVerificationPending: !user.emailVerified,
     };
-    db.userSessions.set(session.id, session);
-    db.save();
-
-    return { user, token };
   }
 
   /**
-   * Verify MFA login with 6-digit TOTP or Recovery Code
+   * Complete MFA Login Challenge using 6-digit TOTP or single-use recovery code.
+   * Uses persisted MfaChallenge records — replay protection survives server restarts.
    */
   public verifyMfaLogin(
     mfaTicket: string,
     codeOrRecoveryCode: string,
     userAgent: string = 'Web Browser',
-    ipAddress?: string
-  ): { user: ParentUser; token: string } {
-    let payload: { userId: string; mfaPending?: boolean };
+    ipAddress?: string,
+    timeSec?: number
+  ): LoginResult {
+    if (!mfaTicket || !codeOrRecoveryCode) {
+      throw new Error('MFA challenge ticket and verification code are required.');
+    }
+
+    let decoded: any;
     try {
-      payload = jwt.verify(mfaTicket, getJwtSecret()) as { userId: string; mfaPending?: boolean };
-    } catch (e) {
-      throw new Error('MFA session expired or invalid. Please sign in again.');
+      decoded = jwt.verify(mfaTicket, getJwtSecret(), {
+        algorithms: ['HS256'],
+        issuer: 'safebrowse-auth',
+        audience: 'safebrowse-mfa',
+      });
+    } catch {
+      throw new Error('MFA challenge session has expired or is invalid. Please sign in again.');
     }
 
-    if (!payload.userId || !payload.mfaPending) {
-      throw new Error('Invalid MFA ticket.');
+    // Mandatory ticket claims
+    if (!decoded.ticketId || typeof decoded.ticketId !== 'string' || decoded.ticketId.trim() === '') {
+      throw new Error('Invalid MFA challenge ticket: missing ticketId.');
+    }
+    if (!decoded.jti || typeof decoded.jti !== 'string' || decoded.jti.trim() === '') {
+      throw new Error('Invalid MFA challenge ticket: missing jti.');
+    }
+    if (decoded.purpose !== 'mfa_challenge') {
+      throw new Error('Invalid MFA challenge ticket: purpose must be mfa_challenge.');
     }
 
-    const user = db.users.get(payload.userId);
+    // Look up persisted challenge record
+    const challenge = db.mfaChallenges.get(decoded.ticketId);
+    if (!challenge) {
+      throw new Error('MFA challenge not found or expired. Please sign in again.');
+    }
+
+    // Validate challenge state
+    if (challenge.consumedAt) {
+      throw new Error('MFA challenge ticket has already been used. Please sign in again.');
+    }
+    if (challenge.invalidatedAt) {
+      throw new Error('MFA challenge has been invalidated. Please sign in again.');
+    }
+    if (new Date(challenge.expiresAt).getTime() <= Date.now()) {
+      throw new Error('MFA challenge has expired. Please sign in again.');
+    }
+    if (challenge.userId !== decoded.userId) {
+      throw new Error('MFA challenge user mismatch.');
+    }
+    if (challenge.purpose !== 'mfa_login') {
+      throw new Error('MFA challenge purpose mismatch: must be mfa_login.');
+    }
+
+    // Enforce maximum verification attempts (5) to prevent brute-force
+    const MAX_MFA_ATTEMPTS = 5;
+    if (challenge.attemptCount >= MAX_MFA_ATTEMPTS) {
+      challenge.invalidatedAt = new Date().toISOString();
+      db.mfaChallenges.set(challenge.id, challenge);
+      db.save();
+      throw new Error('Too many failed MFA attempts. Please sign in again.');
+    }
+
+    // Unconditional jti integrity check: ticket jti hash must strictly match challenge record
+    if (hashToken(decoded.jti) !== challenge.jtiHash) {
+      challenge.attemptCount += 1;
+      db.mfaChallenges.set(challenge.id, challenge);
+      db.save();
+      throw new Error('MFA challenge integrity check failed.');
+    }
+
+    const user = db.users.get(decoded.userId);
     if (!user || !user.mfaSecret) {
-      throw new Error('User not found or MFA is not configured.');
+      throw new Error('User or MFA configuration not found.');
     }
 
     const cleanInput = codeOrRecoveryCode.trim().toUpperCase();
-    let verified = false;
+    const decryptedSecret = decryptMfaSecret(user.mfaSecret);
 
-    // 1. Try TOTP code
-    if (cleanInput.length === 6 && /^\d+$/.test(cleanInput)) {
-      const decryptedSecret = decryptMfaSecret(user.mfaSecret);
-      const expectedOtp = generateTotp(decryptedSecret);
-      if (cleanInput === expectedOtp) {
-        verified = true;
-      }
-    }
+    // 1. Try TOTP 6-digit code with exact accepted timestep
+    const totpResult = verifyTotpToken(decryptedSecret, cleanInput, timeSec);
+    const isTotpValid = totpResult.valid && totpResult.acceptedTimeStep !== undefined;
 
-    // 2. Try single-use recovery code
-    if (!verified && user.mfaRecoveryCodes) {
+    let isRecoveryValid = false;
+    let matchedRecoveryIndex = -1;
+
+    if (!isTotpValid && user.mfaRecoveryCodes && user.mfaRecoveryCodes.length > 0) {
       for (let i = 0; i < user.mfaRecoveryCodes.length; i++) {
-        const hashedCode = user.mfaRecoveryCodes[i];
-        if (bcrypt.compareSync(cleanInput, hashedCode)) {
-          verified = true;
-          // Consume recovery code (single use)
-          user.mfaRecoveryCodes.splice(i, 1);
-          db.users.set(user.id, user);
+        if (bcrypt.compareSync(cleanInput, user.mfaRecoveryCodes[i])) {
+          isRecoveryValid = true;
+          matchedRecoveryIndex = i;
           break;
         }
       }
     }
 
-    if (!verified) {
-      throw new Error('Invalid verification code or recovery code.');
+    if (!isTotpValid && !isRecoveryValid) {
+      // Increment failed attempt count and persist
+      challenge.attemptCount += 1;
+      db.mfaChallenges.set(challenge.id, challenge);
+      db.save();
+      throw new Error('Invalid MFA verification code or recovery code.');
+    }
+
+    // TOTP timestep replay check — prevent same timestep being reused for MFA login
+    if (isTotpValid) {
+      const acceptedStep = totpResult.acceptedTimeStep!;
+      const lastUsedStep = user.totpLastUsedSteps?.['mfa_login'];
+      if (lastUsedStep !== undefined && lastUsedStep === acceptedStep) {
+        // Increment attempt count to prevent probing
+        challenge.attemptCount += 1;
+        db.mfaChallenges.set(challenge.id, challenge);
+        db.save();
+        throw new Error('This TOTP code has already been used. Please wait for the next code.');
+      }
+    }
+
+    // ─── CONSUME CHALLENGE atomically BEFORE issuing session ───────────────
+    challenge.consumedAt = new Date().toISOString();
+    db.mfaChallenges.set(challenge.id, challenge);
+
+    const family = familyService.getOrCreateUserFamily(user.id);
+
+    // Atomically consume recovery code if used
+    if (isRecoveryValid && matchedRecoveryIndex >= 0) {
+      user.mfaRecoveryCodes!.splice(matchedRecoveryIndex, 1);
+      familyService.logAudit(
+        family.id,
+        user.id,
+        user.name,
+        'MFA_RECOVERY_CODE_USED',
+        `Logged in using one-time recovery code during MFA challenge. ${user.mfaRecoveryCodes!.length} recovery codes remaining.`
+      );
+    } else if (isTotpValid && totpResult.acceptedTimeStep !== undefined) {
+      // Persist consumed TOTP timestep for replay prevention
+      if (!user.totpLastUsedSteps) user.totpLastUsedSteps = {};
+      user.totpLastUsedSteps['mfa_login'] = totpResult.acceptedTimeStep;
+      familyService.logAudit(
+        family.id,
+        user.id,
+        user.name,
+        'LOGIN_SUCCESS',
+        `User completed MFA authentication from ${userAgent}.`
+      );
     }
 
     user.lastLoginAt = new Date().toISOString();
     db.users.set(user.id, user);
-
-    const token = this.generateToken(user.id);
-
-    // Record session
-    const session: UserSession = {
-      id: `sess-${nanoid(10)}`,
-      userId: user.id,
-      token,
-      deviceInfo: userAgent,
-      ipAddress,
-      createdAt: new Date().toISOString(),
-      lastSeenAt: new Date().toISOString(),
-    };
-    db.userSessions.set(session.id, session);
     db.save();
 
-    return { user, token };
+    const { accessToken, refreshToken } = this.createSession(user.id, userAgent, ipAddress);
+
+    return {
+      user,
+      accessToken,
+      refreshToken,
+      token: accessToken,
+      emailVerificationPending: !user.emailVerified,
+    };
   }
 
   /**
-   * Request password reset (Generic non-enumerating response)
+   * Verify Access Token on every incoming request.
+   * ALL claims are mandatory: userId, sub, sessionId, tokenVersion, jti, iss, aud, exp.
+   * Session existence, ownership, revocation, expiry, and tokenVersion consistency are unconditionally validated.
+   */
+  public verifyToken(token: string): { userId: string; sessionId: string; tokenVersion: number; jti: string } {
+    if (!token || typeof token !== 'string') {
+      throw new Error('Invalid or expired token.');
+    }
+
+    let decoded: any;
+    try {
+      decoded = jwt.verify(token, getJwtSecret(), {
+        algorithms: ['HS256'],
+        issuer: 'safebrowse-auth',
+        audience: 'safebrowse-client',
+      });
+    } catch {
+      throw new Error('Invalid or expired token.');
+    }
+
+    // Mandatory claim: userId
+    const userId = decoded.userId;
+    if (!userId || typeof userId !== 'string' || userId.trim() === '') {
+      throw new Error('Invalid token claims: userId missing or empty.');
+    }
+
+    // Mandatory claim: sub (must exist, be non-empty string, and match userId)
+    if (!decoded.sub || typeof decoded.sub !== 'string' || decoded.sub.trim() === '') {
+      throw new Error('Invalid token claims: sub missing or empty.');
+    }
+    if (decoded.sub !== userId) {
+      throw new Error('Invalid token claims: subject mismatch.');
+    }
+
+    // Mandatory claim: jti (must exist and be non-empty string)
+    if (!decoded.jti || typeof decoded.jti !== 'string' || decoded.jti.trim() === '') {
+      throw new Error('Invalid token claims: jti missing or empty.');
+    }
+
+    // Mandatory claim: sessionId — tokens without sessionId are always rejected
+    if (!decoded.sessionId || typeof decoded.sessionId !== 'string' || decoded.sessionId.trim() === '') {
+      throw new Error('Invalid token claims: sessionId missing or empty.');
+    }
+
+    // Mandatory claim: tokenVersion — tokens without tokenVersion are rejected
+    if (decoded.tokenVersion === undefined || decoded.tokenVersion === null || typeof decoded.tokenVersion !== 'number') {
+      throw new Error('Invalid token claims: tokenVersion missing.');
+    }
+
+    // User must exist and be active
+    const user = db.users.get(userId);
+    if (!user) {
+      throw new Error('User account not found.');
+    }
+
+    // tokenVersion must match user record (invalidated on password reset / global logout)
+    const userTokenVersion = user.tokenVersion || 1;
+    if (decoded.tokenVersion !== userTokenVersion) {
+      throw new Error('Token has been invalidated. Please sign in again.');
+    }
+
+    // Session validation is unconditional — always enforced
+    const session = db.userSessions.get(decoded.sessionId);
+    if (!session) {
+      throw new Error('Session does not exist.');
+    }
+    if (session.userId !== userId) {
+      throw new Error('Session ownership mismatch.');
+    }
+    if (session.isRevoked) {
+      throw new Error('Session has been revoked.');
+    }
+    if (new Date(session.expiresAt).getTime() <= Date.now()) {
+      throw new Error('Session has expired.');
+    }
+    // Session tokenVersion must match both the token and the user record
+    if (session.tokenVersion !== decoded.tokenVersion) {
+      throw new Error('Session has been invalidated. Please sign in again.');
+    }
+
+    return {
+      userId,
+      sessionId: decoded.sessionId,
+      tokenVersion: decoded.tokenVersion,
+      jti: decoded.jti,
+    };
+  }
+
+
+  /**
+   * Verify Email Address with single-use token
+   */
+  public verifyEmail(rawToken: string): { success: boolean; message: string } {
+    if (!rawToken || typeof rawToken !== 'string') {
+      throw new Error('Verification token is required.');
+    }
+
+    const tokenHash = hashToken(rawToken);
+    let matchedTokenRecord: EmailVerificationToken | undefined;
+
+    for (const record of db.emailVerificationTokens.values()) {
+      if (record.tokenHash === tokenHash) {
+        matchedTokenRecord = record;
+        break;
+      }
+    }
+
+    if (!matchedTokenRecord || matchedTokenRecord.usedAt) {
+      throw new Error('Invalid, consumed or expired email verification token.');
+    }
+
+    if (new Date(matchedTokenRecord.expiresAt).getTime() <= Date.now()) {
+      throw new Error('Email verification token has expired. Please request a new verification link.');
+    }
+
+    const user = db.users.get(matchedTokenRecord.userId);
+    if (!user) throw new Error('User not found.');
+
+    user.emailVerified = true;
+    matchedTokenRecord.usedAt = new Date().toISOString();
+
+    db.users.set(user.id, user);
+    db.emailVerificationTokens.set(matchedTokenRecord.id, matchedTokenRecord);
+    db.save();
+
+    const family = familyService.getOrCreateUserFamily(user.id);
+    familyService.logAudit(family.id, user.id, user.name, 'EMAIL_VERIFIED', `Parent email address was verified.`);
+
+    return {
+      success: true,
+      message: 'Email address successfully verified.',
+    };
+  }
+
+  /**
+   * Resend Email Verification Token
+   */
+  public resendEmailVerification(email: string): { token?: string } {
+    const normalizedEmail = email.toLowerCase().trim();
+    const rateLimitKey = `resend-ev:${normalizedEmail}`;
+    this.checkRateLimit(rateLimitKey, 3, 5 * 60 * 1000);
+
+    const user = Array.from(db.users.values()).find((u) => u.email.toLowerCase() === normalizedEmail);
+    if (!user) {
+      return {};
+    }
+
+    if (user.emailVerified) {
+      return {};
+    }
+
+    // Invalidate existing active verification tokens for this user
+    for (const ev of db.emailVerificationTokens.values()) {
+      if (ev.userId === user.id && !ev.usedAt) {
+        ev.usedAt = new Date().toISOString();
+      }
+    }
+
+    const rawEvToken = generateCryptoToken('ev_');
+    const evTokenRecord: EmailVerificationToken = {
+      id: `evt-${nanoid(10)}`,
+      userId: user.id,
+      email: user.email,
+      tokenHash: hashToken(rawEvToken),
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    };
+
+    db.emailVerificationTokens.set(evTokenRecord.id, evTokenRecord);
+    db.save();
+
+    mailService.sendVerificationEmail(user.email, rawEvToken);
+
+    return {
+      token: process.env.NODE_ENV !== 'production' ? rawEvToken : undefined,
+    };
+  }
+
+  /**
+   * Request Password Reset (Generic non-enumerating response)
    */
   public requestPasswordReset(email: string): { message: string; resetToken?: string } {
-    const normalized = email.toLowerCase().trim();
-    const user = Array.from(db.users.values()).find((u) => u.email.toLowerCase() === normalized);
+    const normalizedEmail = email.toLowerCase().trim();
+    const rateLimitKey = `forgot-pwd:${normalizedEmail}`;
+    this.checkRateLimit(rateLimitKey, 3, 10 * 60 * 1000);
 
-    const genericMsg = 'If an account exists, reset instructions have been sent.';
+    const genericMsg = 'If an account exists with this email address, password reset instructions have been sent.';
 
+    const user = Array.from(db.users.values()).find((u) => u.email.toLowerCase() === normalizedEmail);
     if (!user) {
       return { message: genericMsg };
     }
 
-    const tokenString = `pr_${crypto.randomBytes(24).toString('hex')}`;
-    const resetToken: PasswordResetToken = {
+    // Invalidate existing reset tokens for this user
+    for (const pr of db.passwordResetTokens.values()) {
+      if (pr.userId === user.id && !pr.usedAt) {
+        pr.usedAt = new Date().toISOString();
+      }
+    }
+
+    const rawResetToken = generateCryptoToken('pr_');
+    const resetRecord: PasswordResetToken = {
       id: `prt-${nanoid(10)}`,
       userId: user.id,
-      token: tokenString,
+      tokenHash: hashToken(rawResetToken),
       expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(), // 1 hour
     };
 
-    db.passwordResetTokens.set(resetToken.id, resetToken);
+    db.passwordResetTokens.set(resetRecord.id, resetRecord);
     db.save();
 
-    return { message: genericMsg, resetToken: tokenString };
+    mailService.sendPasswordResetEmail(user.email, rawResetToken);
+
+    return {
+      message: genericMsg,
+      resetToken: process.env.NODE_ENV !== 'production' ? rawResetToken : undefined,
+    };
   }
 
   /**
-   * Reset password and revoke ALL prior sessions
+   * Reset Password with single-use token:
+   * Validates token hash, validates password policy, updates bcrypt hash, revokes previous sessions, increments tokenVersion.
    */
-  public resetPassword(tokenString: string, newPassword: string): void {
-    validatePasswordPolicy(newPassword, false);
-
-    const resetToken = Array.from(db.passwordResetTokens.values()).find(
-      (t) => t.token === tokenString && !t.usedAt
-    );
-
-    if (!resetToken) {
-      throw new Error('Invalid or expired password reset token.');
+  public resetPassword(rawToken: string, newPassword: string): void {
+    if (!rawToken || typeof rawToken !== 'string') {
+      throw new Error('Reset token is required.');
     }
 
-    if (new Date(resetToken.expiresAt).getTime() < Date.now()) {
-      throw new Error('Password reset token has expired.');
+    const tokenHash = hashToken(rawToken);
+    let matchedRecord: PasswordResetToken | undefined;
+
+    for (const record of db.passwordResetTokens.values()) {
+      if (record.tokenHash === tokenHash) {
+        matchedRecord = record;
+        break;
+      }
     }
 
-    const user = db.users.get(resetToken.userId);
-    if (!user) {
-      throw new Error('User not found.');
+    if (!matchedRecord || matchedRecord.usedAt) {
+      throw new Error('Invalid, expired or already used password reset link.');
     }
 
-    user.passwordHash = bcrypt.hashSync(newPassword, 12);
-    resetToken.usedAt = new Date().toISOString();
+    if (new Date(matchedRecord.expiresAt).getTime() <= Date.now()) {
+      throw new Error('Password reset link has expired. Please request a new one.');
+    }
 
-    db.users.set(user.id, user);
-    db.passwordResetTokens.set(resetToken.id, resetToken);
+    const user = db.users.get(matchedRecord.userId);
+    if (!user) throw new Error('User not found.');
 
-    // Strictly revoke ALL previous sessions upon password reset
+    validatePasswordPolicy(newPassword, Boolean(user.mfaEnabled));
+
+    const salt = bcrypt.genSaltSync(12);
+    user.passwordHash = bcrypt.hashSync(newPassword, salt);
+    user.tokenVersion = (user.tokenVersion || 1) + 1; // Invalidate all prior access tokens
+    matchedRecord.usedAt = new Date().toISOString();
+
+    // Revoke ALL active sessions for this user
     for (const session of db.userSessions.values()) {
       if (session.userId === user.id) {
         session.isRevoked = true;
       }
     }
 
-    db.save();
-  }
-
-  public generateToken(userId: string): string {
-    return jwt.sign({ userId, jti: nanoid(12) }, getJwtSecret(), { expiresIn: '7d' });
-  }
-
-  public verifyToken(token: string): { userId: string } {
-    try {
-      const decoded = jwt.verify(token, getJwtSecret()) as { userId: string };
-      // Check session validity
-      const session = Array.from(db.userSessions.values()).find((s) => s.token === token);
-      if (session && session.isRevoked) {
-        throw new Error('Session has been revoked.');
+    // Invalidate all outstanding MFA challenges for this user
+    for (const challenge of db.mfaChallenges.values()) {
+      if (challenge.userId === user.id && !challenge.consumedAt && !challenge.invalidatedAt) {
+        challenge.invalidatedAt = new Date().toISOString();
+        db.mfaChallenges.set(challenge.id, challenge);
       }
-      return decoded;
-    } catch (e: any) {
-      if (e.message && e.message.includes('revoked')) {
-        throw e;
-      }
-      throw new Error('Invalid or expired token.');
     }
+
+    db.users.set(user.id, user);
+    db.passwordResetTokens.set(matchedRecord.id, matchedRecord);
+    db.save();
+
+    const family = familyService.getOrCreateUserFamily(user.id);
+    familyService.logAudit(
+      family.id,
+      user.id,
+      user.name,
+      'PASSWORD_RESET',
+      `Account password was reset via email verification link. All prior sessions revoked.`
+    );
   }
 
   public getUser(userId: string): ParentUser | undefined {

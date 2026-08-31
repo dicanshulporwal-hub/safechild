@@ -90,16 +90,22 @@ export interface Stats {
 
 class ApiClient {
   private token: string | null = null;
-  private userEmail: string = 'parent@safebrowse.io';
+  private refreshToken: string | null = null;
+  private userEmail: string = '';
 
   constructor() {
     this.token = localStorage.getItem('sb_auth_token') || null;
-    this.userEmail = localStorage.getItem('sb_user_email') || 'parent@safebrowse.io';
+    this.refreshToken = localStorage.getItem('sb_refresh_token') || null;
+    this.userEmail = localStorage.getItem('sb_user_email') || '';
   }
 
-  public setToken(token: string, email?: string) {
+  public setToken(token: string, refreshToken?: string, email?: string) {
     this.token = token;
     localStorage.setItem('sb_auth_token', token);
+    if (refreshToken) {
+      this.refreshToken = refreshToken;
+      localStorage.setItem('sb_refresh_token', refreshToken);
+    }
     if (email) {
       this.userEmail = email;
       localStorage.setItem('sb_user_email', email);
@@ -110,13 +116,25 @@ class ApiClient {
     return this.token;
   }
 
+  public getRefreshToken() {
+    return this.refreshToken;
+  }
+
   public getUserEmail() {
     return this.userEmail;
   }
 
   public logout() {
+    if (this.token) {
+      fetch(`${API_BASE}/auth/logout`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+      }).catch(() => {});
+    }
     this.token = null;
+    this.refreshToken = null;
     localStorage.removeItem('sb_auth_token');
+    localStorage.removeItem('sb_refresh_token');
     localStorage.removeItem('sb_user_email');
   }
 
@@ -138,7 +156,39 @@ class ApiClient {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Login failed');
-    this.setToken(data.token, data.user?.email || email);
+    if (data.token) {
+      this.setToken(data.token, data.refreshToken, data.user?.email || email);
+    }
+    return data;
+  }
+
+  async mfaLogin(mfaTicket: string, code: string) {
+    const res = await fetch(`${API_BASE}/auth/mfa-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mfaTicket, code }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'MFA Login failed');
+    if (data.token) {
+      this.setToken(data.token, data.refreshToken, data.user?.email);
+    }
+    return data;
+  }
+
+  async refreshAuth() {
+    if (!this.refreshToken) throw new Error('No refresh token available');
+    const res = await fetch(`${API_BASE}/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: this.refreshToken }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      this.logout();
+      throw new Error(data.error || 'Failed to refresh session');
+    }
+    this.setToken(data.accessToken || data.token, data.refreshToken);
     return data;
   }
 
@@ -150,7 +200,38 @@ class ApiClient {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Registration failed');
-    this.setToken(data.token, data.user?.email || email);
+    this.setToken(data.token, data.refreshToken, data.user?.email || email);
+    return data;
+  }
+
+  async forgotPassword(email: string) {
+    const res = await fetch(`${API_BASE}/auth/forgot-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    return res.json();
+  }
+
+  async resetPassword(token: string, newPassword: string) {
+    const res = await fetch(`${API_BASE}/auth/reset-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, newPassword }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Password reset failed');
+    return data;
+  }
+
+  async verifyEmail(token: string) {
+    const res = await fetch(`${API_BASE}/auth/verify-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Email verification failed');
     return data;
   }
 
