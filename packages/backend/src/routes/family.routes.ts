@@ -78,20 +78,23 @@ router.delete('/members/:id', (req: AuthenticatedRequest, res: Response) => {
 });
 
 // POST /api/family/transfer-ownership - Transfer ownership with step-up verification
-router.post('/transfer-ownership', (req: AuthenticatedRequest, res: Response) => {
+router.post('/transfer-ownership', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { familyId, newOwnerUserId, password, otpCode } = req.body;
     if (!familyId || !newOwnerUserId) {
       return res.status(400).json({ error: 'familyId and newOwnerUserId are required.' });
     }
-    familyService.transferOwnership(familyId, newOwnerUserId, req.userId!, password, otpCode);
+    await familyService.transferOwnership(familyId, newOwnerUserId, req.userId!, password, otpCode);
     res.json({ success: true, message: 'Family ownership transferred.' });
   } catch (e: any) {
     const status =
       e.message.includes('Forbidden') ||
       e.message.includes('Step-up') ||
       e.message.includes('password') ||
-      e.message.includes('MFA')
+      e.message.includes('MFA') ||
+      e.message.includes('already been used') ||
+      e.message.includes('Target user') ||
+      e.message.includes('yourself')
         ? 403
         : 400;
     res.status(status).json({ error: e.message });

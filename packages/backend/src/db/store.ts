@@ -336,8 +336,116 @@ export class DataStore {
           });
         }
         if (data.activityLogs) this.activityLogs = data.activityLogs;
+
+        // --- Safe Migration & Consistency Validation (Stage 11 Step 3A) ---
+        // Backfill missing familyId on all family-scoped records
+        for (const [childId, child] of this.children.entries()) {
+          if (!child.familyId) {
+            const family = Array.from(this.families.values()).find((f) => f.ownerUserId === child.parentId)
+              || Array.from(this.familyMembers.values()).find((m) => m.userId === child.parentId);
+            child.familyId = family ? ('ownerUserId' in family ? family.id : (family as any).familyId) : 'fam-default';
+            this.children.set(childId, child);
+          }
+        }
+
+        for (const [devId, dev] of this.devices.entries()) {
+          const child = this.children.get(dev.childId);
+          if (!dev.familyId && child?.familyId) {
+            dev.familyId = child.familyId;
+            this.devices.set(devId, dev);
+          } else if (dev.familyId && child?.familyId && dev.familyId !== child.familyId) {
+            console.warn(`[Tenancy Warning] Conflicting familyId for device ${devId}. Reconciling to child's familyId.`);
+            dev.familyId = child.familyId;
+            this.devices.set(devId, dev);
+          }
+        }
+
+        for (const [polId, pol] of this.policies.entries()) {
+          const child = this.children.get(pol.childId);
+          if (!pol.familyId && child?.familyId) {
+            pol.familyId = child.familyId;
+            this.policies.set(polId, pol);
+          } else if (pol.familyId && child?.familyId && pol.familyId !== child.familyId) {
+            console.warn(`[Tenancy Warning] Conflicting familyId for policy ${polId}. Reconciling to child's familyId.`);
+            pol.familyId = child.familyId;
+            this.policies.set(polId, pol);
+          }
+        }
+
+        for (const [reqId, req] of this.requests.entries()) {
+          const child = this.children.get(req.childId);
+          if (!req.familyId && child?.familyId) {
+            req.familyId = child.familyId;
+            this.requests.set(reqId, req);
+          } else if (req.familyId && child?.familyId && req.familyId !== child.familyId) {
+            console.warn(`[Tenancy Warning] Conflicting familyId for request ${reqId}. Reconciling to child's familyId.`);
+            req.familyId = child.familyId;
+            this.requests.set(reqId, req);
+          }
+        }
       }
     } catch (e) {}
+  }
+
+  // --- Mutex & Transaction Rollback (Stage 11 Step 3A) ---
+  private familyLocks: Map<string, Promise<void>> = new Map();
+
+  /**
+   * Acquire an asynchronous mutex lock for a specific family to guarantee concurrency safety.
+   */
+  public async runWithFamilyLock<T>(familyId: string, fn: () => Promise<T> | T): Promise<T> {
+    while (this.familyLocks.has(familyId)) {
+      await this.familyLocks.get(familyId);
+    }
+
+    let resolveLock!: () => void;
+    const lockPromise = new Promise<void>((resolve) => {
+      resolveLock = resolve;
+    });
+    this.familyLocks.set(familyId, lockPromise);
+
+    try {
+      return await fn();
+    } finally {
+      this.familyLocks.delete(familyId);
+      resolveLock();
+    }
+  }
+
+  /**
+   * Snapshot current datastore state for atomic transaction rollback
+   */
+  public createSnapshot(): string {
+    return JSON.stringify({
+      users: Array.from(this.users.entries()),
+      families: Array.from(this.families.entries()),
+      familyMembers: Array.from(this.familyMembers.entries()),
+      familyInvitations: Array.from(this.familyInvitations.entries()),
+      familyAuditLogs: [...this.familyAuditLogs],
+      systemAuditLogs: [...this.systemAuditLogs],
+      children: Array.from(this.children.entries()),
+      devices: Array.from(this.devices.entries()),
+      policies: Array.from(this.policies.entries()),
+      requests: Array.from(this.requests.entries()),
+    });
+  }
+
+  /**
+   * Restore state from snapshot upon any failure during transactional execution
+   */
+  public restoreSnapshot(snapshotJson: string): void {
+    const data = JSON.parse(snapshotJson);
+    this.users = new Map(data.users);
+    this.families = new Map(data.families);
+    this.familyMembers = new Map(data.familyMembers);
+    this.familyInvitations = new Map(data.familyInvitations);
+    this.familyAuditLogs = data.familyAuditLogs;
+    this.systemAuditLogs = data.systemAuditLogs;
+    this.children = new Map(data.children);
+    this.devices = new Map(data.devices);
+    this.policies = new Map(data.policies);
+    this.requests = new Map(data.requests);
+    this.save();
   }
 
   public seedDefaultDemoData() {

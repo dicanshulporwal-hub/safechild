@@ -446,78 +446,106 @@ export class FamilyService {
   }
 
   /**
-   * Transfer Family Ownership with Single-Owner Invariant & Step-Up Auth
+   * Transfer Family Ownership with Single-Owner Invariant, Step-Up Auth Replay Protection & Concurrency Safety
    */
-  public transferOwnership(
+  public async transferOwnership(
     familyId: string,
     newOwnerUserId: string,
     currentOwnerUserId: string,
     password?: string,
-    otpCode?: string
-  ) {
-    const family = db.families.get(familyId);
-    if (!family) throw new Error('Family not found.');
+    otpCode?: string,
+    timeSec?: number
+  ): Promise<void> {
+    return db.runWithFamilyLock(familyId, async () => {
+      // Create snapshot for atomic rollback on any failure
+      const snapshot = db.createSnapshot();
 
-    if (family.ownerUserId !== currentOwnerUserId) {
-      throw new Error('Forbidden. Only the current Family Owner can transfer ownership.');
-    }
+      try {
+        const family = db.families.get(familyId);
+        if (!family) throw new Error('Family not found.');
 
-    if (newOwnerUserId === currentOwnerUserId) {
-      throw new Error('Cannot transfer ownership to yourself.');
-    }
+        if (family.ownerUserId !== currentOwnerUserId) {
+          throw new Error('Forbidden. Only the current Family Owner can transfer ownership.');
+        }
 
-    const currentOwner = db.users.get(currentOwnerUserId);
-    if (!currentOwner) throw new Error('Current owner user not found.');
+        if (newOwnerUserId === currentOwnerUserId) {
+          throw new Error('Cannot transfer ownership to yourself.');
+        }
 
-    // Step-up authentication is strictly required
-    if (!password) {
-      throw new Error('Step-up authentication required: password must be provided.');
-    }
+        // Validate target member BEFORE consuming any step-up credentials
+        const newOwnerMembership = Array.from(db.familyMembers.values()).find(
+          (m) => m.familyId === familyId && m.userId === newOwnerUserId
+        );
+        if (!newOwnerMembership) {
+          throw new Error('Target user is not a member of this family.');
+        }
 
-    verifyStepUpAuth(currentOwner, password, otpCode);
+        const currentOwner = db.users.get(currentOwnerUserId);
+        if (!currentOwner) throw new Error('Current owner user not found.');
 
-    const newOwnerMembership = Array.from(db.familyMembers.values()).find(
-      (m) => m.familyId === familyId && m.userId === newOwnerUserId
-    );
-    if (!newOwnerMembership) {
-      throw new Error('Target user is not a member of this family.');
-    }
+        // Step-up authentication is strictly required
+        if (!password) {
+          throw new Error('Step-up authentication required: password must be provided.');
+        }
 
-    // Atomic compare-and-swap
-    const oldOwnerMembership = Array.from(db.familyMembers.values()).find(
-      (m) => m.familyId === familyId && m.userId === currentOwnerUserId
-    );
-    if (oldOwnerMembership) {
-      oldOwnerMembership.role = 'PARENT';
-      db.familyMembers.set(oldOwnerMembership.id, oldOwnerMembership);
-    }
+        const stepUp = verifyStepUpAuth(currentOwner, password, otpCode, timeSec);
 
-    newOwnerMembership.role = 'OWNER';
-    db.familyMembers.set(newOwnerMembership.id, newOwnerMembership);
+        // Step-up replay protection & atomic credential consumption:
+        if (stepUp.method === 'TOTP' && stepUp.totpTimeStep !== undefined) {
+          const lastUsed = currentOwner.totpLastUsedSteps?.['family_ownership_transfer'];
+          if (lastUsed !== undefined && lastUsed === stepUp.totpTimeStep) {
+            throw new Error('This TOTP code has already been used for ownership transfer. Please wait for the next code.');
+          }
+          if (!currentOwner.totpLastUsedSteps) currentOwner.totpLastUsedSteps = {};
+          currentOwner.totpLastUsedSteps['family_ownership_transfer'] = stepUp.totpTimeStep;
+          db.users.set(currentOwnerUserId, currentOwner);
+        } else if (stepUp.method === 'RECOVERY_CODE' && stepUp.recoveryCodeIndex !== undefined) {
+          // Atomically remove the accepted hashed recovery code
+          currentOwner.mfaRecoveryCodes!.splice(stepUp.recoveryCodeIndex, 1);
+          db.users.set(currentOwnerUserId, currentOwner);
+        }
 
-    family.ownerUserId = newOwnerUserId;
-    family.updatedAt = new Date().toISOString();
-    db.families.set(familyId, family);
+        // Atomic compare-and-swap role swap
+        const oldOwnerMembership = Array.from(db.familyMembers.values()).find(
+          (m) => m.familyId === familyId && m.userId === currentOwnerUserId
+        );
+        if (oldOwnerMembership) {
+          oldOwnerMembership.role = 'PARENT';
+          db.familyMembers.set(oldOwnerMembership.id, oldOwnerMembership);
+        }
 
-    // Invariant verification: Exactly ONE active owner
-    const owners = Array.from(db.familyMembers.values()).filter(
-      (m) => m.familyId === familyId && m.role === 'OWNER'
-    );
-    if (owners.length !== 1) {
-      throw new Error('FATAL: Ownership invariant violation. Rolled back.');
-    }
+        newOwnerMembership.role = 'OWNER';
+        db.familyMembers.set(newOwnerMembership.id, newOwnerMembership);
 
-    db.save();
+        family.ownerUserId = newOwnerUserId;
+        family.updatedAt = new Date().toISOString();
+        db.families.set(familyId, family);
 
-    const oldOwner = db.users.get(currentOwnerUserId);
-    const newOwner = db.users.get(newOwnerUserId);
-    this.logAudit(
-      familyId,
-      currentOwnerUserId,
-      oldOwner?.name || 'Owner',
-      'OWNERSHIP_TRANSFERRED',
-      `Transferred family ownership to ${newOwner?.name || 'Parent'} (${newOwner?.email || ''})`
-    );
+        // Strict Invariant verification: Exactly ONE active owner and matches family.ownerUserId
+        const owners = Array.from(db.familyMembers.values()).filter(
+          (m) => m.familyId === familyId && m.role === 'OWNER'
+        );
+        if (owners.length !== 1 || owners[0].userId !== family.ownerUserId) {
+          throw new Error('FATAL: Ownership invariant violation. Rolled back.');
+        }
+
+        db.save();
+
+        const oldOwner = db.users.get(currentOwnerUserId);
+        const newOwner = db.users.get(newOwnerUserId);
+        this.logAudit(
+          familyId,
+          currentOwnerUserId,
+          oldOwner?.name || 'Owner',
+          'OWNERSHIP_TRANSFERRED',
+          `Transferred family ownership to ${newOwner?.name || 'Parent'} (${newOwner?.email || ''})`
+        );
+      } catch (err: any) {
+        // Roll back all membership, owner, credential, and audit mutations
+        db.restoreSnapshot(snapshot);
+        throw err;
+      }
+    });
   }
 
   /**

@@ -48,11 +48,19 @@ export class NotificationService {
   }
 
   public getNotificationsForParent(parentId: string): NotificationItem[] {
-    const parentChildIds = Array.from(db.children.values())
-      .filter((c) => c.parentId === parentId)
+    const userFamilyIds = Array.from(db.familyMembers.values())
+      .filter((m) => m.userId === parentId)
+      .map((m) => m.familyId);
+    const ownedFamilies = Array.from(db.families.values())
+      .filter((f) => f.ownerUserId === parentId)
+      .map((f) => f.id);
+    const allFamilyIds = new Set([...userFamilyIds, ...ownedFamilies]);
+
+    const familyChildIds = Array.from(db.children.values())
+      .filter((c) => (c.familyId && allFamilyIds.has(c.familyId)) || c.parentId === parentId)
       .map((c) => c.id);
 
-    return this.notifications.filter((n) => parentChildIds.includes(n.childId));
+    return this.notifications.filter((n) => familyChildIds.includes(n.childId));
   }
 
   public markAsRead(notificationId: string) {

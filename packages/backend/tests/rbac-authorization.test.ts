@@ -152,7 +152,9 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
     authService.verifyEmail(uAdmin.emailVerificationToken);
     adminId = uAdmin.user.id;
     adminToken = uAdmin.accessToken;
-    rbacService.bootstrapDevAdmin(adminId);
+    process.env.ENABLE_DEV_ADMIN_BOOTSTRAP = 'true';
+    process.env.DEV_ADMIN_BOOTSTRAP_SECRET = 'test-secret-at-least-16-chars-long';
+    rbacService.bootstrapDevAdmin(adminId, 'test-secret-at-least-16-chars-long');
   });
 
   after(() => {

@@ -39,6 +39,7 @@ export class RequestService {
       id: `req-${nanoid(10)}`,
       childId,
       deviceId,
+      familyId: child.familyId || device?.familyId,
       deviceName: device ? device.name : 'Unknown Device',
       domain: normDomain,
       reason: reason ? reason.trim() : undefined,

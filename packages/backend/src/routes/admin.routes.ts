@@ -109,16 +109,28 @@ adminRouter.get('/audit', authMiddleware, requireVerifiedEmail, requireSystemAdm
   }
 });
 
-// POST /api/admin/bootstrap-dev - Development-only admin promotion
-adminRouter.post('/bootstrap-dev', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const user = rbacService.bootstrapDevAdmin(req.userId!);
-    res.json({
-      success: true,
-      message: `User ${user.email} promoted to SYSTEM_ADMIN via development bootstrap.`,
-      systemRole: user.systemRole,
-    });
-  } catch (e: any) {
-    res.status(403).json({ error: e.message });
+// POST /api/admin/bootstrap-dev - Development-only admin promotion (Rejected unconditionally in production)
+adminRouter.post(
+  '/bootstrap-dev',
+  (req, res, next) => {
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(403).json({ error: 'Admin bootstrap is strictly disabled in production environments.' });
+    }
+    next();
+  },
+  authMiddleware,
+  requireVerifiedEmail,
+  (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const secret = (req.headers['x-admin-bootstrap-secret'] as string) || req.body?.bootstrapSecret;
+      const user = rbacService.bootstrapDevAdmin(req.userId!, secret);
+      res.json({
+        success: true,
+        message: `User ${user.email} promoted to SYSTEM_ADMIN via development bootstrap.`,
+        systemRole: user.systemRole,
+      });
+    } catch (e: any) {
+      res.status(403).json({ error: e.message });
+    }
   }
-});
+);

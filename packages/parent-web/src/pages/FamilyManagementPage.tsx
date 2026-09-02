@@ -390,31 +390,40 @@ export const FamilyManagementPage: React.FC = () => {
         </section>
       )}
 
-      {/* Section 5: Family Activity Audit Feed */}
-      <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
-        <div className="pb-3 border-b border-slate-800">
-          <h2 className="text-sm font-bold text-white uppercase tracking-wider">Family Audit Trail</h2>
-          <p className="text-xs text-slate-400">Immutable record of all management, policy, and approval actions</p>
-        </div>
+      {/* Section 5: Family Activity Audit Feed (OWNER and PARENT only) */}
+      {familyData?.myRole !== 'VIEWER' ? (
+        <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
+          <div className="pb-3 border-b border-slate-800">
+            <h2 className="text-sm font-bold text-white uppercase tracking-wider">Family Audit Trail</h2>
+            <p className="text-xs text-slate-400">Immutable record of all management, policy, and approval actions</p>
+          </div>
 
-        <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-          {auditLogs.length === 0 ? (
-            <div className="text-xs text-slate-500 text-center py-4">No audit logs recorded yet.</div>
-          ) : (
-            auditLogs.map((l) => (
-              <div key={l.id} className="p-3 rounded-xl bg-slate-950/50 border border-slate-800 flex items-center justify-between text-xs">
-                <div>
-                  <div className="font-semibold text-white flex items-center gap-2">
-                    <span className="text-emerald-400 font-mono text-[11px]">[{l.action}]</span>
-                    <span>{l.details}</span>
+          <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+            {auditLogs.length === 0 ? (
+              <div className="text-xs text-slate-500 italic py-3 text-center">No audit logs recorded yet.</div>
+            ) : (
+              auditLogs.map((l) => (
+                <div key={l.id} className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 flex items-start gap-3">
+                  <div className="w-2 h-2 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
+                  <div className="flex-1 space-y-0.5">
+                    <div className="text-xs text-white">
+                      <span className="font-semibold text-emerald-400 font-mono text-[11px] mr-2">[{l.action}]</span>
+                      {l.details}
+                    </div>
+                    <div className="text-[11px] text-slate-400">By {l.actorName} • {new Date(l.timestamp || Date.now()).toLocaleString()}</div>
                   </div>
-                  <div className="text-[11px] text-slate-400">By {l.actorName} • {new Date(l.timestamp || Date.now()).toLocaleString()}</div>
                 </div>
-              </div>
-            ))
-          )}
-        </div>
-      </section>
+              ))
+            )}
+          </div>
+        </section>
+      ) : (
+        <section className="bg-slate-900/60 border border-slate-800/60 rounded-2xl p-5 shadow-xl">
+          <div className="text-xs text-slate-400">
+            🔒 <span className="font-semibold text-slate-300">Family Audit Trail</span> is restricted to Family Owners and Parents. As a Viewer, you have read-only access to child protection policies.
+          </div>
+        </section>
+      )}
 
       {/* Section 6: Transfer Family Ownership with Mandatory Step-Up */}
       {isOwner && familyData?.members?.length > 1 && (

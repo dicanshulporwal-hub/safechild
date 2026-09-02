@@ -35,10 +35,12 @@ export class DeviceService {
 
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
+    const child = db.children.get(childId);
     const pairingCode: PairingCode = {
       code,
       childId,
       parentId,
+      familyId: child?.familyId,
       expiresAt,
     };
 
@@ -73,11 +75,14 @@ export class DeviceService {
 
     const policy = db.policies.get(pairing.childId);
     const policyVersion = policy ? policy.version : 1;
+    const child = db.children.get(pairing.childId);
+    const familyId = child?.familyId || pairing.familyId;
 
     const device: ExtendedDevice = {
       id: deviceId,
       childId: pairing.childId,
       parentId: pairing.parentId,
+      familyId,
       name: deviceName || `${platform === 'android' ? 'Android Phone' : 'Windows Laptop'}`,
       platform,
       deviceToken,

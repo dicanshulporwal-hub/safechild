@@ -144,17 +144,27 @@ export class RbacService {
   /**
    * Resolve family for a child profile
    */
+  /**
+   * Resolve family for a child profile (Uses child.familyId directly, avoiding arbitrary parentId membership resolution)
+   */
   public getFamilyForChild(childId: string): Family | undefined {
     const child = db.children.get(childId);
     if (!child) return undefined;
 
-    // A child belongs to the family owned by or associated with child.parentId
+    if (child.familyId) {
+      const family = db.families.get(child.familyId);
+      if (family) return family;
+    }
+
+    // Fallback for unmigrated legacy records: check direct owner family first
+    const ownerFamily = Array.from(db.families.values()).find((f) => f.ownerUserId === child.parentId);
+    if (ownerFamily) return ownerFamily;
+
     const membership = Array.from(db.familyMembers.values()).find((m) => m.userId === child.parentId);
     if (membership) {
       return db.families.get(membership.familyId);
     }
-    // Fallback: check if parentId is owner of a family directly
-    return Array.from(db.families.values()).find((f) => f.ownerUserId === child.parentId);
+    return undefined;
   }
 
   /**
@@ -162,14 +172,26 @@ export class RbacService {
    */
   public getFamilyForDevice(deviceId: string): Family | undefined {
     const device = db.devices.get(deviceId);
-    if (!device || !device.childId) return undefined;
-    return this.getFamilyForChild(device.childId);
+    if (!device) return undefined;
+    if (device.familyId) {
+      const family = db.families.get(device.familyId);
+      if (family) return family;
+    }
+    if (device.childId) {
+      return this.getFamilyForChild(device.childId);
+    }
+    return undefined;
   }
 
   /**
    * Resolve family for a policy (childId)
    */
   public getFamilyForPolicy(childId: string): Family | undefined {
+    const policy = db.policies.get(childId);
+    if (policy && policy.familyId) {
+      const family = db.families.get(policy.familyId);
+      if (family) return family;
+    }
     return this.getFamilyForChild(childId);
   }
 
@@ -178,8 +200,15 @@ export class RbacService {
    */
   public getFamilyForRequest(requestId: string): Family | undefined {
     const req = db.requests.get(requestId);
-    if (!req || !req.childId) return undefined;
-    return this.getFamilyForChild(req.childId);
+    if (!req) return undefined;
+    if (req.familyId) {
+      const family = db.families.get(req.familyId);
+      if (family) return family;
+    }
+    if (req.childId) {
+      return this.getFamilyForChild(req.childId);
+    }
+    return undefined;
   }
 
   /**
@@ -251,14 +280,33 @@ export class RbacService {
   }
 
   /**
-   * Development-only admin bootstrap mechanism
+   * Development-only admin bootstrap mechanism:
+   * - Unconditionally disabled in production environments
+   * - Requires NODE_ENV !== 'production'
+   * - Requires ENABLE_DEV_ADMIN_BOOTSTRAP === 'true'
+   * - Requires valid x-admin-bootstrap-secret matching DEV_ADMIN_BOOTSTRAP_SECRET
    */
-  public bootstrapDevAdmin(userId: string): ParentUser {
+  public bootstrapDevAdmin(userId: string, bootstrapSecret?: string): ParentUser {
     const isProduction = process.env.NODE_ENV === 'production';
-    const allowBootstrap = process.env.ENABLE_DEV_ADMIN_BOOTSTRAP === 'true' || !isProduction;
 
-    if (isProduction && !allowBootstrap) {
-      throw new Error('Dev admin bootstrap is strictly disabled in production environments.');
+    // Production MUST reject bootstrap unconditionally, even if ENABLE_DEV_ADMIN_BOOTSTRAP=true
+    if (isProduction) {
+      throw new Error('Admin bootstrap is strictly disabled in production environments.');
+    }
+
+    // Default behavior in every environment is disabled unless explicitly set
+    const allowBootstrap = process.env.ENABLE_DEV_ADMIN_BOOTSTRAP === 'true';
+    if (!allowBootstrap) {
+      throw new Error('Admin bootstrap is disabled. Set ENABLE_DEV_ADMIN_BOOTSTRAP=true in development.');
+    }
+
+    const expectedSecret = process.env.DEV_ADMIN_BOOTSTRAP_SECRET;
+    if (!expectedSecret || expectedSecret.trim().length < 16) {
+      throw new Error('Admin bootstrap requires DEV_ADMIN_BOOTSTRAP_SECRET (min 16 chars) configured in development.');
+    }
+
+    if (!bootstrapSecret || bootstrapSecret !== expectedSecret) {
+      throw new Error('Forbidden: Invalid admin bootstrap secret.');
     }
 
     const user = db.users.get(userId);

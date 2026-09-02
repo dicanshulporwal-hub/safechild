@@ -11,8 +11,20 @@ export const childRouter = Router();
 // All child routes require verified email
 childRouter.use(authMiddleware, requireVerifiedEmail);
 
-// List children for logged-in parent's family
+// List children for logged-in parent's family (or specific familyId)
 childRouter.get('/', (req: AuthenticatedRequest, res: Response) => {
+  const familyId = req.query.familyId as string | undefined;
+  if (familyId) {
+    if (!rbacService.getFamilyMembership(req.userId!, familyId)) {
+      return res.status(403).json({ error: 'Forbidden: You do not belong to this family.' });
+    }
+    if (!rbacService.hasFamilyPermission(req.userId!, familyId, FamilyPermission.CHILD_READ)) {
+      return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to view children.' });
+    }
+    const children = childService.getChildrenForParent(req.userId!, familyId);
+    return res.json(children);
+  }
+
   const family = familyService.getOrCreateUserFamily(req.userId!);
   if (!rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.CHILD_READ)) {
     return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to view children.' });
@@ -25,16 +37,19 @@ childRouter.get('/', (req: AuthenticatedRequest, res: Response) => {
 // Create child profile
 childRouter.post('/', (req: AuthenticatedRequest, res: Response) => {
   try {
-    const family = familyService.getOrCreateUserFamily(req.userId!);
-    if (!rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.CHILD_MANAGE)) {
+    const { name, age, avatar, familyId } = req.body;
+    const targetFamily = familyId
+      ? db.families.get(familyId) || familyService.getOrCreateUserFamily(req.userId!)
+      : familyService.getOrCreateUserFamily(req.userId!);
+
+    if (!rbacService.hasFamilyPermission(req.userId!, targetFamily.id, FamilyPermission.CHILD_MANAGE)) {
       return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to create child profiles.' });
     }
 
-    const { name, age, avatar } = req.body;
     if (!name) {
       return res.status(400).json({ error: 'Child name is required.' });
     }
-    const result = childService.createChild(req.userId!, name, age, avatar);
+    const result = childService.createChild(req.userId!, name, age, avatar, targetFamily.id);
     res.json(result);
   } catch (e: any) {
     const status = e.message.includes('Forbidden') ? 403 : 400;

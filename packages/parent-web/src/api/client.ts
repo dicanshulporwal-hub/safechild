@@ -3,6 +3,7 @@ const API_BASE = '/api';
 export interface Child {
   id: string;
   parentId: string;
+  familyId?: string;
   name: string;
   age?: number;
   avatar?: string;
@@ -25,6 +26,7 @@ export interface CategoryControl {
 export interface Policy {
   id: string;
   childId: string;
+  familyId?: string;
   version: number;
   isPaused: boolean;
   pauseExpiresAt?: string | null;
@@ -46,6 +48,7 @@ export interface Device {
   id: string;
   childId: string;
   parentId: string;
+  familyId?: string;
   name: string;
   platform: 'android' | 'windows' | 'ios' | 'macos';
   deviceToken: string;
@@ -59,6 +62,7 @@ export interface AccessRequest {
   id: string;
   childId: string;
   deviceId: string;
+  familyId?: string;
   deviceName?: string;
   domain: string;
   reason?: string;
@@ -601,10 +605,15 @@ class ApiClient {
     return data;
   }
 
-  async bootstrapDevAdmin() {
+  async bootstrapDevAdmin(bootstrapSecret?: string) {
+    const headers: Record<string, string> = { ...(this.getHeaders() as Record<string, string>) };
+    if (bootstrapSecret) {
+      headers['x-admin-bootstrap-secret'] = bootstrapSecret;
+    }
     const res = await fetch(`${API_BASE}/admin/bootstrap-dev`, {
       method: 'POST',
-      headers: this.getHeaders(),
+      headers,
+      body: JSON.stringify({ bootstrapSecret }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Bootstrap failed');

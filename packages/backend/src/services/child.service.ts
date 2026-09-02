@@ -4,10 +4,21 @@ import { nanoid } from 'nanoid';
 import { familyService } from './family.service';
 
 export class ChildService {
-  public getChildrenForParent(parentId: string): Child[] {
-    const family = familyService.getOrCreateUserFamily(parentId);
+  public getChildrenForParent(parentId: string, familyId?: string): Child[] {
+    if (familyId) {
+      return Array.from(db.children.values()).filter((c) => c.familyId === familyId);
+    }
+    // Get all families user belongs to
+    const userFamilyIds = Array.from(db.familyMembers.values())
+      .filter((m) => m.userId === parentId)
+      .map((m) => m.familyId);
+    const ownedFamilies = Array.from(db.families.values())
+      .filter((f) => f.ownerUserId === parentId)
+      .map((f) => f.id);
+    const allFamilyIds = Array.from(new Set([...userFamilyIds, ...ownedFamilies]));
+
     return Array.from(db.children.values()).filter(
-      (c) => c.parentId === parentId || c.parentId === family.ownerUserId
+      (c) => (c.familyId && allFamilyIds.includes(c.familyId)) || c.parentId === parentId
     );
   }
 
@@ -15,13 +26,22 @@ export class ChildService {
     return db.children.get(childId);
   }
 
-  public createChild(parentId: string, name: string, age?: number, avatar?: string): { child: Child; policy: Policy } {
+  public createChild(
+    parentId: string,
+    name: string,
+    age?: number,
+    avatar?: string,
+    targetFamilyId?: string
+  ): { child: Child; policy: Policy } {
     const childId = `child-${nanoid(8)}`;
-    const family = familyService.getOrCreateUserFamily(parentId);
+    const family = targetFamilyId
+      ? db.families.get(targetFamilyId) || familyService.getOrCreateUserFamily(parentId)
+      : familyService.getOrCreateUserFamily(parentId);
 
     const child: Child = {
       id: childId,
       parentId: family.ownerUserId, // Bind child to family owner so all co-parents have access
+      familyId: family.id,
       name: name.trim(),
       age: age || undefined,
       avatar: avatar || '🧑',
@@ -33,6 +53,7 @@ export class ChildService {
     const policy: Policy = {
       id: `policy-${nanoid(8)}`,
       childId: child.id,
+      familyId: family.id,
       version: 1,
       isPaused: false,
       rules: [
@@ -82,7 +103,9 @@ export class ChildService {
     db.save();
 
     if (child) {
-      const family = familyService.getOrCreateUserFamily(child.parentId);
+      const family = child.familyId
+        ? db.families.get(child.familyId) || familyService.getOrCreateUserFamily(child.parentId)
+        : familyService.getOrCreateUserFamily(child.parentId);
       familyService.logAudit(
         family.id,
         child.parentId,

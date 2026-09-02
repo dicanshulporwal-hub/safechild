@@ -65,9 +65,11 @@ export const OperationsDashboardPage: React.FC = () => {
   };
 
   const handleDevBootstrap = async () => {
+    const secret = window.prompt('Enter DEV_ADMIN_BOOTSTRAP_SECRET to authenticate promotion:');
+    if (!secret) return;
     setBootstrapping(true);
     try {
-      const res = await api.bootstrapDevAdmin();
+      const res = await api.bootstrapDevAdmin(secret);
       showToast(res.message || 'Promoted to SYSTEM_ADMIN!', 'success');
       fetchOpsData();
     } catch (e: any) {

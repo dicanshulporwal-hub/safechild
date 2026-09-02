@@ -1,37 +1,35 @@
 {
   "stage": "Stage 11",
-  "step": "Step 3 - System Admin RBAC and Family Authorization",
-  "timestamp": "2026-08-31T12:03:37.551Z",
+  "step": "Step 3A - RBAC Critical Remediation",
+  "timestamp": "2026-09-02T04:13:00.796Z",
   "branch": "security/stage11-step3-rbac",
-  "commitHash": "b928dd485052b19c3339dd83bf4a1bba58fca595",
+  "commitHash": "e793f70047e8311f4f542fb025a2ee4abfc392bc",
   "archive": {
-    "filename": "safebrowse-stage11-step3-review.zip",
-    "sizeBytes": 326090,
-    "sizeKb": "318.4",
-    "sha256": "86d9f841f3fbd279649c32e83bef491e5c20c2e331c656666feeaf552a88b6fd"
+    "filename": "safebrowse-stage11-step3a-review.zip",
+    "sizeBytes": 343018,
+    "sizeKb": "335.0",
+    "sha256": "e254bdcb55abce21904f66f7ea28b741a99c28bd69359f2b02fda4f76ca6f20c"
   },
   "testResults": {
-    "totalTests": 75,
-    "passed": 75,
+    "totalTests": 96,
+    "passed": 96,
     "failed": 0,
-    "suites": 21,
+    "suites": 30,
+    "step3aRemediationTestsPassed": 13,
     "step3RbacTestsPassed": 16,
     "step2IdentityTestsPassed": 28,
     "policyEngineTestsPassed": 8,
     "stage3EdgeCaseTestsPassed": 23
   },
   "probeResults": {
-    "parentAccessedSystemAdmin": false,
-    "familyOwnerTreatedAsSystemAdmin": false,
-    "viewerMutatedPolicy": false,
-    "viewerApprovedRequest": false,
-    "parentBypassedOwnerOnlyApproval": false,
-    "crossFamilyChildAccessed": false,
-    "crossFamilyDeviceAccessed": false,
-    "crossFamilyUsageChanged": false,
-    "finalOwnerRemoved": false,
-    "ownershipTransferredWithoutStepUp": false,
-    "invitationReused": false
+    "ordinaryUserSelfPromotedToSystemAdmin": false,
+    "productionAdminBootstrapEnabled": false,
+    "recoveryCodeReusedForOwnershipTransfer": false,
+    "totpStepReusedForOwnershipTransfer": false,
+    "failedTransferLeftPartialMutation": false,
+    "concurrentTransferCreatedMultipleOwners": false,
+    "coParentActivityAccessDenied": false,
+    "multiFamilyResourceResolvedToWrongFamily": false
   },
   "securityStatus": "CERTIFIED_SECURE"
 }
