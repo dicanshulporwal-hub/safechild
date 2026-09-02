@@ -8,6 +8,7 @@ import {
   calculateExpirationDate,
 } from '@safebrowse/shared';
 import { authService } from '../src/services/auth.service';
+import { familyService } from '../src/services/family.service';
 import { childService } from '../src/services/child.service';
 import { deviceService } from '../src/services/device.service';
 import { policyService } from '../src/services/policy.service';
@@ -95,8 +96,9 @@ describe('SafeBrowse Stage 3 Security, Edge-Case & Bypass Audit Tests', () => {
 
       const famA = authService.register(`famA-${uA}@test.io`, 'StrongPassA2026!Secure', 'Parent A');
       const famB = authService.register(`famB-${uB}@test.io`, 'StrongPassB2026!Secure', 'Parent B');
+      const familyB = familyService.getOrCreateUserFamily(famB.user.id);
 
-      const { child: childB } = childService.createChild(famB.user.id, 'Child B', 12);
+      const { child: childB } = childService.createChild(famB.user.id, 'Child B', 12, undefined, familyB.id);
       const codeB = deviceService.generatePairingCode(famB.user.id, childB.id);
       const { device: devB } = deviceService.pairDevice(codeB.code, 'Phone B', 'android');
 
@@ -112,8 +114,9 @@ describe('SafeBrowse Stage 3 Security, Edge-Case & Bypass Audit Tests', () => {
 
       const famA = authService.register(`famA-${uA}@test.io`, 'StrongPassA2026!Secure', 'Parent A');
       const famB = authService.register(`famB-${uB}@test.io`, 'StrongPassB2026!Secure', 'Parent B');
+      const familyB = familyService.getOrCreateUserFamily(famB.user.id);
 
-      const { child: childB } = childService.createChild(famB.user.id, 'Child B', 12);
+      const { child: childB } = childService.createChild(famB.user.id, 'Child B', 12, undefined, familyB.id);
       const codeB = deviceService.generatePairingCode(famB.user.id, childB.id);
       const { device: devB } = deviceService.pairDevice(codeB.code, 'Phone B', 'android');
 
@@ -135,7 +138,8 @@ describe('SafeBrowse Stage 3 Security, Edge-Case & Bypass Audit Tests', () => {
     it('should generate high-entropy pairing codes and issue distinct device credentials', () => {
       const reg = authService.register(`sec-pair-${nanoid(6)}@safebrowse.io`, 'SecTestPassphrase2026!', 'Pair Parent');
       authService.verifyEmail(reg.emailVerificationToken);
-      const { child } = childService.createChild(reg.user.id, 'Pair Child', 10);
+      const familyReg = familyService.getOrCreateUserFamily(reg.user.id);
+      const { child } = childService.createChild(reg.user.id, 'Pair Child', 10, undefined, familyReg.id);
       const pairing = deviceService.generatePairingCode(reg.user.id, child.id);
 
       // High entropy format: SB-XXXX-XXXX
@@ -154,7 +158,8 @@ describe('SafeBrowse Stage 3 Security, Edge-Case & Bypass Audit Tests', () => {
     it('should reject expired pairing codes', () => {
       const reg = authService.register(`sec-exp-${nanoid(6)}@safebrowse.io`, 'SecTestPassphrase2026!', 'Exp Parent');
       authService.verifyEmail(reg.emailVerificationToken);
-      const { child } = childService.createChild(reg.user.id, 'Exp Child', 10);
+      const familyReg = familyService.getOrCreateUserFamily(reg.user.id);
+      const { child } = childService.createChild(reg.user.id, 'Exp Child', 10, undefined, familyReg.id);
       const pairing = deviceService.generatePairingCode(reg.user.id, child.id);
 
       // Expire code
@@ -175,6 +180,7 @@ describe('SafeBrowse Stage 3 Security, Edge-Case & Bypass Audit Tests', () => {
       const policy: Policy = {
         id: 'pol-ttl',
         childId: 'c1',
+        familyId: 'fam-test',
         version: 3,
         isPaused: false,
         rules: [

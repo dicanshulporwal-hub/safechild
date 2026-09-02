@@ -36,11 +36,14 @@ export class DeviceService {
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
     const child = db.children.get(childId);
+    if (!child || !child.familyId || !db.families.has(child.familyId)) {
+      throw new Error('Mandatory tenancy error: Child must belong to a valid family.');
+    }
     const pairingCode: PairingCode = {
       code,
       childId,
       parentId,
-      familyId: child?.familyId,
+      familyId: child.familyId,
       expiresAt,
     };
 
@@ -76,7 +79,10 @@ export class DeviceService {
     const policy = db.policies.get(pairing.childId);
     const policyVersion = policy ? policy.version : 1;
     const child = db.children.get(pairing.childId);
-    const familyId = child?.familyId || pairing.familyId;
+    if (!child || !child.familyId || !db.families.has(child.familyId)) {
+      throw new Error('Mandatory tenancy error: Child must belong to a valid family.');
+    }
+    const familyId = child.familyId;
 
     const device: ExtendedDevice = {
       id: deviceId,

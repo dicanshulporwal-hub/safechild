@@ -92,7 +92,7 @@ export interface SafeSearchConfig {
 export interface Policy {
   id: string;
   childId: string;
-  familyId?: string;
+  familyId: string;
   version: number;
   isPaused: boolean;
   pauseExpiresAt?: string | null;
@@ -109,7 +109,7 @@ export interface Policy {
 export interface Child {
   id: string;
   parentId: string;
-  familyId?: string;
+  familyId: string;
   name: string;
   avatar?: string;
   age?: number;
@@ -121,7 +121,7 @@ export interface Device {
   id: string;
   childId: string;
   parentId: string;
-  familyId?: string;
+  familyId: string;
   name: string;
   platform: DevicePlatform;
   deviceToken: string;
@@ -138,7 +138,7 @@ export interface PairingCode {
   code: string;
   childId: string;
   parentId: string;
-  familyId?: string;
+  familyId: string;
   expiresAt: string;
 }
 
@@ -167,7 +167,7 @@ export interface AccessRequest {
   id: string;
   childId: string;
   deviceId: string;
-  familyId?: string;
+  familyId: string;
   deviceName?: string;
   domain: string;
   reason?: string;

@@ -14,9 +14,14 @@ export class PolicyService {
   public getPolicyForChild(childId: string): Policy {
     let policy = db.policies.get(childId);
     if (!policy) {
+      const child = db.children.get(childId);
+      if (!child || !child.familyId) {
+        throw new Error('Mandatory tenancy error: Child not found or has no valid familyId.');
+      }
       policy = {
         id: `policy-${nanoid(8)}`,
         childId,
+        familyId: child.familyId,
         version: 1,
         isPaused: false,
         rules: [],

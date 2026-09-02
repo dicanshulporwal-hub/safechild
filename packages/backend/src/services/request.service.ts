@@ -35,11 +35,15 @@ export class RequestService {
       throw new Error('Child profile not found.');
     }
 
+    if (!child.familyId || !db.families.has(child.familyId)) {
+      throw new Error('Mandatory tenancy error: Child has no valid family.');
+    }
+
     const request: ExtendedAccessRequest = {
       id: `req-${nanoid(10)}`,
       childId,
       deviceId,
-      familyId: child.familyId || device?.familyId,
+      familyId: child.familyId,
       deviceName: device ? device.name : 'Unknown Device',
       domain: normDomain,
       reason: reason ? reason.trim() : undefined,

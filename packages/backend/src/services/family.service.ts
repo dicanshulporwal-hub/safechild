@@ -457,8 +457,8 @@ export class FamilyService {
     timeSec?: number
   ): Promise<void> {
     return db.runWithFamilyLock(familyId, async () => {
-      // Create snapshot for atomic rollback on any failure
-      const snapshot = db.createSnapshot();
+      // Create isolated family-scoped snapshot for atomic rollback on any failure
+      const snapshot = db.createFamilySnapshot(familyId, [currentOwnerUserId, newOwnerUserId]);
 
       try {
         const family = db.families.get(familyId);
@@ -529,8 +529,7 @@ export class FamilyService {
           throw new Error('FATAL: Ownership invariant violation. Rolled back.');
         }
 
-        db.save();
-
+        // Stage audit event BEFORE persistence so it commits atomically in the same transaction
         const oldOwner = db.users.get(currentOwnerUserId);
         const newOwner = db.users.get(newOwnerUserId);
         this.logAudit(
@@ -540,9 +539,12 @@ export class FamilyService {
           'OWNERSHIP_TRANSFERRED',
           `Transferred family ownership to ${newOwner?.name || 'Parent'} (${newOwner?.email || ''})`
         );
+
+        // Persist complete transaction (credentials, memberships, family, audit event) atomically
+        db.save();
       } catch (err: any) {
-        // Roll back all membership, owner, credential, and audit mutations
-        db.restoreSnapshot(snapshot);
+        // Roll back family-scoped records without affecting any other family
+        db.restoreFamilySnapshot(snapshot);
         throw err;
       }
     });

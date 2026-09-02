@@ -145,70 +145,39 @@ export class RbacService {
    * Resolve family for a child profile
    */
   /**
-   * Resolve family for a child profile (Uses child.familyId directly, avoiding arbitrary parentId membership resolution)
+   * Resolve family for a child profile (Uses child.familyId directly; no fallbacks)
    */
   public getFamilyForChild(childId: string): Family | undefined {
     const child = db.children.get(childId);
-    if (!child) return undefined;
-
-    if (child.familyId) {
-      const family = db.families.get(child.familyId);
-      if (family) return family;
-    }
-
-    // Fallback for unmigrated legacy records: check direct owner family first
-    const ownerFamily = Array.from(db.families.values()).find((f) => f.ownerUserId === child.parentId);
-    if (ownerFamily) return ownerFamily;
-
-    const membership = Array.from(db.familyMembers.values()).find((m) => m.userId === child.parentId);
-    if (membership) {
-      return db.families.get(membership.familyId);
-    }
-    return undefined;
+    if (!child || !child.familyId) return undefined;
+    return db.families.get(child.familyId);
   }
 
   /**
-   * Resolve family for a device
+   * Resolve family for a device (Uses device.familyId directly; no fallbacks)
    */
   public getFamilyForDevice(deviceId: string): Family | undefined {
     const device = db.devices.get(deviceId);
-    if (!device) return undefined;
-    if (device.familyId) {
-      const family = db.families.get(device.familyId);
-      if (family) return family;
-    }
-    if (device.childId) {
-      return this.getFamilyForChild(device.childId);
-    }
-    return undefined;
+    if (!device || !device.familyId) return undefined;
+    return db.families.get(device.familyId);
   }
 
   /**
-   * Resolve family for a policy (childId)
+   * Resolve family for a policy (Uses policy.familyId directly; no fallbacks)
    */
   public getFamilyForPolicy(childId: string): Family | undefined {
     const policy = db.policies.get(childId);
-    if (policy && policy.familyId) {
-      const family = db.families.get(policy.familyId);
-      if (family) return family;
-    }
-    return this.getFamilyForChild(childId);
+    if (!policy || !policy.familyId) return undefined;
+    return db.families.get(policy.familyId);
   }
 
   /**
-   * Resolve family for an access request
+   * Resolve family for an access request (Uses req.familyId directly; no fallbacks)
    */
   public getFamilyForRequest(requestId: string): Family | undefined {
     const req = db.requests.get(requestId);
-    if (!req) return undefined;
-    if (req.familyId) {
-      const family = db.families.get(req.familyId);
-      if (family) return family;
-    }
-    if (req.childId) {
-      return this.getFamilyForChild(req.childId);
-    }
-    return undefined;
+    if (!req || !req.familyId) return undefined;
+    return db.families.get(req.familyId);
   }
 
   /**

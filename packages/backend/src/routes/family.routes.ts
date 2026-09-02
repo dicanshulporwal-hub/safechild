@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { authMiddleware, AuthenticatedRequest } from '../middleware/auth';
 import { requireVerifiedEmail } from '../middleware/requireVerifiedEmail';
 import { familyService } from '../services/family.service';
+import { DataPersistenceError } from '../db/store';
 
 const router = Router();
 
@@ -80,13 +81,16 @@ router.delete('/members/:id', (req: AuthenticatedRequest, res: Response) => {
 // POST /api/family/transfer-ownership - Transfer ownership with step-up verification
 router.post('/transfer-ownership', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { familyId, newOwnerUserId, password, otpCode } = req.body;
+    const { familyId, newOwnerUserId, password, otpCode, timeSec } = req.body;
     if (!familyId || !newOwnerUserId) {
       return res.status(400).json({ error: 'familyId and newOwnerUserId are required.' });
     }
-    await familyService.transferOwnership(familyId, newOwnerUserId, req.userId!, password, otpCode);
+    await familyService.transferOwnership(familyId, newOwnerUserId, req.userId!, password, otpCode, timeSec);
     res.json({ success: true, message: 'Family ownership transferred.' });
   } catch (e: any) {
+    if (e instanceof DataPersistenceError || e.name === 'DataPersistenceError') {
+      return res.status(500).json({ error: 'Database persistence failure. Changes were safely rolled back.' });
+    }
     const status =
       e.message.includes('Forbidden') ||
       e.message.includes('Step-up') ||

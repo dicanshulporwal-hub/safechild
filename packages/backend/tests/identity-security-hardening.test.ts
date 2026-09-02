@@ -7,6 +7,7 @@ import { authService, getJwtSecret } from '../src/services/auth.service';
 import { profileService } from '../src/services/profile.service';
 import { deviceService } from '../src/services/device.service';
 import { childService } from '../src/services/child.service';
+import { familyService } from '../src/services/family.service';
 import { db } from '../src/db/store';
 import {
   decryptMfaSecret,
@@ -105,7 +106,8 @@ describe('SafeBrowse Stage 11 Step 2: Authentication, Sessions & MFA Hardening S
     sessionId = decoded.sessionId!;
 
     // Create child and paired device for device auth tests
-    const { child } = childService.createChild(userId, 'Leo', 8, '🧒');
+    const fam = familyService.getOrCreateUserFamily(userId);
+    const { child } = childService.createChild(userId, 'Leo', 8, '🧒', fam.id);
     testChildId = child.id;
 
     const pairing = deviceService.generatePairingCode(userId, testChildId);

@@ -38,17 +38,27 @@ childRouter.get('/', (req: AuthenticatedRequest, res: Response) => {
 childRouter.post('/', (req: AuthenticatedRequest, res: Response) => {
   try {
     const { name, age, avatar, familyId } = req.body;
-    const targetFamily = familyId
-      ? db.families.get(familyId) || familyService.getOrCreateUserFamily(req.userId!)
-      : familyService.getOrCreateUserFamily(req.userId!);
+    if (!familyId || typeof familyId !== 'string' || !familyId.trim()) {
+      return res.status(400).json({ error: 'Mandatory tenancy error: Valid familyId is required to create a child profile.' });
+    }
+
+    const targetFamily = db.families.get(familyId.trim());
+    if (!targetFamily) {
+      return res.status(400).json({ error: 'Mandatory tenancy error: Referenced family does not exist.' });
+    }
+
+    if (!rbacService.getFamilyMembership(req.userId!, targetFamily.id)) {
+      return res.status(403).json({ error: 'Forbidden: You do not belong to this family.' });
+    }
 
     if (!rbacService.hasFamilyPermission(req.userId!, targetFamily.id, FamilyPermission.CHILD_MANAGE)) {
       return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to create child profiles.' });
     }
 
-    if (!name) {
+    if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'Child name is required.' });
     }
+
     const result = childService.createChild(req.userId!, name, age, avatar, targetFamily.id);
     res.json(result);
   } catch (e: any) {

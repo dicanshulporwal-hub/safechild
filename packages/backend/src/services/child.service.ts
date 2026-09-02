@@ -18,7 +18,7 @@ export class ChildService {
     const allFamilyIds = Array.from(new Set([...userFamilyIds, ...ownedFamilies]));
 
     return Array.from(db.children.values()).filter(
-      (c) => (c.familyId && allFamilyIds.includes(c.familyId)) || c.parentId === parentId
+      (c) => Boolean(c.familyId) && allFamilyIds.includes(c.familyId)
     );
   }
 
@@ -33,11 +33,15 @@ export class ChildService {
     avatar?: string,
     targetFamilyId?: string
   ): { child: Child; policy: Policy } {
-    const childId = `child-${nanoid(8)}`;
-    const family = targetFamilyId
-      ? db.families.get(targetFamilyId) || familyService.getOrCreateUserFamily(parentId)
-      : familyService.getOrCreateUserFamily(parentId);
+    if (!targetFamilyId || typeof targetFamilyId !== 'string' || !targetFamilyId.trim()) {
+      throw new Error('Mandatory tenancy error: Valid familyId is required to create a child.');
+    }
+    const family = db.families.get(targetFamilyId);
+    if (!family) {
+      throw new Error('Mandatory tenancy error: Referenced family does not exist.');
+    }
 
+    const childId = `child-${nanoid(8)}`;
     const child: Child = {
       id: childId,
       parentId: family.ownerUserId, // Bind child to family owner so all co-parents have access

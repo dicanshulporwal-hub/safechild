@@ -5,6 +5,7 @@ import { authService, getJwtSecret } from '../packages/backend/src/services/auth
 import { profileService } from '../packages/backend/src/services/profile.service';
 import { deviceService } from '../packages/backend/src/services/device.service';
 import { childService } from '../packages/backend/src/services/child.service';
+import { familyService } from '../packages/backend/src/services/family.service';
 import { db } from '../packages/backend/src/db/store';
 import {
   generateBase32Secret,
@@ -74,7 +75,8 @@ async function runProbe() {
   const sessionId = decoded.sessionId;
 
   // Set up child and device for device auth probes
-  const { child } = childService.createChild(userId, 'ProbeChild', 10, '🧒');
+  const fam = familyService.getOrCreateUserFamily(userId);
+  const { child } = childService.createChild(userId, 'ProbeChild', 10, '🧒', fam.id);
   const pairing = deviceService.generatePairingCode(userId, child.id);
   const { device } = deviceService.pairDevice(pairing.code, 'Probe Device', 'windows', '1.0.0');
 

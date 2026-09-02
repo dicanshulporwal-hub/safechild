@@ -3,7 +3,7 @@ const API_BASE = '/api';
 export interface Child {
   id: string;
   parentId: string;
-  familyId?: string;
+  familyId: string;
   name: string;
   age?: number;
   avatar?: string;
@@ -26,7 +26,7 @@ export interface CategoryControl {
 export interface Policy {
   id: string;
   childId: string;
-  familyId?: string;
+  familyId: string;
   version: number;
   isPaused: boolean;
   pauseExpiresAt?: string | null;
@@ -48,7 +48,7 @@ export interface Device {
   id: string;
   childId: string;
   parentId: string;
-  familyId?: string;
+  familyId: string;
   name: string;
   platform: 'android' | 'windows' | 'ios' | 'macos';
   deviceToken: string;
@@ -62,7 +62,7 @@ export interface AccessRequest {
   id: string;
   childId: string;
   deviceId: string;
-  familyId?: string;
+  familyId: string;
   deviceName?: string;
   domain: string;
   reason?: string;

@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { authService } from '../src/services/auth.service';
 import { childService } from '../src/services/child.service';
+import { familyService } from '../src/services/family.service';
 import { deviceService } from '../src/services/device.service';
 import { policyService } from '../src/services/policy.service';
 import { requestService } from '../src/services/request.service';
@@ -20,8 +21,9 @@ describe('SafeBrowse Backend Service Integration Tests', () => {
     assert.ok(token);
     assert.strictEqual(user.email, 'test_parent_main@porwal.io');
     parentId = user.id;
+    const fam = familyService.getOrCreateUserFamily(user.id);
 
-    const { child } = childService.createChild(parentId, 'Rahul', 10, '🧒');
+    const { child } = childService.createChild(parentId, 'Rahul', 10, '🧒', fam.id);
     assert.ok(child);
     childId = child.id;
   });

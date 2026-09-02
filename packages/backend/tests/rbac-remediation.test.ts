@@ -29,6 +29,7 @@ describe('SafeBrowse Stage 11 Step 3A: RBAC Critical Remediation Test Suite', ()
       const url = new URL(endpoint, baseUrl);
       const reqHeaders: Record<string, string> = {
         'Content-Type': 'application/json',
+        'Connection': 'close',
         ...headers,
       };
 

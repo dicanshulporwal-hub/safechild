@@ -95,7 +95,7 @@ async function runRbacProbe(): Promise<ProbeResults> {
   authService.verifyEmail(uOwnerA.emailVerificationToken);
   const famA = familyService.getOrCreateUserFamily(uOwnerA.user.id);
 
-  const { child: childA } = childService.createChild(uOwnerA.user.id, 'Child A', 10);
+  const { child: childA } = childService.createChild(uOwnerA.user.id, 'Child A', 10, undefined, famA.id);
   const pairA = deviceService.generatePairingCode(uOwnerA.user.id, childA.id);
   const { device: devA } = deviceService.pairDevice(pairA.code, 'Dev A', 'windows', '1.0.0');
 
@@ -112,7 +112,8 @@ async function runRbacProbe(): Promise<ProbeResults> {
   // 2. Setup Family B: Owner, Child
   const uOwnerB = authService.register(`p-owner-b-${nanoid(6)}@safebrowse.io`, testPass, 'Owner B');
   authService.verifyEmail(uOwnerB.emailVerificationToken);
-  const { child: childB } = childService.createChild(uOwnerB.user.id, 'Child B', 12);
+  const famB = familyService.getOrCreateUserFamily(uOwnerB.user.id);
+  const { child: childB } = childService.createChild(uOwnerB.user.id, 'Child B', 12, undefined, famB.id);
 
   // Results tracker
   const results: ProbeResults = {

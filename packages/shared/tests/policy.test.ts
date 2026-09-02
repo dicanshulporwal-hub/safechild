@@ -53,6 +53,7 @@ describe('SafeBrowse Policy Engine & Precedence Tests', () => {
       const policy: Policy = {
         id: 'p-pause',
         childId: 'c1',
+        familyId: 'fam-test',
         version: 1,
         isPaused: true,
         rules: [
@@ -75,6 +76,7 @@ describe('SafeBrowse Policy Engine & Precedence Tests', () => {
       const policy: Policy = {
         id: 'p-temp',
         childId: 'c1',
+        familyId: 'fam-test',
         version: 2,
         isPaused: false,
         categoryControls: [{ category: 'ENTERTAINMENT', action: 'BLOCK' }],
@@ -94,6 +96,7 @@ describe('SafeBrowse Policy Engine & Precedence Tests', () => {
       const policy: Policy = {
         id: 'p-white',
         childId: 'c1',
+        familyId: 'fam-test',
         version: 3,
         isPaused: false,
         categoryControls: [{ category: 'GAMING', action: 'BLOCK' }],
@@ -116,6 +119,7 @@ describe('SafeBrowse Policy Engine & Precedence Tests', () => {
       const policy: Policy = {
         id: 'p-study',
         childId: 'c1',
+        familyId: 'fam-test',
         version: 4,
         isPaused: false,
         studyMode: { active: true, allowedCategories: ['EDUCATION'] },

@@ -110,7 +110,7 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
     familyAId = famA.id;
 
     // Create Child A
-    const { child: cA } = childService.createChild(ownerAId, 'Child A', 10);
+    const { child: cA } = childService.createChild(ownerAId, 'Child A', 10, undefined, familyAId);
     childAId = cA.id;
 
     // Pair Device A
@@ -144,7 +144,7 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
     const famB = familyService.getOrCreateUserFamily(ownerBId);
     familyBId = famB.id;
 
-    const { child: cB } = childService.createChild(ownerBId, 'Child B', 12);
+    const { child: cB } = childService.createChild(ownerBId, 'Child B', 12, undefined, familyBId);
     childBId = cB.id;
 
     // 3. Setup System Administrator

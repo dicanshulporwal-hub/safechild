@@ -1,20 +1,21 @@
 {
   "stage": "Stage 11",
-  "step": "Step 3A - RBAC Critical Remediation",
-  "timestamp": "2026-09-02T04:13:00.796Z",
+  "step": "Step 3B - Durable Transactions and Fail-Secure Tenancy",
+  "timestamp": "2026-09-02T04:53:21.130Z",
   "branch": "security/stage11-step3-rbac",
-  "commitHash": "e793f70047e8311f4f542fb025a2ee4abfc392bc",
+  "commitHash": "da3146f6543270cd30f183f551b0482189d55c85",
   "archive": {
-    "filename": "safebrowse-stage11-step3a-review.zip",
-    "sizeBytes": 343018,
-    "sizeKb": "335.0",
-    "sha256": "e254bdcb55abce21904f66f7ea28b741a99c28bd69359f2b02fda4f76ca6f20c"
+    "filename": "safebrowse-stage11-step3b-review.zip",
+    "sizeBytes": 362538,
+    "sizeKb": "354.0",
+    "sha256": "d521f15515d34cfbfd2baeecd8a8a613f68f10b6af73dacb0edb34c4204707a2"
   },
   "testResults": {
-    "totalTests": 96,
-    "passed": 96,
+    "totalTests": 109,
+    "passed": 109,
     "failed": 0,
-    "suites": 30,
+    "suites": 35,
+    "step3bDurabilityTestsPassed": 13,
     "step3aRemediationTestsPassed": 13,
     "step3RbacTestsPassed": 16,
     "step2IdentityTestsPassed": 28,
@@ -22,6 +23,18 @@
     "stage3EdgeCaseTestsPassed": 23
   },
   "probeResults": {
+    "ownershipTransferSucceededWhenSaveFailed": false,
+    "recoveryCodeReusableAfterSuccessfulRestart": false,
+    "totpReplayStateLostAfterRestart": false,
+    "auditEventLostAfterSuccessfulResponse": false,
+    "failedTransactionChangedMemory": false,
+    "failedTransactionChangedDisk": false,
+    "crossFamilyRollbackUndidSuccessfulTransfer": false,
+    "missingFamilyIdAccepted": false,
+    "ambiguousLegacyRecordAutoAssigned": false,
+    "malformedDatastoreStartedNormally": false
+  },
+  "remediationProbeResults": {
     "ordinaryUserSelfPromotedToSystemAdmin": false,
     "productionAdminBootstrapEnabled": false,
     "recoveryCodeReusedForOwnershipTransfer": false,
@@ -31,5 +44,18 @@
     "coParentActivityAccessDenied": false,
     "multiFamilyResourceResolvedToWrongFamily": false
   },
-  "securityStatus": "CERTIFIED_SECURE"
+  "securityProbeResults": {
+    "sessionlessSignedJwtAccepted": false,
+    "missingSubAccessTokenAccepted": false,
+    "missingJtiAccessTokenAccepted": false,
+    "mfaTicketWithoutJtiAccepted": false,
+    "recoveryCodesRegeneratedWithoutPasswordOrOtp": false,
+    "unverifiedParentAcceptedForProductRoutes": false,
+    "anonymousDeviceActivityAccepted": false,
+    "wrongDeviceTokenAccepted": false,
+    "consumedRecoveryCodeReused": false,
+    "consumedMfaTicketReusedAfterReload": false,
+    "sameAcceptedTotpTimestepReused": false
+  },
+  "reviewStatus": "VERIFIED_AWAITING_INDEPENDENT_AUDIT"
 }
