@@ -529,18 +529,19 @@ export class FamilyService {
           throw new Error('FATAL: Ownership invariant violation. Rolled back.');
         }
 
-        // Stage audit event BEFORE persistence so it commits atomically in the same transaction
+        // Stage audit event WITHOUT save so it commits atomically in the single transaction save
         const oldOwner = db.users.get(currentOwnerUserId);
         const newOwner = db.users.get(newOwnerUserId);
-        this.logAudit(
+        const auditEntry = this.createAuditEntry(
           familyId,
           currentOwnerUserId,
           oldOwner?.name || 'Owner',
           'OWNERSHIP_TRANSFERRED',
           `Transferred family ownership to ${newOwner?.name || 'Parent'} (${newOwner?.email || ''})`
         );
+        this.appendAuditEntryWithoutSave(auditEntry);
 
-        // Persist complete transaction (credentials, memberships, family, audit event) atomically
+        // Persist complete transaction (credentials, memberships, family, audit event) in exactly ONE commit
         db.save();
       } catch (err: any) {
         // Roll back family-scoped records without affecting any other family
@@ -566,15 +567,15 @@ export class FamilyService {
     return db.familyAuditLogs.filter((log) => log.familyId === familyId).reverse();
   }
 
-  public logAudit(
+  public createAuditEntry(
     familyId: string,
     actorUserId: string,
     actorName: string,
     action: string,
     details: string,
     childId?: string
-  ) {
-    const log: FamilyAuditLog = {
+  ): FamilyAuditLog {
+    return {
       id: `log-${nanoid(10)}`,
       familyId,
       actorUserId,
@@ -584,8 +585,24 @@ export class FamilyService {
       details,
       timestamp: new Date().toISOString(),
     };
-    db.familyAuditLogs.push(log);
+  }
+
+  public appendAuditEntryWithoutSave(entry: FamilyAuditLog): void {
+    db.familyAuditLogs.push(entry);
+  }
+
+  public logAudit(
+    familyId: string,
+    actorUserId: string,
+    actorName: string,
+    action: string,
+    details: string,
+    childId?: string
+  ): FamilyAuditLog {
+    const log = this.createAuditEntry(familyId, actorUserId, actorName, action, details, childId);
+    this.appendAuditEntryWithoutSave(log);
     db.save();
+    return log;
   }
 }
 

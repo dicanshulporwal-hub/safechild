@@ -311,17 +311,15 @@ export class DeviceService {
     });
   }
 
-  public getDevicesForParent(parentId: string): ExtendedDevice[] {
-    const { familyService } = require('./family.service');
-    const family = familyService.getOrCreateUserFamily(parentId);
-    const children = Array.from(db.children.values()).filter(
-      (c) => c.parentId === parentId || c.parentId === family.ownerUserId
-    );
-    const childIds = children.map((c) => c.id);
+  public getDevicesForParent(parentId: string, familyId?: string): ExtendedDevice[] {
+    const { rbacService } = require('./rbac.service');
+    const userFamilyIds = rbacService.getUserFamilyMemberships(parentId).map((m: any) => m.familyId);
+    const targetFamilyIds = familyId ? [familyId] : userFamilyIds;
+    const allowedSet = new Set<string>(targetFamilyIds.filter((fid: string) => userFamilyIds.includes(fid)));
 
     const now = Date.now();
     const parentDevices = (Array.from(db.devices.values()) as ExtendedDevice[]).filter(
-      (d) => childIds.includes(d.childId) || d.parentId === parentId
+      (d) => d.familyId && allowedSet.has(d.familyId)
     );
 
     return parentDevices.map((dev) => {

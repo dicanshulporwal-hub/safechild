@@ -1,26 +1,27 @@
 {
   "stage": "Stage 11",
-  "step": "Step 3B - Durable Transactions and Fail-Secure Tenancy",
-  "timestamp": "2026-09-02T04:53:21.130Z",
+  "step": "Step 3C - Single-Commit Transactions and Complete Tenancy Integrity",
+  "timestamp": "2026-09-02T05:30:20.937Z",
   "branch": "security/stage11-step3-rbac",
-  "commitHash": "da3146f6543270cd30f183f551b0482189d55c85",
+  "commitHash": "a834ef89b6ea1e4483761afadd7204c709aa8a22",
   "archive": {
-    "filename": "safebrowse-stage11-step3b-review.zip",
-    "sizeBytes": 362538,
-    "sizeKb": "354.0",
-    "sha256": "d521f15515d34cfbfd2baeecd8a8a613f68f10b6af73dacb0edb34c4204707a2"
+    "filename": "safebrowse-stage11-step3c-review.zip",
+    "sizeBytes": 372625,
+    "sizeKb": "363.9",
+    "sha256": "923c2da8cc87949b48ba1899e70bd2d4fed93144646888c7d387246b3bd46b44"
   },
   "testResults": {
-    "totalTests": 109,
-    "passed": 109,
+    "totalTests": 112,
+    "passed": 112,
     "failed": 0,
-    "suites": 35,
-    "step3bDurabilityTestsPassed": 13,
+    "suites": 36,
+    "step3cDurabilityTestsPassed": 18,
     "step3aRemediationTestsPassed": 13,
     "step3RbacTestsPassed": 16,
     "step2IdentityTestsPassed": 28,
     "policyEngineTestsPassed": 8,
-    "stage3EdgeCaseTestsPassed": 23
+    "stage3EdgeCaseTestsPassed": 23,
+    "backendCoreTestsPassed": 6
   },
   "probeResults": {
     "ownershipTransferSucceededWhenSaveFailed": false,
@@ -32,7 +33,12 @@
     "crossFamilyRollbackUndidSuccessfulTransfer": false,
     "missingFamilyIdAccepted": false,
     "ambiguousLegacyRecordAutoAssigned": false,
-    "malformedDatastoreStartedNormally": false
+    "malformedDatastoreStartedNormally": false,
+    "ownershipTransferPerformedMultipleSaves": false,
+    "apiFailedButDiskCommittedOwnership": false,
+    "apiFailedButDiskContainsSuccessAudit": false,
+    "memoryDiskOwnerDiverged": false,
+    "rollbackPersistenceFailureSuppressed": false
   },
   "remediationProbeResults": {
     "ordinaryUserSelfPromotedToSystemAdmin": false,

@@ -74,14 +74,15 @@ export class UsageService {
 
       // If client clock is significantly behind last trusted checkpoint (>60s)
       if (clientTime < lastCheckTime - 60000) {
-        const family = familyService.getOrCreateUserFamily(child.parentId);
-        familyService.logAudit(
-          family.id,
-          childId,
-          child.name,
-          'CLOCK_TAMPER_DETECTED',
-          `Suspicious clock rollback detected on device ${deviceId} (Client: ${clientWallIso}, Server Last Seen: ${usage.lastCheckpointTimestamp}). Consumed quota preserved.`
-        );
+        if (child.familyId) {
+          familyService.logAudit(
+            child.familyId,
+            childId,
+            child.name,
+            'CLOCK_TAMPER_DETECTED',
+            `Suspicious clock rollback detected on device ${deviceId} (Client: ${clientWallIso}, Server Last Seen: ${usage.lastCheckpointTimestamp}). Consumed quota preserved.`
+          );
+        }
       }
     }
 
@@ -219,11 +220,10 @@ export class UsageService {
     db.save();
 
     const child = db.children.get(childId);
-    if (child && actorUserId) {
+    if (child && actorUserId && child.familyId) {
       const actor = db.users.get(actorUserId);
-      const family = familyService.getOrCreateUserFamily(child.parentId);
       familyService.logAudit(
-        family.id,
+        child.familyId,
         actorUserId,
         actor?.name || 'Parent',
         'SCREEN_TIME_UPDATED',
@@ -253,11 +253,10 @@ export class UsageService {
     db.save();
 
     const child = db.children.get(childId);
-    if (child && actorUserId) {
+    if (child && actorUserId && child.familyId) {
       const actor = db.users.get(actorUserId);
-      const family = familyService.getOrCreateUserFamily(child.parentId);
       familyService.logAudit(
-        family.id,
+        child.familyId,
         actorUserId,
         actor?.name || 'Parent',
         'BONUS_TIME_GRANTED',
@@ -287,11 +286,10 @@ export class UsageService {
     db.save();
 
     const child = db.children.get(childId);
-    if (child && actorUserId) {
+    if (child && actorUserId && child.familyId) {
       const actor = db.users.get(actorUserId);
-      const family = familyService.getOrCreateUserFamily(child.parentId);
       familyService.logAudit(
-        family.id,
+        child.familyId,
         actorUserId,
         actor?.name || 'Parent',
         'UNLIMITED_TODAY_GRANTED',
@@ -333,11 +331,10 @@ export class UsageService {
     db.save();
 
     const child = db.children.get(childId);
-    if (child && actorUserId) {
+    if (child && actorUserId && child.familyId) {
       const actor = db.users.get(actorUserId);
-      const family = familyService.getOrCreateUserFamily(child.parentId);
       familyService.logAudit(
-        family.id,
+        child.familyId,
         actorUserId,
         actor?.name || 'Parent',
         'SAFE_SEARCH_UPDATED',
@@ -351,8 +348,15 @@ export class UsageService {
   /**
    * Generate privacy-first weekly summary
    */
-  public getWeeklyDigest(userId: string) {
-    const children = Array.from(db.children.values()).filter((c) => c.parentId === userId);
+  public getWeeklyDigest(userId: string, familyId?: string) {
+    const { rbacService } = require('./rbac.service');
+    const userFamilyIds = rbacService.getUserFamilyMemberships(userId).map((m: any) => m.familyId);
+    const targetFamilyIds = familyId ? [familyId] : userFamilyIds;
+    const allowedSet = new Set<string>(targetFamilyIds.filter((fid: string) => userFamilyIds.includes(fid)));
+
+    const children = Array.from(db.children.values()).filter(
+      (c) => c.familyId && allowedSet.has(c.familyId)
+    );
     const childIds = children.map((c) => c.id);
 
     const now = Date.now();

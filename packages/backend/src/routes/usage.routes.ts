@@ -163,8 +163,18 @@ usageRouter.post('/sync', deviceAuthMiddleware, (req: AuthenticatedDeviceRequest
 // GET /api/usage/digest -> Weekly Privacy Digest (Parent auth + Verified Email + USAGE_READ)
 usageRouter.get('/digest', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res: Response) => {
   try {
-    const family = familyService.getOrCreateUserFamily(req.userId!);
-    if (!rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.USAGE_READ)) {
+    const reqFamilyId = req.query.familyId as string | undefined;
+    if (reqFamilyId) {
+      if (!rbacService.hasFamilyPermission(req.userId!, reqFamilyId, FamilyPermission.USAGE_READ)) {
+        return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to view usage digest.' });
+      }
+      const digest = usageService.getWeeklyDigest(req.userId!, reqFamilyId);
+      return res.json(digest);
+    }
+
+    const userFamilies = rbacService.getUserFamilyMemberships(req.userId!)
+      .filter((m) => rbacService.hasFamilyPermission(req.userId!, m.familyId, FamilyPermission.USAGE_READ));
+    if (userFamilies.length === 0) {
       return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to view usage digest.' });
     }
 

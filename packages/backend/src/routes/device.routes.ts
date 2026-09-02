@@ -104,9 +104,19 @@ deviceRouter.post('/:id/rotate-token', (req, res) => {
 
 // Get all devices for parent's family
 deviceRouter.get('/', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res: Response) => {
-  const family = familyService.getOrCreateUserFamily(req.userId!);
-  if (!rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.DEVICE_READ)) {
-    return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to view devices.' });
+  const reqFamilyId = req.query.familyId as string | undefined;
+  if (reqFamilyId) {
+    if (!rbacService.hasFamilyPermission(req.userId!, reqFamilyId, FamilyPermission.DEVICE_READ)) {
+      return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to view devices.' });
+    }
+    const devices = deviceService.getDevicesForParent(req.userId!, reqFamilyId);
+    return res.json(devices);
+  }
+
+  const userFamilies = rbacService.getUserFamilyMemberships(req.userId!)
+    .filter((m) => rbacService.hasFamilyPermission(req.userId!, m.familyId, FamilyPermission.DEVICE_READ));
+  if (userFamilies.length === 0) {
+    return res.json([]);
   }
 
   const devices = deviceService.getDevicesForParent(req.userId!);

@@ -104,21 +104,30 @@ export class ChildService {
         db.devices.delete(id);
       }
     }
-    db.save();
 
-    if (child) {
-      const family = child.familyId
-        ? db.families.get(child.familyId) || familyService.getOrCreateUserFamily(child.parentId)
-        : familyService.getOrCreateUserFamily(child.parentId);
-      familyService.logAudit(
-        family.id,
-        child.parentId,
-        'Parent',
-        'CHILD_DELETED',
-        `Deleted child profile '${child.name}'`,
-        child.id
-      );
+    // Remove pairing codes for this child
+    for (const [codeStr, code] of db.pairingCodes.entries()) {
+      if (code.childId === childId) {
+        db.pairingCodes.delete(codeStr);
+      }
     }
+
+    if (child && child.familyId) {
+      const family = db.families.get(child.familyId);
+      if (family) {
+        const audit = familyService.createAuditEntry(
+          family.id,
+          child.parentId,
+          'Parent',
+          'CHILD_DELETED',
+          `Deleted child profile '${child.name}'`,
+          child.id
+        );
+        familyService.appendAuditEntryWithoutSave(audit);
+      }
+    }
+
+    db.save();
   }
 }
 

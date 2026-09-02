@@ -44,9 +44,19 @@ requestRouter.post('/:id/resolve', authMiddleware, requireVerifiedEmail, (req: A
 
 // Get pending requests for parent's family
 requestRouter.get('/pending', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res: Response) => {
-  const family = familyService.getOrCreateUserFamily(req.userId!);
-  if (!rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.REQUEST_READ)) {
-    return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to view requests.' });
+  const reqFamilyId = req.query.familyId as string | undefined;
+  if (reqFamilyId) {
+    if (!rbacService.hasFamilyPermission(req.userId!, reqFamilyId, FamilyPermission.REQUEST_READ)) {
+      return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to view requests.' });
+    }
+    const requests = requestService.getPendingRequestsForParent(req.userId!, reqFamilyId);
+    return res.json(requests);
+  }
+
+  const userFamilies = rbacService.getUserFamilyMemberships(req.userId!)
+    .filter((m) => rbacService.hasFamilyPermission(req.userId!, m.familyId, FamilyPermission.REQUEST_READ));
+  if (userFamilies.length === 0) {
+    return res.json([]);
   }
 
   const requests = requestService.getPendingRequestsForParent(req.userId!);

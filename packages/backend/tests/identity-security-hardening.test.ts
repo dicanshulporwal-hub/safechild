@@ -467,7 +467,10 @@ describe('SafeBrowse Stage 11 Step 2: Authentication, Sessions & MFA Hardening S
       const login2 = authService.login(testEmail, testPass);
       const user = db.users.get(userId)!;
       const decryptedSecret = decryptMfaSecret(user.mfaSecret!);
-      const validTotp = generateCurrentTotp(decryptedSecret);
+      const currentStep = getCurrentTotpTimeStep();
+      user.totpLastUsedSteps = { ...(user.totpLastUsedSteps || {}), mfa_login: currentStep };
+      db.users.set(userId, user);
+      const validTotp = generateTotpAtStep(decryptedSecret, currentStep);
 
       assert.throws(() => {
         authService.verifyMfaLogin(login2.mfaTicket!, validTotp);

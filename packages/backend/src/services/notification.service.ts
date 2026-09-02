@@ -47,7 +47,7 @@ export class NotificationService {
     return item;
   }
 
-  public getNotificationsForParent(parentId: string): NotificationItem[] {
+  public getNotificationsForParent(parentId: string, familyId?: string): NotificationItem[] {
     const userFamilyIds = Array.from(db.familyMembers.values())
       .filter((m) => m.userId === parentId)
       .map((m) => m.familyId);
@@ -55,9 +55,11 @@ export class NotificationService {
       .filter((f) => f.ownerUserId === parentId)
       .map((f) => f.id);
     const allFamilyIds = new Set([...userFamilyIds, ...ownedFamilies]);
+    const targetFamilyIds = familyId ? [familyId] : Array.from(allFamilyIds);
+    const allowedSet = new Set<string>(targetFamilyIds.filter((fid: string) => allFamilyIds.has(fid)));
 
     const familyChildIds = Array.from(db.children.values())
-      .filter((c) => (c.familyId && allFamilyIds.has(c.familyId)) || c.parentId === parentId)
+      .filter((c) => c.familyId && allowedSet.has(c.familyId))
       .map((c) => c.id);
 
     return this.notifications.filter((n) => familyChildIds.includes(n.childId));

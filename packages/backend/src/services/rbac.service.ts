@@ -123,6 +123,13 @@ export class RbacService {
   }
 
   /**
+   * Get all family memberships for a user
+   */
+  public getUserFamilyMemberships(userId: string): FamilyMember[] {
+    return Array.from(db.familyMembers.values()).filter((m) => m.userId === userId);
+  }
+
+  /**
    * Get user's role in a specific family
    */
   public getUserFamilyRole(userId: string, familyId: string): FamilyRole | null {

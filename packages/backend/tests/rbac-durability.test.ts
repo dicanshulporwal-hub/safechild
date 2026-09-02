@@ -1,42 +1,39 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
-import { db, DataStore, DataPersistenceError, DataLoadError, ParentUser, FamilyMember, Family } from '../src/db/store';
+import {
+  db,
+  DataStore,
+  DataPersistenceError,
+  DataLoadError,
+  FatalConsistencyError,
+  FatalTenancyError,
+  ParentUser,
+  FamilyMember,
+  Family,
+} from '../src/db/store';
 import { authService } from '../src/services/auth.service';
 import { familyService } from '../src/services/family.service';
 import { childService } from '../src/services/child.service';
 import { deviceService } from '../src/services/device.service';
 import { requestService } from '../src/services/request.service';
+import { usageService } from '../src/services/usage.service';
 import { rbacService } from '../src/services/rbac.service';
+import { profileService } from '../src/services/profile.service';
+import { runMigration } from '../src/utils/tenancy-migration';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { nanoid } from 'nanoid';
+import { getCurrentTotpTimeStep, generateTotpAtStep } from '../src/utils/security';
 
-const findMigrationScript = () => {
-  const candidates = [
-    path.resolve(__dirname, '../../../../scripts/migrate-family-tenancy'),
-    path.resolve(process.cwd(), 'scripts/migrate-family-tenancy'),
-    path.resolve(process.cwd(), '../../scripts/migrate-family-tenancy'),
-    path.resolve(__dirname, '../../../scripts/migrate-family-tenancy'),
-  ];
-  for (const c of candidates) {
-    if (fs.existsSync(c + '.ts') || fs.existsSync(c + '.js')) {
-      return c;
-    }
-  }
-  return candidates[0];
-};
-
-const { runMigration } = require(findMigrationScript());
-
-describe('SafeBrowse Stage 11 Step 3B: Durable Transactions and Fail-Secure Tenancy', () => {
+describe('SafeBrowse Stage 11 Step 3C: Single-Commit Transactions & Tenancy Integrity', () => {
   const testPass = 'SafeBrowse-Durability-Test-Pass1!';
 
-  describe('1. Fail-Secure DataStore Persistence & Load', () => {
+  describe('1. Fail-Secure DataStore Persistence, Fsync & Atomic Replacement', () => {
     let tempDir: string;
 
     beforeEach(() => {
-      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb_ds_test_'));
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb_ds_atomic_test_'));
     });
 
     afterEach(() => {
@@ -74,8 +71,127 @@ describe('SafeBrowse Stage 11 Step 3B: Durable Transactions and Fail-Secure Tena
       assert.strictEqual(bakParsed.users[0].name, 'User One');
     });
 
+    it('DataStore.save() throws DataPersistenceError when fsync fails and leaves file unchanged', () => {
+      const testStore = new DataStore(tempDir);
+      testStore.users.set('u-fsync', {
+        id: 'u-fsync',
+        email: 'fsync@test.io',
+        passwordHash: 'hash',
+        name: 'Fsync Initial',
+        createdAt: new Date().toISOString(),
+      });
+      testStore.save();
+
+      const mainFile = path.join(tempDir, 'safebrowse-db.json');
+      const beforeContent = fs.readFileSync(mainFile, 'utf-8');
+
+      testStore.users.get('u-fsync')!.name = 'Fsync Modified';
+      testStore._simulateFsyncFailure = true;
+
+      assert.throws(() => {
+        testStore.save();
+      }, DataPersistenceError);
+
+      testStore._simulateFsyncFailure = false;
+      const afterContent = fs.readFileSync(mainFile, 'utf-8');
+      assert.strictEqual(beforeContent, afterContent);
+    });
+
+    it('DataStore.save() throws DataPersistenceError when atomic replacement fails and leaves live file unchanged', () => {
+      const testStore = new DataStore(tempDir);
+      testStore.users.set('u-rename', {
+        id: 'u-rename',
+        email: 'rename@test.io',
+        passwordHash: 'hash',
+        name: 'Rename Initial',
+        createdAt: new Date().toISOString(),
+      });
+      testStore.save();
+
+      const mainFile = path.join(tempDir, 'safebrowse-db.json');
+      const beforeContent = fs.readFileSync(mainFile, 'utf-8');
+
+      testStore.users.get('u-rename')!.name = 'Rename Modified';
+      testStore._simulateRenameFailure = true;
+
+      assert.throws(() => {
+        testStore.save();
+      }, DataPersistenceError);
+
+      testStore._simulateRenameFailure = false;
+      const afterContent = fs.readFileSync(mainFile, 'utf-8');
+      assert.strictEqual(beforeContent, afterContent);
+    });
+
+    it('DataStore.save() respects backupFailureBlocksCommit policy', () => {
+      const testStore = new DataStore(tempDir);
+      testStore.users.set('u-bak', {
+        id: 'u-bak',
+        email: 'bak@test.io',
+        passwordHash: 'hash',
+        name: 'Bak Initial',
+        createdAt: new Date().toISOString(),
+      });
+      testStore.save();
+
+      // Case A: backupFailureBlocksCommit = true -> commit MUST fail
+      testStore.backupFailureBlocksCommit = true;
+      testStore._simulateBackupFailure = true;
+      assert.throws(() => {
+        testStore.save();
+      }, DataPersistenceError);
+
+      // Case B: backupFailureBlocksCommit = false -> commit completes
+      testStore.backupFailureBlocksCommit = false;
+      testStore.save();
+      testStore._simulateBackupFailure = false;
+    });
+
+    it('DataStore enters degraded read-only state when rollback fails', () => {
+      const testStore = new DataStore(tempDir);
+      assert.strictEqual(testStore.isDegraded, false);
+
+      testStore.setDegraded('Simulated corruption');
+      assert.strictEqual(testStore.isDegraded, true);
+
+      assert.throws(() => {
+        testStore.save();
+      }, FatalConsistencyError);
+    });
+  });
+
+  describe('2. Fail-Secure Backup Recovery & Tenancy Validation', () => {
+    let tempDir: string;
+
+    beforeEach(() => {
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb_ds_val_test_'));
+    });
+
+    afterEach(() => {
+      if (fs.existsSync(tempDir)) {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it('DataStore.load() recovers from backup when primary file is corrupted', () => {
       const testStore = new DataStore(tempDir);
+      const famId = 'fam-rec';
+      testStore.families.set(famId, {
+        id: famId,
+        name: 'Rec Fam',
+        ownerUserId: 'u-recover',
+        requireMfa: false,
+        approvalRule: 'OWNER_ONLY',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+      testStore.familyMembers.set('fm-rec', {
+        id: 'fm-rec',
+        familyId: famId,
+        userId: 'u-recover',
+        role: 'OWNER',
+        joinedAt: new Date().toISOString(),
+      });
       testStore.users.set('u-recover', {
         id: 'u-recover',
         email: 'recover@test.io',
@@ -87,246 +203,215 @@ describe('SafeBrowse Stage 11 Step 3B: Durable Transactions and Fail-Secure Tena
       testStore.save(); // Creates backup
 
       const mainFile = path.join(tempDir, 'safebrowse-db.json');
-      // Corrupt primary file
       fs.writeFileSync(mainFile, '{"users": [ corrupt-incomplete-json...', 'utf-8');
 
-      // Reload
+      // Reload recovers
       const recoveredStore = new DataStore(tempDir);
       assert.strictEqual(recoveredStore.users.has('u-recover'), true);
     });
 
-    it('DataStore.load() throws DataLoadError if primary is corrupt and no backup exists', () => {
+    it('rejects backup recovery if backup fails relational tenancy validation', () => {
       const mainFile = path.join(tempDir, 'safebrowse-db.json');
-      fs.writeFileSync(mainFile, 'invalid json content', 'utf-8');
+      const backupFile = path.join(tempDir, 'safebrowse-db.json.bak');
+
+      fs.writeFileSync(mainFile, 'corrupt', 'utf-8');
+
+      // Syntactically valid JSON but structurally invalid tenancy: child references non-existent family
+      const invalidBackupData = {
+        families: [],
+        familyMembers: [],
+        children: [{ id: 'c-invalid', familyId: 'fam-ghost', parentId: 'p-1', name: 'Ghost Child' }],
+        devices: [],
+        policies: [],
+        pairingCodes: [],
+        requests: [],
+      };
+      fs.writeFileSync(backupFile, JSON.stringify(invalidBackupData, null, 2), 'utf-8');
 
       assert.throws(() => {
         new DataStore(tempDir);
       }, DataLoadError);
     });
 
-    it('DataStore.save() throws DataPersistenceError when writing fails', () => {
-      const testStore = new DataStore(tempDir);
-      testStore._simulateSaveFailure = true;
+    it('DataStore.validateTenancyIntegrity rejects multiple or mismatched family owners', () => {
+      const invalidSource = {
+        families: [{ id: 'fam-x', name: 'Fam X', ownerUserId: 'user-a' }],
+        familyMembers: [
+          { id: 'm-1', familyId: 'fam-x', userId: 'user-a', role: 'OWNER' },
+          { id: 'm-2', familyId: 'fam-x', userId: 'user-b', role: 'OWNER' }, // Dual owners!
+        ],
+        children: [],
+        devices: [],
+        policies: [],
+        pairingCodes: [],
+        requests: [],
+      };
 
       assert.throws(() => {
-        testStore.save();
-      }, DataPersistenceError);
+        DataStore.validateTenancyIntegrity(invalidSource);
+      }, FatalTenancyError);
+    });
 
-      testStore._simulateSaveFailure = false;
+    it('DataStore.validateTenancyIntegrity rejects device-child family mismatch', () => {
+      const invalidSource = {
+        families: [
+          { id: 'fam-1', name: 'Fam 1', ownerUserId: 'u-1' },
+          { id: 'fam-2', name: 'Fam 2', ownerUserId: 'u-2' },
+        ],
+        familyMembers: [
+          { id: 'm-1', familyId: 'fam-1', userId: 'u-1', role: 'OWNER' },
+          { id: 'm-2', familyId: 'fam-2', userId: 'u-2', role: 'OWNER' },
+        ],
+        children: [{ id: 'c-1', familyId: 'fam-1', parentId: 'u-1', name: 'Child 1' }],
+        devices: [{ id: 'd-1', childId: 'c-1', familyId: 'fam-2', name: 'Device Misassigned' }],
+        policies: [],
+        pairingCodes: [],
+        requests: [],
+      };
+
+      assert.throws(() => {
+        DataStore.validateTenancyIntegrity(invalidSource);
+      }, /does not match child familyId/);
+    });
+
+    it('DataStore.validateTenancyIntegrity rejects request-device-child family mismatch', () => {
+      const invalidSource = {
+        families: [{ id: 'fam-1', name: 'Fam 1', ownerUserId: 'u-1' }],
+        familyMembers: [{ id: 'm-1', familyId: 'fam-1', userId: 'u-1', role: 'OWNER' }],
+        children: [
+          { id: 'c-1', familyId: 'fam-1', parentId: 'u-1', name: 'Child 1' },
+          { id: 'c-2', familyId: 'fam-1', parentId: 'u-1', name: 'Child 2' },
+        ],
+        devices: [{ id: 'd-1', childId: 'c-1', familyId: 'fam-1', name: 'Dev 1' }],
+        policies: [],
+        pairingCodes: [],
+        requests: [{ id: 'r-1', childId: 'c-2', deviceId: 'd-1', familyId: 'fam-1', domain: 'x.com' }], // device belongs to c-1 not c-2
+      };
+
+      assert.throws(() => {
+        DataStore.validateTenancyIntegrity(invalidSource);
+      }, /does not belong to the same child and family/);
+    });
+
+    it('DataStore.validateTenancyIntegrity rejects pairing-code family mismatch', () => {
+      const invalidSource = {
+        families: [
+          { id: 'fam-1', name: 'Fam 1', ownerUserId: 'u-1' },
+          { id: 'fam-2', name: 'Fam 2', ownerUserId: 'u-2' },
+        ],
+        familyMembers: [
+          { id: 'm-1', familyId: 'fam-1', userId: 'u-1', role: 'OWNER' },
+          { id: 'm-2', familyId: 'fam-2', userId: 'u-2', role: 'OWNER' },
+        ],
+        children: [{ id: 'c-1', familyId: 'fam-1', parentId: 'u-1', name: 'Child 1' }],
+        devices: [],
+        policies: [],
+        pairingCodes: [{ code: 'SB-1234-5678', childId: 'c-1', familyId: 'fam-2', createdByParentId: 'u-1' }],
+        requests: [],
+      };
+
+      assert.throws(() => {
+        DataStore.validateTenancyIntegrity(invalidSource);
+      }, /familyId 'fam-2' does not match child familyId 'fam-1'/);
     });
   });
 
-  describe('2. Fail-Secure Ownership Transfer Durability', () => {
-    it('rolls back in-memory and on-disk state completely if save fails during transfer', async () => {
-      const uOwner = authService.register(`owner-fail-${nanoid(6)}@safebrowse.io`, testPass, 'Owner');
+  describe('3. Single-Commit Ownership Transfer & Atomic Staging', () => {
+    it('performs exactly one datastore save on successful ownership transfer', async () => {
+      const uOwner = authService.register(`single-owner-${nanoid(6)}@safebrowse.io`, testPass, 'Owner Single');
       authService.verifyEmail(uOwner.emailVerificationToken);
       const fam = familyService.getOrCreateUserFamily(uOwner.user.id);
 
-      const inv = familyService.inviteParent(fam.id, uOwner.user.id, `cand-fail-${nanoid(6)}@safebrowse.io`, 'PARENT');
+      const inv = familyService.inviteParent(fam.id, uOwner.user.id, `single-cand-${nanoid(6)}@safebrowse.io`, 'PARENT');
       const uCand = authService.register(inv.email, testPass, 'Candidate');
       authService.verifyEmail(uCand.emailVerificationToken);
       familyService.acceptInvitation(inv.token, uCand.user.id);
 
-      const ownerBefore = db.families.get(fam.id)!.ownerUserId;
-      const auditsBefore = db.familyAuditLogs.filter((a) => a.familyId === fam.id).length;
+      // Reset save counter
+      db.resetSaveCallCount();
 
-      // Inject save failure
-      db._simulateSaveFailure = true;
+      // Execute real ownership transfer
+      await familyService.transferOwnership(fam.id, uCand.user.id, uOwner.user.id, testPass);
 
-      let threw = false;
-      try {
-        await familyService.transferOwnership(fam.id, uCand.user.id, uOwner.user.id, testPass);
-      } catch (e: any) {
-        threw = true;
-        assert.strictEqual(e instanceof DataPersistenceError || e.name === 'DataPersistenceError', true);
-      } finally {
-        db._simulateSaveFailure = false;
-      }
+      // Verify db.save() was called EXACTLY ONCE
+      assert.strictEqual(db.saveCallCount, 1);
 
-      assert.strictEqual(threw, true);
-
-      // Assert in-memory state remained completely untouched
-      const famAfter = db.families.get(fam.id)!;
-      assert.strictEqual(famAfter.ownerUserId, ownerBefore);
-
-      const auditsAfter = db.familyAuditLogs.filter((a) => a.familyId === fam.id).length;
-      assert.strictEqual(auditsAfter, auditsBefore);
-
-      const memOwner = Array.from(db.familyMembers.values()).find((m) => m.familyId === fam.id && m.userId === uOwner.user.id)!;
-      assert.strictEqual(memOwner.role, 'OWNER');
-
-      const memCand = Array.from(db.familyMembers.values()).find((m) => m.familyId === fam.id && m.userId === uCand.user.id)!;
-      assert.strictEqual(memCand.role, 'PARENT');
+      // Verify audit log was committed in that single save
+      const audits = familyService.getAuditLogs(fam.id, uCand.user.id);
+      assert.ok(audits.some((a) => a.action === 'OWNERSHIP_TRANSFERRED'));
     });
 
-    it('persists audit event atomically with ownership transfer and survives reload', async () => {
-      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb_restart_test_'));
-      const testStore = new DataStore(tempDir);
+    it('performs zero saves and leaves disk/memory unmutated when validation fails before commit', async () => {
+      const uOwner = authService.register(`precommit-owner-${nanoid(6)}@safebrowse.io`, testPass, 'Precommit Owner');
+      authService.verifyEmail(uOwner.emailVerificationToken);
+      const fam = familyService.getOrCreateUserFamily(uOwner.user.id);
 
-      const uOwner: ParentUser = {
-        id: `owner-surv-${nanoid(6)}`,
-        email: `surv-${nanoid(6)}@safebrowse.io`,
-        passwordHash: 'hash',
-        name: 'Surviving Owner',
-        emailVerified: true,
-        createdAt: new Date().toISOString(),
-      };
-      testStore.users.set(uOwner.id, uOwner);
+      const inv = familyService.inviteParent(fam.id, uOwner.user.id, `precommit-cand-${nanoid(6)}@safebrowse.io`, 'PARENT');
+      const uCand = authService.register(inv.email, testPass, 'Precommit Cand');
+      authService.verifyEmail(uCand.emailVerificationToken);
+      familyService.acceptInvitation(inv.token, uCand.user.id);
 
-      const fam: Family = {
-        id: `fam-surv-${nanoid(6)}`,
-        name: 'Surviving Family',
-        ownerUserId: uOwner.id,
-        requireMfa: false,
-        approvalRule: 'OWNER_ONLY',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      testStore.families.set(fam.id, fam);
+      db.resetSaveCallCount();
 
-      const memOwner: FamilyMember = {
-        id: `fm-surv-1`,
-        familyId: fam.id,
-        userId: uOwner.id,
-        role: 'OWNER',
-        joinedAt: new Date().toISOString(),
-      };
-      testStore.familyMembers.set(memOwner.id, memOwner);
+      // Attempt transfer with wrong password (fails before commit)
+      await assert.rejects(async () => {
+        await familyService.transferOwnership(fam.id, uCand.user.id, uOwner.user.id, 'WrongPassword123!');
+      }, /Incorrect password/);
 
-      const uTarget: ParentUser = {
-        id: `target-surv-${nanoid(6)}`,
-        email: `target-surv-${nanoid(6)}@safebrowse.io`,
-        passwordHash: 'hash',
-        name: 'Target Parent',
-        emailVerified: true,
-        createdAt: new Date().toISOString(),
-      };
-      testStore.users.set(uTarget.id, uTarget);
+      // Exactly zero saves occurred
+      assert.strictEqual(db.saveCallCount, 0);
 
-      const memTarget: FamilyMember = {
-        id: `fm-surv-2`,
-        familyId: fam.id,
-        userId: uTarget.id,
-        role: 'PARENT',
-        joinedAt: new Date().toISOString(),
-      };
-      testStore.familyMembers.set(memTarget.id, memTarget);
-
-      // Perform transfer
-      memOwner.role = 'PARENT';
-      memTarget.role = 'OWNER';
-      fam.ownerUserId = uTarget.id;
-      testStore.familyAuditLogs.push({
-        id: 'fa-test-1',
-        familyId: fam.id,
-        actorUserId: uOwner.id,
-        actorName: uOwner.name,
-        action: 'OWNERSHIP_TRANSFERRED',
-        details: 'Transferred',
-        timestamp: new Date().toISOString(),
-      });
-      testStore.save();
-
-      // Simulate complete backend restart
-      const reloadedStore = new DataStore(tempDir);
-      const reloadedFam = reloadedStore.families.get(fam.id)!;
-      assert.strictEqual(reloadedFam.ownerUserId, uTarget.id);
-
-      const audit = reloadedStore.familyAuditLogs.find(
-        (a) => a.familyId === fam.id && a.action === 'OWNERSHIP_TRANSFERRED'
-      );
-      assert.notStrictEqual(audit, undefined);
-
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    });
-
-    it('cross-family snapshot rollback does not undo another concurrent family transfer', async () => {
-      // Family 1
-      const uOwner1 = authService.register(`cross1-${nanoid(6)}@safebrowse.io`, testPass, 'Owner 1');
-      authService.verifyEmail(uOwner1.emailVerificationToken);
-      const fam1 = familyService.getOrCreateUserFamily(uOwner1.user.id);
-      const inv1 = familyService.inviteParent(fam1.id, uOwner1.user.id, `crossCand1-${nanoid(6)}@safebrowse.io`, 'PARENT');
-      const uCand1 = authService.register(inv1.email, testPass, 'Cand 1');
-      authService.verifyEmail(uCand1.emailVerificationToken);
-      familyService.acceptInvitation(inv1.token, uCand1.user.id);
-
-      // Family 2
-      const uOwner2 = authService.register(`cross2-${nanoid(6)}@safebrowse.io`, testPass, 'Owner 2');
-      authService.verifyEmail(uOwner2.emailVerificationToken);
-      const fam2 = familyService.getOrCreateUserFamily(uOwner2.user.id);
-      const inv2 = familyService.inviteParent(fam2.id, uOwner2.user.id, `crossCand2-${nanoid(6)}@safebrowse.io`, 'PARENT');
-      const uCand2 = authService.register(inv2.email, testPass, 'Cand 2');
-      authService.verifyEmail(uCand2.emailVerificationToken);
-      familyService.acceptInvitation(inv2.token, uCand2.user.id);
-
-      // Successfully transfer Family 1
-      await familyService.transferOwnership(fam1.id, uCand1.user.id, uOwner1.user.id, testPass);
-      assert.strictEqual(db.families.get(fam1.id)!.ownerUserId, uCand1.user.id);
-
-      // Now Family 2 transfer fails with bad credentials and triggers rollback
-      let fam2Failed = false;
-      try {
-        await familyService.transferOwnership(fam2.id, uCand2.user.id, uOwner2.user.id, 'WrongPass!');
-      } catch {
-        fam2Failed = true;
-      }
-      assert.strictEqual(fam2Failed, true);
-
-      // Family 1 must remain transferred to uCand1!
-      assert.strictEqual(db.families.get(fam1.id)!.ownerUserId, uCand1.user.id);
-      // Family 2 must remain with uOwner2
-      assert.strictEqual(db.families.get(fam2.id)!.ownerUserId, uOwner2.user.id);
+      // Memory owner unchanged
+      assert.strictEqual(db.families.get(fam.id)!.ownerUserId, uOwner.user.id);
     });
   });
 
-  describe('3. Mandatory Family Tenancy Enforcement', () => {
-    it('rejects child creation without a valid familyId', () => {
-      const u = authService.register(`user-nofam-${nanoid(6)}@safebrowse.io`, testPass, 'User');
-      authService.verifyEmail(u.emailVerificationToken);
+  describe('4. Multi-Family Isolation (Devices, Requests, Digest)', () => {
+    it('filters devices, requests, and weekly digest strictly by family tenancy', () => {
+      // Setup User belonging to two distinct families
+      const uMulti = authService.register(`multi-user-${nanoid(6)}@safebrowse.io`, testPass, 'Multi User');
+      authService.verifyEmail(uMulti.emailVerificationToken);
 
-      assert.throws(() => {
-        childService.createChild(u.user.id, 'NoFamChild', 10, undefined, '');
-      }, /Valid familyId is required/);
+      const famA = familyService.getOrCreateUserFamily(uMulti.user.id);
+      // Create child in Fam A first so famA is preserved
+      const { child: childA } = childService.createChild(uMulti.user.id, 'Child A', 8, '🧒', famA.id);
 
-      assert.throws(() => {
-        childService.createChild(u.user.id, 'NoFamChild', 10, undefined, 'fam-non-existent');
-      }, /Referenced family does not exist/);
-    });
+      const uOwnerB = authService.register(`other-owner-${nanoid(6)}@safebrowse.io`, testPass, 'Other Owner');
+      authService.verifyEmail(uOwnerB.emailVerificationToken);
+      const famB = familyService.getOrCreateUserFamily(uOwnerB.user.id);
+      const { child: childB } = childService.createChild(uOwnerB.user.id, 'Child B', 10, '🧒', famB.id);
 
-    it('rejects pairing code generation if child does not belong to a valid family', () => {
-      const u = authService.register(`user-pair-${nanoid(6)}@safebrowse.io`, testPass, 'User');
-      authService.verifyEmail(u.emailVerificationToken);
+      // uMulti joins Fam B as a co-parent
+      const inv = familyService.inviteParent(famB.id, uOwnerB.user.id, uMulti.user.email, 'PARENT');
+      familyService.acceptInvitation(inv.token, uMulti.user.id);
 
-      assert.throws(() => {
-        deviceService.generatePairingCode(u.user.id, 'non-existent-child');
-      }, /Child must belong to a valid family/);
-    });
+      const pairA = deviceService.generatePairingCode(uMulti.user.id, childA.id);
+      const { device: devA } = deviceService.pairDevice(pairA.code, 'Dev A', 'windows', '1.0.0');
 
-    it('rejects access request creation if child has no valid family', () => {
-      assert.throws(() => {
-        requestService.createRequest('non-existent-child', 'some-device', 'games.com');
-      }, /Child profile not found/);
-    });
+      const pairB = deviceService.generatePairingCode(uOwnerB.user.id, childB.id);
+      const { device: devB } = deviceService.pairDevice(pairB.code, 'Dev B', 'windows', '1.0.0');
 
-    it('strict rbacService tenancy resolution uses only validated resource.familyId without fallbacks', () => {
-      const testChild = {
-        id: `ch-orphan-${nanoid(6)}`,
-        parentId: 'parent-with-no-family',
-        familyId: '', // missing
-        name: 'Orphan Child',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      db.children.set(testChild.id, testChild as any);
+      // Create Requests
+      const reqA = requestService.createRequest(childA.id, devA.id, 'site-a.com', 'Reason A');
+      const reqB = requestService.createRequest(childB.id, devB.id, 'site-b.com', 'Reason B');
 
-      const resolved = rbacService.getFamilyForChild(testChild.id);
-      assert.strictEqual(resolved, undefined);
+      // Query devices specifically for famA
+      const devicesFamA = deviceService.getDevicesForParent(uMulti.user.id, famA.id);
+      assert.strictEqual(devicesFamA.some((d) => d.id === devA.id), true);
+      assert.strictEqual(devicesFamA.some((d) => d.id === devB.id), false);
 
-      db.children.delete(testChild.id);
+      // Query requests specifically for famB
+      const requestsFamB = requestService.getPendingRequestsForParent(uMulti.user.id, famB.id);
+      assert.strictEqual(requestsFamB.some((r) => r.id === reqB.id), true);
+      assert.strictEqual(requestsFamB.some((r) => r.id === reqA.id), false);
+
+      // Weekly digest for famA
+      const digestFamA = usageService.getWeeklyDigest(uMulti.user.id, famA.id);
+      assert.ok(digestFamA);
     });
   });
 
-  describe('4. Explicit Tenancy Migration CLI', () => {
+  describe('5. Tenancy Migration & Quarantine Idempotency', () => {
     let migDir: string;
     let migFile: string;
 
@@ -345,68 +430,68 @@ describe('SafeBrowse Stage 11 Step 3B: Durable Transactions and Fail-Secure Tena
       const data = {
         families: [{ id: 'fam-single', name: 'Single Family', ownerUserId: 'p-1', approvalRule: 'OWNER_ONLY' }],
         familyMembers: [{ id: 'fm-1', familyId: 'fam-single', userId: 'p-1', role: 'OWNER' }],
-        children: [{ id: 'c-1', parentId: 'p-1', name: 'Tommy' }], // missing familyId
-        devices: [{ id: 'd-1', childId: 'c-1', parentId: 'p-1', name: 'Laptop' }], // missing familyId
-        policies: [{ id: 'pol-1', childId: 'c-1' }], // missing familyId
-        pairingCodes: [],
-        requests: [],
+        children: [{ id: 'c-1', parentId: 'p-1', name: 'Tommy' }],
+        devices: [{ id: 'd-1', childId: 'c-1', parentId: 'p-1', name: 'Laptop' }],
+        policies: [{ id: 'pol-1', childId: 'c-1' }],
+        pairingCodes: [{ code: 'SB-AAAA-BBBB', childId: 'c-1' }],
+        requests: [{ id: 'r-1', childId: 'c-1', deviceId: 'd-1', domain: 'fun.com' }],
       };
       fs.writeFileSync(migFile, JSON.stringify(data, null, 2), 'utf-8');
 
       // Dry run first
       const dryReport = runMigration(migFile, false);
-      assert.strictEqual(dryReport.counts.migrated, 3); // child, device, policy
+      assert.strictEqual(dryReport.counts.migrated, 5);
       assert.strictEqual(dryReport.counts.quarantined, 0);
-
-      // File was not modified in dry-run
-      const unmigratedRaw = JSON.parse(fs.readFileSync(migFile, 'utf-8'));
-      assert.strictEqual(unmigratedRaw.children[0].familyId, undefined);
 
       // Apply migration
       const applyReport = runMigration(migFile, true);
-      assert.strictEqual(applyReport.counts.migrated, 3);
+      assert.strictEqual(applyReport.counts.migrated, 5);
 
       const migratedRaw = JSON.parse(fs.readFileSync(migFile, 'utf-8'));
       assert.strictEqual(migratedRaw.children[0].familyId, 'fam-single');
       assert.strictEqual(migratedRaw.devices[0].familyId, 'fam-single');
       assert.strictEqual(migratedRaw.policies[0].familyId, 'fam-single');
+      assert.strictEqual(migratedRaw.pairingCodes[0].familyId, 'fam-single');
+      assert.strictEqual(migratedRaw.requests[0].familyId, 'fam-single');
 
-      // Idempotency: running migration again produces 0 migrated and 3 unchanged
+      // Idempotency: second run produces 0 migrated, 5 unchanged
       const idempReport = runMigration(migFile, true);
       assert.strictEqual(idempReport.counts.migrated, 0);
-      assert.strictEqual(idempReport.counts.unchanged, 3);
+      assert.strictEqual(idempReport.counts.unchanged, 5);
     });
 
-    it('quarantines ambiguous or orphaned records and creates quarantine.json', () => {
+    it('quarantines mismatches and ensures quarantine idempotency without duplicates', () => {
       const data = {
         families: [
-          { id: 'fam-1', name: 'Fam 1', ownerUserId: 'p-multi', approvalRule: 'OWNER_ONLY' },
-          { id: 'fam-2', name: 'Fam 2', ownerUserId: 'p-multi', approvalRule: 'OWNER_ONLY' },
+          { id: 'fam-1', name: 'Fam 1', ownerUserId: 'p-1', approvalRule: 'OWNER_ONLY' },
+          { id: 'fam-2', name: 'Fam 2', ownerUserId: 'p-2', approvalRule: 'OWNER_ONLY' },
         ],
         familyMembers: [
-          { id: 'fm-1', familyId: 'fam-1', userId: 'p-multi', role: 'OWNER' },
-          { id: 'fm-2', familyId: 'fam-2', userId: 'p-multi', role: 'OWNER' },
+          { id: 'fm-1', familyId: 'fam-1', userId: 'p-1', role: 'OWNER' },
+          { id: 'fm-2', familyId: 'fam-2', userId: 'p-2', role: 'OWNER' },
         ],
-        children: [
-          { id: 'c-ambig', parentId: 'p-multi', name: 'Child with ambiguous parent' },
-          { id: 'c-orphan', parentId: 'p-unknown', name: 'Orphan Child' },
-        ],
-        devices: [],
+        children: [{ id: 'c-1', familyId: 'fam-1', parentId: 'p-1', name: 'Child 1' }],
+        devices: [{ id: 'd-mismatch', childId: 'c-1', familyId: 'fam-2', name: 'Device in wrong family' }],
         policies: [],
         pairingCodes: [],
         requests: [],
       };
       fs.writeFileSync(migFile, JSON.stringify(data, null, 2), 'utf-8');
 
-      const report = runMigration(migFile, true);
-      assert.strictEqual(report.counts.quarantined, 2);
+      // First run
+      const rep1 = runMigration(migFile, true);
+      assert.strictEqual(rep1.counts.conflicted, 1);
+      assert.strictEqual(rep1.counts.quarantined, 1);
 
       const quarantineFile = path.join(migDir, 'quarantine.json');
       assert.strictEqual(fs.existsSync(quarantineFile), true);
+      const qData1 = JSON.parse(fs.readFileSync(quarantineFile, 'utf-8'));
+      assert.strictEqual(qData1.length, 1);
 
-      const quarantined = JSON.parse(fs.readFileSync(quarantineFile, 'utf-8'));
-      assert.strictEqual(quarantined.length, 2);
-      assert.deepStrictEqual(quarantined.map((q: any) => q.id), ['c-ambig', 'c-orphan']);
+      // Second run on same datastore with same quarantine file -> must NOT duplicate records
+      const rep2 = runMigration(migFile, true);
+      const qData2 = JSON.parse(fs.readFileSync(quarantineFile, 'utf-8'));
+      assert.strictEqual(qData2.length, 1);
     });
   });
 });

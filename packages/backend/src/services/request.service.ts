@@ -185,16 +185,14 @@ export class RequestService {
       .sort((a, b) => new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime());
   }
 
-  public getPendingRequestsForParent(parentId: string): ExtendedAccessRequest[] {
-    const family = familyService.getOrCreateUserFamily(parentId);
-    const familyOwnerId = family.ownerUserId;
-
-    const parentChildrenIds = Array.from(db.children.values())
-      .filter((c) => c.parentId === parentId || c.parentId === familyOwnerId)
-      .map((c) => c.id);
+  public getPendingRequestsForParent(parentId: string, familyId?: string): ExtendedAccessRequest[] {
+    const { rbacService } = require('./rbac.service');
+    const userFamilyIds = rbacService.getUserFamilyMemberships(parentId).map((m: any) => m.familyId);
+    const targetFamilyIds = familyId ? [familyId] : userFamilyIds;
+    const allowedSet = new Set<string>(targetFamilyIds.filter((fid: string) => userFamilyIds.includes(fid)));
 
     return (Array.from(db.requests.values()) as ExtendedAccessRequest[])
-      .filter((r) => parentChildrenIds.includes(r.childId) && r.status === 'PENDING')
+      .filter((r) => r.familyId && allowedSet.has(r.familyId) && r.status === 'PENDING')
       .sort((a, b) => new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime());
   }
 }
