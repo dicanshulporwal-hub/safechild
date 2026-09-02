@@ -1,0 +1,334 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id                      String                   @id
+  email                   String                   @unique
+  passwordHash            String
+  name                    String
+  systemRole              String                   @default("USER")
+  emailVerified           Boolean                  @default(false)
+  mfaEnabled              Boolean                  @default(false)
+  mfaSecret               String?
+  mfaRecoveryCodes        String[]                 @default([])
+  totpLastUsedSteps       Json?
+  notificationPrefs       Json?
+  tokenVersion            Int                      @default(1)
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  lastLoginAt             DateTime?
+
+  sessions                UserSession[]
+  challenges              MfaChallenge[]
+  memberships             FamilyMember[]
+  ownedFamilies           Family[]                 @relation("FamilyOwner")
+  childrenCreated         Child[]
+  devicesCreated          Device[]
+  pairingCodesCreated     PairingCode[]
+  passwordResetTokens     PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
+}
+
+model UserSession {
+  id                  String   @id
+  userId              String
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionFamilyId     String
+  refreshTokenHash    String
+  consumedTokenHashes String[] @default([])
+  deviceInfo          String   @default("Unknown Device")
+  ipAddress           String?
+  createdAt           DateTime @default(now())
+  lastSeenAt          DateTime @default(now())
+  expiresAt           DateTime
+  isRevoked           Boolean  @default(false)
+  tokenVersion        Int      @default(1)
+
+  @@index([userId])
+  @@index([refreshTokenHash])
+}
+
+model MfaChallenge {
+  id             String    @id
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jtiHash        String    @unique
+  purpose        String
+  createdAt      DateTime  @default(now())
+  expiresAt      DateTime
+  consumedAt     DateTime?
+  invalidatedAt  DateTime?
+  attemptCount   Int       @default(0)
+  ipAddress      String?
+  userAgent      String?
+
+  @@index([userId])
+}
+
+model Family {
+  id                String             @id
+  name              String
+  ownerUserId       String
+  owner             User               @relation("FamilyOwner", fields: [ownerUserId], references: [id], onDelete: Restrict)
+  requireMfa        Boolean            @default(false)
+  approvalRule      String             @default("OWNER_OR_PARENT")
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  members           FamilyMember[]
+  invitations       FamilyInvitation[]
+  children          Child[]
+  devices           Device[]
+  policies          Policy[]
+  pairingCodes      PairingCode[]
+  accessRequests    AccessRequest[]
+  childUsageRecords ChildUsageRecord[]
+  activityEvents    ActivityEvent[]
+  auditLogs         FamilyAuditLog[]
+
+  @@index([ownerUserId])
+}
+
+model FamilyMember {
+  id       String   @id
+  familyId String
+  family   Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role     String
+  joinedAt DateTime @default(now())
+
+  @@unique([familyId, userId])
+  @@index([familyId])
+  @@index([userId])
+}
+
+model FamilyInvitation {
+  id              String    @id
+  familyId        String
+  family          Family    @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  email           String
+  role            String
+  tokenHash       String    @unique
+  expiresAt       DateTime
+  status          String    @default("PENDING")
+  invitedByUserId String
+  createdAt       DateTime  @default(now())
+  acceptedAt      DateTime?
+  revokedAt       DateTime?
+
+  @@index([familyId])
+  @@index([email])
+}
+
+model Child {
+  id        String   @id
+  familyId  String
+  family    Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  parentId  String
+  parent    User     @relation(fields: [parentId], references: [id], onDelete: Restrict)
+  name      String
+  age       Int?
+  avatar    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  devices           Device[]
+  policy            Policy?
+  pairingCodes      PairingCode[]
+  accessRequests    AccessRequest[]
+  childUsageRecords ChildUsageRecord[]
+  activityEvents    ActivityEvent[]
+
+  @@unique([familyId, id])
+  @@index([familyId])
+  @@index([parentId])
+}
+
+model Device {
+  id              String   @id
+  familyId        String
+  family          Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  childId         String
+  child           Child    @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
+  parentId        String
+  parent          User     @relation(fields: [parentId], references: [id], onDelete: Restrict)
+  name            String
+  platform        String
+  agentVersion    String
+  lastSeenAt      DateTime @default(now())
+  lastHeartbeatAt DateTime @default(now())
+  ipAddress       String?
+  healthStatus    String   @default("healthy")
+  healthState     String   @default("PROTECTED")
+  isRevoked       Boolean  @default(false)
+  tokenHash       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([familyId, childId, id])
+  @@index([familyId])
+  @@index([childId])
+}
+
+model Policy {
+  id                 String   @id
+  familyId           String
+  family             Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  childId            String   @unique
+  child              Child    @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
+  blockedCategories  String[] @default([])
+  blacklistedDomains String[] @default([])
+  whitelistedDomains String[] @default([])
+  temporaryGrants    Json?
+  usageBudgets       Json?
+  safeSearch         Json?
+  routines           Json?
+  studyMode          Boolean  @default(false)
+  version            Int      @default(1)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([familyId, childId])
+  @@index([familyId])
+}
+
+model PairingCode {
+  id                String   @id
+  code              String   @unique
+  familyId          String
+  family            Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  childId           String
+  child             Child    @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
+  createdByParentId String
+  createdByParent   User     @relation(fields: [createdByParentId], references: [id], onDelete: Restrict)
+  expiresAt         DateTime
+  createdAt         DateTime @default(now())
+
+  @@index([familyId])
+  @@index([childId])
+}
+
+model AccessRequest {
+  id               String    @id
+  familyId         String
+  family           Family    @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  childId          String
+  child            Child     @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
+  deviceId         String?
+  domain           String
+  reason           String?
+  requestedAt      DateTime  @default(now())
+  expiresAt        DateTime?
+  status           String    @default("PENDING")
+  resolvedAt       DateTime?
+  resolvedByUserId String?
+  resolutionAction String?
+  durationMinutes  Int?
+
+  @@index([familyId])
+  @@index([childId])
+}
+
+model ChildUsageRecord {
+  id                      String   @id
+  familyId                String
+  family                  Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  childId                 String
+  child                   Child    @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
+  deviceId                String?
+  target                  String
+  date                    String
+  consumedSeconds         Int      @default(0)
+  limitSeconds            Int?
+  lastCheckpointTimestamp DateTime @default(now())
+  lastSyncAt              DateTime @default(now())
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@unique([childId, target, date])
+  @@index([familyId])
+}
+
+model ActivityEvent {
+  id            String   @id
+  familyId      String
+  family        Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  childId       String
+  child         Child    @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
+  deviceId      String?
+  domain        String
+  category      String
+  action        String
+  blockedReason String?
+  timestamp     DateTime @default(now())
+
+  @@index([familyId])
+  @@index([childId])
+}
+
+model FamilyAuditLog {
+  id          String   @id
+  familyId    String
+  family      Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  actorUserId String
+  actorName   String
+  action      String
+  childId     String?
+  details     String
+  timestamp   DateTime @default(now())
+
+  @@index([familyId])
+}
+
+model SystemAuditLog {
+  id         String   @id
+  actorUserId String
+  actorEmail String
+  action     String
+  details    String
+  timestamp  DateTime @default(now())
+  ipAddress  String?
+}
+
+model PasswordResetToken {
+  id        String    @id
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email     String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model EmailVerificationToken {
+  id        String    @id
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email     String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model Referral {
+  id             String   @id
+  referrerUserId String
+  referralCode   String   @unique
+  referredUserIds String[] @default([])
+  rewardStatus   String   @default("PENDING")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}

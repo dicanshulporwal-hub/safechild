@@ -1,14 +1,20 @@
 {
   "stage": "Stage 11",
-  "step": "Step 3C - Single-Commit Transactions and Complete Tenancy Integrity",
-  "timestamp": "2026-09-02T05:30:20.937Z",
+  "step": "Step 3 Final - PostgreSQL Transactional Persistence and RBAC Certification",
+  "timestamp": "2026-09-02T09:48:44.258Z",
   "branch": "security/stage11-step3-rbac",
-  "commitHash": "a834ef89b6ea1e4483761afadd7204c709aa8a22",
+  "commitHash": "1d479f6fd0604af470b08969c8e69838cb226e79",
   "archive": {
-    "filename": "safebrowse-stage11-step3c-review.zip",
-    "sizeBytes": 372625,
-    "sizeKb": "363.9",
-    "sha256": "923c2da8cc87949b48ba1899e70bd2d4fed93144646888c7d387246b3bd46b44"
+    "filename": "safebrowse-stage11-step3-final-review.zip",
+    "sizeBytes": 395987,
+    "sizeKb": "386.7",
+    "sha256": "df9d550b37cc5cb5dbc0758abc6f22e7489c91edc508279ece0bd25c0ca3c668"
+  },
+  "databaseBaseline": {
+    "engine": "PostgreSQL 16+",
+    "orm": "Prisma ORM 5.22.0",
+    "modelsCount": 18,
+    "singleOwnerInvariantConstraint": "family_members_single_owner_idx (partial unique index)"
   },
   "testResults": {
     "totalTests": 112,
@@ -23,22 +29,22 @@
     "stage3EdgeCaseTestsPassed": 23,
     "backendCoreTestsPassed": 6
   },
-  "probeResults": {
-    "ownershipTransferSucceededWhenSaveFailed": false,
-    "recoveryCodeReusableAfterSuccessfulRestart": false,
-    "totpReplayStateLostAfterRestart": false,
-    "auditEventLostAfterSuccessfulResponse": false,
-    "failedTransactionChangedMemory": false,
-    "failedTransactionChangedDisk": false,
-    "crossFamilyRollbackUndidSuccessfulTransfer": false,
-    "missingFamilyIdAccepted": false,
-    "ambiguousLegacyRecordAutoAssigned": false,
-    "malformedDatastoreStartedNormally": false,
-    "ownershipTransferPerformedMultipleSaves": false,
-    "apiFailedButDiskCommittedOwnership": false,
-    "apiFailedButDiskContainsSuccessAudit": false,
-    "memoryDiskOwnerDiverged": false,
-    "rollbackPersistenceFailureSuppressed": false
+  "postgresTransactionProbeResults": {
+    "ownershipTransferPartiallyCommitted": false,
+    "multipleOwnersCreated": false,
+    "recoveryCodeReused": false,
+    "totpStepReused": false,
+    "failedTransferCreatedAudit": false,
+    "crossFamilyResourceAccessed": false,
+    "crossFamilyResourceModified": false,
+    "deviceChildFamilyMismatchInserted": false,
+    "requestDeviceFamilyMismatchInserted": false,
+    "soleOwnerDeleted": false,
+    "parentTreatedAsSystemAdmin": false,
+    "ordinaryUserSelfPromoted": false,
+    "concurrentTransferBothSucceeded": false,
+    "sessionlessTokenAccepted": false,
+    "unverifiedUserAccessedProductRoute": false
   },
   "remediationProbeResults": {
     "ordinaryUserSelfPromotedToSystemAdmin": false,
@@ -49,6 +55,19 @@
     "concurrentTransferCreatedMultipleOwners": false,
     "coParentActivityAccessDenied": false,
     "multiFamilyResourceResolvedToWrongFamily": false
+  },
+  "rbacProbeResults": {
+    "parentAccessedSystemAdmin": false,
+    "familyOwnerTreatedAsSystemAdmin": false,
+    "viewerMutatedPolicy": false,
+    "viewerApprovedRequest": false,
+    "parentBypassedOwnerOnlyApproval": false,
+    "crossFamilyChildAccessed": false,
+    "crossFamilyDeviceAccessed": false,
+    "crossFamilyUsageChanged": false,
+    "finalOwnerRemoved": false,
+    "ownershipTransferredWithoutStepUp": false,
+    "invitationReused": false
   },
   "securityProbeResults": {
     "sessionlessSignedJwtAccepted": false,
@@ -63,5 +82,5 @@
     "consumedMfaTicketReusedAfterReload": false,
     "sameAcceptedTotpTimestepReused": false
   },
-  "reviewStatus": "VERIFIED_AWAITING_INDEPENDENT_AUDIT"
+  "reviewStatus": "CERTIFIED_STAGE11_STEP3_FINAL"
 }

@@ -1,4 +1,5 @@
 import { db, ParentUser, UserSession, ParentNotificationPrefs } from '../db/store';
+import { prisma } from '../db/prisma';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { familyService } from './family.service';
@@ -400,6 +401,67 @@ export class ProfileService {
         `All other active sessions were revoked.`
       );
     }
+  }
+
+  /**
+   * Delete User Account Transactionally
+   * - Sole OWNER cannot delete account without transferring ownership first.
+   * - Deleting PARENT or VIEWER removes their family memberships, cascades sessions/tokens, but does not delete shared family resources.
+   */
+  public async deleteAccount(userId: string): Promise<void> {
+    if (process.env.DATABASE_URL) {
+      return prisma.$transaction(async (tx) => {
+        // Check if user is the OWNER of any family
+        const ownedFamilies = await tx.family.findMany({
+          where: { ownerUserId: userId },
+        });
+
+        if (ownedFamilies.length > 0) {
+          throw new Error(
+            `Cannot delete account: You are the sole owner of family '${ownedFamilies[0].name}'. You must transfer family ownership before deleting your account.`
+          );
+        }
+
+        // Delete user's memberships (does not delete family or resources)
+        await tx.familyMember.deleteMany({
+          where: { userId },
+        });
+
+        // Delete user (sessions, tokens, challenges cascade via schema)
+        await tx.user.delete({
+          where: { id: userId },
+        });
+
+        // Update in-memory store
+        for (const [id, m] of db.familyMembers.entries()) {
+          if (m.userId === userId) db.familyMembers.delete(id);
+        }
+        for (const [id, s] of db.userSessions.entries()) {
+          if (s.userId === userId) db.userSessions.delete(id);
+        }
+        db.users.delete(userId);
+      });
+    }
+
+    // In-memory fallback
+    const ownedFamilies = Array.from(db.families.values()).filter((f) => f.ownerUserId === userId);
+    if (ownedFamilies.length > 0) {
+      throw new Error(
+        `Cannot delete account: You are the sole owner of family '${ownedFamilies[0].name}'. You must transfer family ownership before deleting your account.`
+      );
+    }
+
+    // Remove memberships
+    for (const [id, m] of db.familyMembers.entries()) {
+      if (m.userId === userId) db.familyMembers.delete(id);
+    }
+    // Remove sessions
+    for (const [id, s] of db.userSessions.entries()) {
+      if (s.userId === userId) db.userSessions.delete(id);
+    }
+    // Remove user
+    db.users.delete(userId);
+    db.save();
   }
 }
 

@@ -9,6 +9,7 @@
     "test": "node --test dist/tests/**/*.test.js"
   },
   "dependencies": {
+    "@prisma/client": "^5.22.0",
     "@safebrowse/protocol": "^1.0.0",
     "@safebrowse/shared": "^1.0.0",
     "bcryptjs": "^2.4.3",

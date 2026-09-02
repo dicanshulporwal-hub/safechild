@@ -18,10 +18,17 @@
     "dev:web": "npm run dev --workspace=@safebrowse/parent-web",
     "dev": "concurrently \"npm run dev:backend\" \"npm run dev:web\"",
     "test": "npm run test --workspaces --if-present",
-    "test:e2e": "ts-node scripts/test-e2e-scenario.ts"
+    "test:e2e": "ts-node scripts/test-e2e-scenario.ts",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "db:test:reset": "prisma migrate reset --force",
+    "db:import:dry": "ts-node scripts/import-json-to-postgres.ts",
+    "db:import:apply": "ts-node scripts/import-json-to-postgres.ts --apply"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
+    "prisma": "^5.22.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.4.5"
   }

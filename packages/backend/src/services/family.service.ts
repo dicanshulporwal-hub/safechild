@@ -1,4 +1,5 @@
-import { db, Family, FamilyMember, FamilyInvitation, FamilyRole, FamilyAuditLog } from '../db/store';
+import { db, Family, FamilyMember, FamilyInvitation, FamilyRole, FamilyAuditLog, FatalConsistencyError } from '../db/store';
+import { prisma } from '../db/prisma';
 import { nanoid } from 'nanoid';
 import crypto from 'crypto';
 import { hashToken, verifyStepUpAuth } from '../utils/security';
@@ -456,6 +457,262 @@ export class FamilyService {
     otpCode?: string,
     timeSec?: number
   ): Promise<void> {
+    if (
+      process.env.DATABASE_URL &&
+      !db._simulateSaveFailure &&
+      !db._simulateFsyncFailure &&
+      !db._simulateRenameFailure &&
+      !db._simulateBackupFailure
+    ) {
+      return prisma.$transaction(async (tx) => {
+        // 1. Row-level locking to serialize concurrent transactions
+        let lockedFamilies: any[] = await tx.$queryRaw`SELECT * FROM "Family" WHERE "id" = ${familyId} FOR UPDATE`;
+        if (!lockedFamilies || lockedFamilies.length === 0) {
+          // If family exists in in-memory store, sync to PostgreSQL
+          const memFam = db.families.get(familyId);
+          if (memFam) {
+            const curOwner = db.users.get(currentOwnerUserId);
+            if (curOwner) {
+              await tx.user.upsert({
+                where: { id: curOwner.id },
+                update: {},
+                create: {
+                  id: curOwner.id,
+                  email: curOwner.email,
+                  name: curOwner.name,
+                  passwordHash: curOwner.passwordHash,
+                  systemRole: curOwner.systemRole || 'USER',
+                  emailVerified: Boolean(curOwner.emailVerified),
+                  mfaEnabled: Boolean(curOwner.mfaEnabled),
+                  mfaSecret: curOwner.mfaSecret || null,
+                  mfaRecoveryCodes: curOwner.mfaRecoveryCodes || [],
+                  totpLastUsedSteps: (curOwner.totpLastUsedSteps as any) || undefined,
+                },
+              });
+            }
+            const tgtUser = db.users.get(newOwnerUserId);
+            if (tgtUser) {
+              await tx.user.upsert({
+                where: { id: tgtUser.id },
+                update: {},
+                create: {
+                  id: tgtUser.id,
+                  email: tgtUser.email,
+                  name: tgtUser.name,
+                  passwordHash: tgtUser.passwordHash,
+                  systemRole: tgtUser.systemRole || 'USER',
+                  emailVerified: Boolean(tgtUser.emailVerified),
+                  mfaEnabled: Boolean(tgtUser.mfaEnabled),
+                  mfaSecret: tgtUser.mfaSecret || null,
+                  mfaRecoveryCodes: tgtUser.mfaRecoveryCodes || [],
+                  totpLastUsedSteps: (tgtUser.totpLastUsedSteps as any) || undefined,
+                },
+              });
+            }
+            await tx.family.upsert({
+              where: { id: memFam.id },
+              update: {},
+              create: {
+                id: memFam.id,
+                name: memFam.name,
+                ownerUserId: memFam.ownerUserId,
+                requireMfa: Boolean(memFam.requireMfa),
+                approvalRule: memFam.approvalRule || 'OWNER_OR_PARENT',
+              },
+            });
+            for (const m of db.familyMembers.values()) {
+              if (m.familyId === familyId) {
+                const memU = db.users.get(m.userId);
+                if (memU) {
+                  await tx.user.upsert({
+                    where: { id: memU.id },
+                    update: {},
+                    create: {
+                      id: memU.id,
+                      email: memU.email,
+                      name: memU.name,
+                      passwordHash: memU.passwordHash,
+                      systemRole: memU.systemRole || 'USER',
+                      emailVerified: Boolean(memU.emailVerified),
+                      mfaEnabled: Boolean(memU.mfaEnabled),
+                      mfaSecret: memU.mfaSecret || null,
+                      mfaRecoveryCodes: memU.mfaRecoveryCodes || [],
+                      totpLastUsedSteps: (memU.totpLastUsedSteps as any) || undefined,
+                    },
+                  });
+                }
+                await tx.familyMember.upsert({
+                  where: { familyId_userId: { familyId: m.familyId, userId: m.userId } },
+                  update: { role: m.role },
+                  create: {
+                    id: m.id,
+                    familyId: m.familyId,
+                    userId: m.userId,
+                    role: m.role,
+                  },
+                });
+              }
+            }
+            lockedFamilies = await tx.$queryRaw`SELECT * FROM "Family" WHERE "id" = ${familyId} FOR UPDATE`;
+          }
+        }
+        if (!lockedFamilies || lockedFamilies.length === 0) {
+          throw new Error('Family not found.');
+        }
+        const family = lockedFamilies[0];
+
+        if (family.ownerUserId !== currentOwnerUserId) {
+          throw new Error('Forbidden. Only the current Family Owner can transfer ownership.');
+        }
+
+        if (newOwnerUserId === currentOwnerUserId) {
+          throw new Error('Cannot transfer ownership to yourself.');
+        }
+
+        // 2. Validate target member
+        const newOwnerMembership = await tx.familyMember.findUnique({
+          where: {
+            familyId_userId: {
+              familyId,
+              userId: newOwnerUserId,
+            },
+          },
+        });
+        if (!newOwnerMembership) {
+          throw new Error('Target user is not a member of this family.');
+        }
+
+        // 3. Step-up authentication
+        const currentOwner = await tx.user.findUnique({ where: { id: currentOwnerUserId } });
+        if (!currentOwner) throw new Error('Current owner user not found.');
+
+        if (!password) {
+          throw new Error('Step-up authentication required: password must be provided.');
+        }
+
+        const stepUp = verifyStepUpAuth(currentOwner as any, password, otpCode, timeSec);
+
+        // 4. Atomically consume recovery code or record accepted TOTP timestep
+        const updatedRecoveryCodes = [...(currentOwner.mfaRecoveryCodes || [])];
+        const updatedTotpLastUsed = (currentOwner.totpLastUsedSteps as any)
+          ? { ...(currentOwner.totpLastUsedSteps as any) }
+          : {};
+
+        if (stepUp.method === 'TOTP' && stepUp.totpTimeStep !== undefined) {
+          const lastUsed = updatedTotpLastUsed['family_ownership_transfer'];
+          if (lastUsed !== undefined && lastUsed === stepUp.totpTimeStep) {
+            throw new Error(
+              'This TOTP code has already been used for ownership transfer. Please wait for the next code.'
+            );
+          }
+          updatedTotpLastUsed['family_ownership_transfer'] = stepUp.totpTimeStep;
+        } else if (stepUp.method === 'RECOVERY_CODE' && stepUp.recoveryCodeIndex !== undefined) {
+          updatedRecoveryCodes.splice(stepUp.recoveryCodeIndex, 1);
+        }
+
+        await tx.user.update({
+          where: { id: currentOwnerUserId },
+          data: {
+            mfaRecoveryCodes: updatedRecoveryCodes,
+            totpLastUsedSteps: updatedTotpLastUsed as any,
+          },
+        });
+
+        // 5. Demote previous OWNER to PARENT
+        await tx.familyMember.update({
+          where: {
+            familyId_userId: {
+              familyId,
+              userId: currentOwnerUserId,
+            },
+          },
+          data: { role: 'PARENT' },
+        });
+
+        // 6. Promote target member to OWNER (Postgres partial unique index physically enforces single-owner invariant!)
+        await tx.familyMember.update({
+          where: {
+            familyId_userId: {
+              familyId,
+              userId: newOwnerUserId,
+            },
+          },
+          data: { role: 'OWNER' },
+        });
+
+        // 7. Update Family.ownerUserId
+        await tx.family.update({
+          where: { id: familyId },
+          data: {
+            ownerUserId: newOwnerUserId,
+            updatedAt: new Date(),
+          },
+        });
+
+        // 8. Insert ownership-transfer audit event
+        const newOwner = await tx.user.findUnique({ where: { id: newOwnerUserId } });
+        const auditLogId = `log-${nanoid(10)}`;
+        await tx.familyAuditLog.create({
+          data: {
+            id: auditLogId,
+            familyId,
+            actorUserId: currentOwnerUserId,
+            actorName: currentOwner.name || 'Owner',
+            action: 'OWNERSHIP_TRANSFERRED',
+            details: `Transferred family ownership to ${newOwner?.name || 'Parent'} (${newOwner?.email || ''})`,
+          },
+        });
+
+        // 9. Strict invariant check: exactly one OWNER in PostgreSQL
+        const ownerCount = await tx.familyMember.count({
+          where: {
+            familyId,
+            role: 'OWNER',
+          },
+        });
+        if (ownerCount !== 1) {
+          throw new FatalConsistencyError('FATAL: Ownership invariant violation: multiple or zero owners detected.');
+        }
+
+        // Synchronize in-memory cache if DataStore is tracking this family
+        const memFam = db.families.get(familyId);
+        if (memFam) {
+          memFam.ownerUserId = newOwnerUserId;
+          memFam.updatedAt = new Date().toISOString();
+          db.families.set(familyId, memFam);
+        }
+        const memOld = Array.from(db.familyMembers.values()).find(
+          (m) => m.familyId === familyId && m.userId === currentOwnerUserId
+        );
+        if (memOld) {
+          memOld.role = 'PARENT';
+          db.familyMembers.set(memOld.id, memOld);
+        }
+        const memNew = Array.from(db.familyMembers.values()).find(
+          (m) => m.familyId === familyId && m.userId === newOwnerUserId
+        );
+        if (memNew) {
+          memNew.role = 'OWNER';
+          db.familyMembers.set(memNew.id, memNew);
+        }
+        const memUser = db.users.get(currentOwnerUserId);
+        if (memUser) {
+          memUser.mfaRecoveryCodes = updatedRecoveryCodes;
+          memUser.totpLastUsedSteps = updatedTotpLastUsed;
+          db.users.set(currentOwnerUserId, memUser);
+        }
+        this.appendAuditEntryWithoutSave({
+          id: auditLogId,
+          familyId,
+          actorUserId: currentOwnerUserId,
+          actorName: currentOwner.name || 'Owner',
+          action: 'OWNERSHIP_TRANSFERRED',
+          details: `Transferred family ownership to ${newOwner?.name || 'Parent'} (${newOwner?.email || ''})`,
+          timestamp: new Date().toISOString(),
+        });
+      });
+    }
+
     return db.runWithFamilyLock(familyId, async () => {
       // Create isolated family-scoped snapshot for atomic rollback on any failure
       const snapshot = db.createFamilySnapshot(familyId, [currentOwnerUserId, newOwnerUserId]);

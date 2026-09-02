@@ -23,6 +23,8 @@ import { mailService } from './services/mail.service';
 const app = express();
 const port = process.env.PORT || 1002;
 
+import { verifyDatabaseConnection } from './db/prisma';
+
 // In production, startup must fail securely if required secrets or mail settings are absent or unconfigured
 if (process.env.NODE_ENV === 'production') {
   const missing: string[] = [];
@@ -31,6 +33,12 @@ if (process.env.NODE_ENV === 'production') {
   }
   if (!process.env.MFA_ENCRYPTION_KEY || process.env.MFA_ENCRYPTION_KEY.trim().length < 32) {
     missing.push('MFA_ENCRYPTION_KEY (min 32 characters)');
+  }
+  if (!process.env.DATABASE_URL || !process.env.DATABASE_URL.startsWith('postgres')) {
+    missing.push('DATABASE_URL (valid PostgreSQL connection string)');
+  }
+  if (process.env.STORAGE_MODE === 'json') {
+    missing.push('STORAGE_MODE cannot be "json" in production (PostgreSQL required)');
   }
 
   // Validate production mail configuration (fails with PRODUCTION_MAIL_PROVIDER_NOT_CONFIGURED if unconfigured)
@@ -46,6 +54,12 @@ if (process.env.NODE_ENV === 'production') {
     console.error('Production startup aborted for security.');
     process.exit(1);
   }
+
+  // Verify PostgreSQL connectivity and migration state
+  verifyDatabaseConnection().catch((err) => {
+    console.error(`FATAL PRODUCTION DATABASE ERROR: ${err.message}`);
+    process.exit(1);
+  });
 }
 
 app.use(cors({ origin: '*' }));
