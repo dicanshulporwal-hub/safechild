@@ -64,6 +64,14 @@ packages/agent-android/.idea/
 *.snk
 *.pfx.json
 
+# Archives and releases
+*.zip
+*.tar.gz
+*.tgz
+release/
+quarantine/
+.gemini/
+
 # IDE & OS-generated files
 .vscode/
 .idea/
