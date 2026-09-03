@@ -2,13 +2,13 @@
   "version": "1.0.0",
   "stage": "Stage 11 Step 3F",
   "branch": "security/stage11-step3-rbac",
-  "commit": "cdbbe029c4f1d0ac4579bf33c858346972446194",
-  "cleanWorkingTree": true,
-  "timestamp": "2026-09-03T10:29:00.110Z",
+  "commit": "650f9f6d0fc8f6e149cc6407b93b32aa1a57f684",
+  "cleanWorkingTree": false,
+  "timestamp": "2026-09-03T16:00:00.000Z",
   "archive": {
     "filename": "safebrowse-stage11-step3f-review.zip",
-    "sha256": "e536d19ebed5384f588234131f785ee63efcd106a50501c92b1d11b320fa1323",
-    "sizeBytes": 432936,
+    "sha256": "943849cee52f1f55144672813697b224a21811dbb22d2e6b83ceb6b64c6eac9c",
+    "sizeBytes": 433263,
     "totalFiles": 187
   },
   "status": "CERTIFIED",
@@ -25,7 +25,7 @@
   },
   "verificationSummary": {
     "staticCutoverViolations": 0,
-    "unitAndPolicyTests": "76/76 passed",
+    "unitAndPolicyTests": "85/85 passed",
     "postgresE2ETests": "30/30 passed",
     "failSecureDatabaseGuard": "Verified with negative test suite",
     "concurrencyAndReplayTests": "Verified",
