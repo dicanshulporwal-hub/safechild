@@ -15,52 +15,12 @@ import { adminRouter } from './routes/admin.routes';
 import { feedbackRouter } from './routes/feedback.routes';
 import { supportRouter } from './routes/support.routes';
 import { usageRouter } from './routes/usage.routes';
-import { wsManager } from './services/websocket.service';
 import { authMiddleware } from './middleware/auth';
 import { requireVerifiedEmail } from './middleware/requireVerifiedEmail';
-import { mailService } from './services/mail.service';
+import { bootstrap } from './bootstrap';
 
 const app = express();
 const port = process.env.PORT || 1002;
-
-import { verifyDatabaseConnection } from './db/prisma';
-
-// In production, startup must fail securely if required secrets or mail settings are absent or unconfigured
-if (process.env.NODE_ENV === 'production') {
-  const missing: string[] = [];
-  if (!process.env.JWT_SECRET || process.env.JWT_SECRET.trim().length < 32) {
-    missing.push('JWT_SECRET (min 32 characters)');
-  }
-  if (!process.env.MFA_ENCRYPTION_KEY || process.env.MFA_ENCRYPTION_KEY.trim().length < 32) {
-    missing.push('MFA_ENCRYPTION_KEY (min 32 characters)');
-  }
-  if (!process.env.DATABASE_URL || !process.env.DATABASE_URL.startsWith('postgres')) {
-    missing.push('DATABASE_URL (valid PostgreSQL connection string)');
-  }
-  if (process.env.STORAGE_MODE === 'json') {
-    missing.push('STORAGE_MODE cannot be "json" in production (PostgreSQL required)');
-  }
-
-  // Validate production mail configuration (fails with PRODUCTION_MAIL_PROVIDER_NOT_CONFIGURED if unconfigured)
-  try {
-    mailService.validateConfiguration();
-  } catch (err: any) {
-    missing.push(err.message);
-  }
-
-  if (missing.length > 0) {
-    console.error('FATAL PRODUCTION CONFIGURATION ERROR: The following required environment variables or providers are missing:');
-    missing.forEach((m) => console.error(`  - ${m}`));
-    console.error('Production startup aborted for security.');
-    process.exit(1);
-  }
-
-  // Verify PostgreSQL connectivity and migration state
-  verifyDatabaseConnection().catch((err) => {
-    console.error(`FATAL PRODUCTION DATABASE ERROR: ${err.message}`);
-    process.exit(1);
-  });
-}
 
 app.use(cors({ origin: '*' }));
 app.use(express.json());
@@ -90,14 +50,11 @@ app.get('/health', (req, res) => {
 
 const server = http.createServer(app);
 
-if (process.env.NODE_ENV !== 'test' && typeof require !== 'undefined' && require.main === module) {
-  // Initialize WebSockets
-  wsManager.init(server);
-
-  server.listen(port, () => {
-    console.log(`🚀 SafeBrowse Backend API running on http://localhost:${port}`);
-    console.log(`📡 SafeBrowse Real-time WebSocket running on ws://localhost:${port}/ws`);
+if (typeof require !== 'undefined' && require.main === module) {
+  bootstrap(app, server, { port }).catch((err) => {
+    console.error(`FATAL BOOTSTRAP FAILURE: ${err.message}`);
+    process.exit(1);
   });
 }
 
-export { app, server };
+export { app, server, bootstrap };

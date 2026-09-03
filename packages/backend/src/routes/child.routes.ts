@@ -4,7 +4,7 @@ import { authMiddleware, AuthenticatedRequest } from '../middleware/auth';
 import { requireVerifiedEmail } from '../middleware/requireVerifiedEmail';
 import { rbacService, FamilyPermission } from '../services/rbac.service';
 import { familyService } from '../services/family.service';
-import { db } from '../db/store';
+import { prisma } from '../db/prisma';
 
 export const childRouter = Router();
 
@@ -12,46 +12,48 @@ export const childRouter = Router();
 childRouter.use(authMiddleware, requireVerifiedEmail);
 
 // List children for logged-in parent's family (or specific familyId)
-childRouter.get('/', (req: AuthenticatedRequest, res: Response) => {
+childRouter.get('/', async (req: AuthenticatedRequest, res: Response) => {
   const familyId = req.query.familyId as string | undefined;
   if (familyId) {
-    if (!rbacService.getFamilyMembership(req.userId!, familyId)) {
+    if (!(await rbacService.getFamilyMembership(req.userId!, familyId))) {
       return res.status(403).json({ error: 'Forbidden: You do not belong to this family.' });
     }
-    if (!rbacService.hasFamilyPermission(req.userId!, familyId, FamilyPermission.CHILD_READ)) {
+    if (!(await rbacService.hasFamilyPermission(req.userId!, familyId, FamilyPermission.CHILD_READ))) {
       return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to view children.' });
     }
-    const children = childService.getChildrenForParent(req.userId!, familyId);
+    const children = await childService.getChildrenForParent(req.userId!, familyId);
     return res.json(children);
   }
 
-  const family = familyService.getOrCreateUserFamily(req.userId!);
-  if (!rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.CHILD_READ)) {
+  const family = await familyService.getOrCreateUserFamily(req.userId!);
+  if (!(await rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.CHILD_READ))) {
     return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to view children.' });
   }
 
-  const children = childService.getChildrenForParent(req.userId!);
+  const children = await childService.getChildrenForParent(req.userId!);
   res.json(children);
 });
 
 // Create child profile
-childRouter.post('/', (req: AuthenticatedRequest, res: Response) => {
+childRouter.post('/', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { name, age, avatar, familyId } = req.body;
     if (!familyId || typeof familyId !== 'string' || !familyId.trim()) {
       return res.status(400).json({ error: 'Mandatory tenancy error: Valid familyId is required to create a child profile.' });
     }
 
-    const targetFamily = db.families.get(familyId.trim());
+    const targetFamily = await prisma.family.findUnique({
+      where: { id: familyId.trim() },
+    });
     if (!targetFamily) {
       return res.status(400).json({ error: 'Mandatory tenancy error: Referenced family does not exist.' });
     }
 
-    if (!rbacService.getFamilyMembership(req.userId!, targetFamily.id)) {
+    if (!(await rbacService.getFamilyMembership(req.userId!, targetFamily.id))) {
       return res.status(403).json({ error: 'Forbidden: You do not belong to this family.' });
     }
 
-    if (!rbacService.hasFamilyPermission(req.userId!, targetFamily.id, FamilyPermission.CHILD_MANAGE)) {
+    if (!(await rbacService.hasFamilyPermission(req.userId!, targetFamily.id, FamilyPermission.CHILD_MANAGE))) {
       return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to create child profiles.' });
     }
 
@@ -59,7 +61,7 @@ childRouter.post('/', (req: AuthenticatedRequest, res: Response) => {
       return res.status(400).json({ error: 'Child name is required.' });
     }
 
-    const result = childService.createChild(req.userId!, name, age, avatar, targetFamily.id);
+    const result = await childService.createChild(req.userId!, name, age, avatar, targetFamily.id);
     res.json(result);
   } catch (e: any) {
     const status = e.message.includes('Forbidden') ? 403 : 400;
@@ -68,18 +70,18 @@ childRouter.post('/', (req: AuthenticatedRequest, res: Response) => {
 });
 
 // Get single child
-childRouter.get('/:id', (req: AuthenticatedRequest, res: Response) => {
-  const child = childService.getChild(req.params.id);
+childRouter.get('/:id', async (req: AuthenticatedRequest, res: Response) => {
+  const child = await childService.getChild(req.params.id);
   if (!child) {
     return res.status(404).json({ error: 'Child not found.' });
   }
 
-  const family = rbacService.getFamilyForChild(child.id);
-  if (!family || !rbacService.getFamilyMembership(req.userId!, family.id)) {
+  const family = await rbacService.getFamilyForChild(child.id);
+  if (!family || !(await rbacService.getFamilyMembership(req.userId!, family.id))) {
     return res.status(403).json({ error: 'Forbidden: You do not belong to this family.' });
   }
 
-  if (!rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.CHILD_READ)) {
+  if (!(await rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.CHILD_READ))) {
     return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to view this child profile.' });
   }
 
@@ -87,21 +89,21 @@ childRouter.get('/:id', (req: AuthenticatedRequest, res: Response) => {
 });
 
 // Delete child
-childRouter.delete('/:id', (req: AuthenticatedRequest, res: Response) => {
-  const child = childService.getChild(req.params.id);
+childRouter.delete('/:id', async (req: AuthenticatedRequest, res: Response) => {
+  const child = await childService.getChild(req.params.id);
   if (!child) {
     return res.status(404).json({ error: 'Child not found.' });
   }
 
-  const family = rbacService.getFamilyForChild(child.id);
-  if (!family || !rbacService.getFamilyMembership(req.userId!, family.id)) {
+  const family = await rbacService.getFamilyForChild(child.id);
+  if (!family || !(await rbacService.getFamilyMembership(req.userId!, family.id))) {
     return res.status(403).json({ error: 'Forbidden: You do not belong to this family.' });
   }
 
-  if (!rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.CHILD_MANAGE)) {
+  if (!(await rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.CHILD_MANAGE))) {
     return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to delete child profiles.' });
   }
 
-  childService.deleteChild(req.params.id);
+  await childService.deleteChild(req.params.id);
   res.json({ success: true });
 });

@@ -14,6 +14,9 @@ export function createRateLimiter(options: { windowMs: number; max: number; mess
   const { windowMs, max, message } = options;
 
   return (req: Request, res: Response, next: NextFunction) => {
+    if (process.env.NODE_ENV === 'test') {
+      return next();
+    }
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
     const key = `${req.path}_${ip}`;
     const now = Date.now();

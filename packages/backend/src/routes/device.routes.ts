@@ -6,49 +6,69 @@ import { childService } from '../services/child.service';
 import { pairingRateLimiter } from '../middleware/rate-limiter';
 import { deviceAuthMiddleware, AuthenticatedDeviceRequest } from '../middleware/deviceAuth';
 import { rbacService, FamilyPermission } from '../services/rbac.service';
-import { familyService } from '../services/family.service';
 
 export const deviceRouter = Router();
 
 // Generate pairing code for a child (Parent auth required + Email Verified + Rate Limiting + Family Permission)
-deviceRouter.post('/pairing-code', authMiddleware, requireVerifiedEmail, pairingRateLimiter, (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const { childId } = req.body;
-    if (!childId) {
-      return res.status(400).json({ error: 'childId is required.' });
-    }
+deviceRouter.post(
+  '/pairing-code',
+  authMiddleware,
+  requireVerifiedEmail,
+  pairingRateLimiter,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { childId } = req.body;
+      if (!childId) {
+        return res.status(400).json({ error: 'childId is required.' });
+      }
 
-    const child = childService.getChild(childId);
-    if (!child) {
-      return res.status(404).json({ error: 'Child profile not found.' });
-    }
+      const child = await childService.getChild(childId);
+      if (!child) {
+        return res.status(404).json({ error: 'Child profile not found.' });
+      }
 
-    const family = rbacService.getFamilyForChild(child.id);
-    if (!family || !rbacService.getFamilyMembership(req.userId!, family.id)) {
-      return res.status(403).json({ error: 'Forbidden: You do not belong to this family.' });
-    }
+      const family = await rbacService.getFamilyForChild(child.id);
+      if (!family || !(await rbacService.getFamilyMembership(req.userId!, family.id))) {
+        return res.status(403).json({ error: 'Forbidden: You do not belong to this family.' });
+      }
 
-    if (!rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.DEVICE_MANAGE)) {
-      return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to pair new devices.' });
-    }
+      if (!(await rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.DEVICE_MANAGE))) {
+        return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to pair new devices.' });
+      }
 
-    const pairing = deviceService.generatePairingCode(req.userId!, childId);
-    res.json(pairing);
-  } catch (e: any) {
-    const status = e.message.includes('Forbidden') ? 403 : 400;
-    res.status(status).json({ error: e.message });
+      const pairing = await deviceService.generatePairingCode(req.userId!, childId);
+      res.json(pairing);
+    } catch (e: any) {
+      const status = e.message.includes('Forbidden') ? 403 : 400;
+      res.status(status).json({ error: e.message });
+    }
   }
-});
+);
 
 // Claim pairing code (Rate limited)
-deviceRouter.post('/claim', pairingRateLimiter, (req, res) => {
+deviceRouter.post('/claim', pairingRateLimiter, async (req, res) => {
   try {
     const { code, deviceName, platform, agentVersion } = req.body;
     if (!code || !platform) {
       return res.status(400).json({ error: 'code and platform are required.' });
     }
 
-    const result = deviceService.pairDevice(code, deviceName, platform, agentVersion);
+    const result = await deviceService.pairDevice(code, deviceName, platform, agentVersion);
+    res.json(result);
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Backward compatible pair alias
+deviceRouter.post('/pair', pairingRateLimiter, async (req, res) => {
+  try {
+    const { code, deviceName, platform, agentVersion } = req.body;
+    if (!code || !platform) {
+      return res.status(400).json({ error: 'code and platform are required.' });
+    }
+
+    const result = await deviceService.pairDevice(code, deviceName, platform, agentVersion);
     res.json(result);
   } catch (e: any) {
     res.status(400).json({ error: e.message });
@@ -56,11 +76,11 @@ deviceRouter.post('/claim', pairingRateLimiter, (req, res) => {
 });
 
 // Periodic heartbeat from child agent (Device authentication required)
-deviceRouter.post('/heartbeat', deviceAuthMiddleware, (req: AuthenticatedDeviceRequest, res) => {
+deviceRouter.post('/heartbeat', deviceAuthMiddleware, async (req: AuthenticatedDeviceRequest, res) => {
   try {
     const { activePolicyVersion, enforcementActive, platform, agentVersion } = req.body;
 
-    const response = deviceService.processHeartbeat({
+    const response = await deviceService.processHeartbeat({
       deviceId: req.deviceId!,
       deviceToken: req.device!.deviceToken,
       activePolicyVersion: activePolicyVersion || 1,
@@ -76,9 +96,9 @@ deviceRouter.post('/heartbeat', deviceAuthMiddleware, (req: AuthenticatedDeviceR
 });
 
 // Revoke lost/compromised device credentials
-deviceRouter.post('/:id/revoke', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res: Response) => {
+deviceRouter.post('/:id/revoke', authMiddleware, requireVerifiedEmail, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    deviceService.revokeDevice(req.params.id, req.userId!);
+    await deviceService.revokeDevice(req.params.id, req.userId!);
     res.json({ success: true, message: 'Device credentials permanently revoked.' });
   } catch (e: any) {
     if (e.message.startsWith('Forbidden') || e.message.includes('Forbidden')) {
@@ -89,13 +109,13 @@ deviceRouter.post('/:id/revoke', authMiddleware, requireVerifiedEmail, (req: Aut
 });
 
 // Rotate device token
-deviceRouter.post('/:id/rotate-token', (req, res) => {
+deviceRouter.post('/:id/rotate-token', async (req, res) => {
   try {
     const { currentToken } = req.body;
     if (!currentToken) {
       return res.status(400).json({ error: 'currentToken is required.' });
     }
-    const result = deviceService.rotateDeviceToken(req.params.id, currentToken);
+    const result = await deviceService.rotateDeviceToken(req.params.id, currentToken);
     res.json(result);
   } catch (e: any) {
     res.status(401).json({ error: e.message });
@@ -103,60 +123,66 @@ deviceRouter.post('/:id/rotate-token', (req, res) => {
 });
 
 // Get all devices for parent's family
-deviceRouter.get('/', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res: Response) => {
+deviceRouter.get('/', authMiddleware, requireVerifiedEmail, async (req: AuthenticatedRequest, res: Response) => {
   const reqFamilyId = req.query.familyId as string | undefined;
   if (reqFamilyId) {
-    if (!rbacService.hasFamilyPermission(req.userId!, reqFamilyId, FamilyPermission.DEVICE_READ)) {
+    if (!(await rbacService.hasFamilyPermission(req.userId!, reqFamilyId, FamilyPermission.DEVICE_READ))) {
       return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to view devices.' });
     }
-    const devices = deviceService.getDevicesForParent(req.userId!, reqFamilyId);
+    const devices = await deviceService.getDevicesForParent(req.userId!, reqFamilyId);
     return res.json(devices);
   }
 
-  const userFamilies = rbacService.getUserFamilyMemberships(req.userId!)
-    .filter((m) => rbacService.hasFamilyPermission(req.userId!, m.familyId, FamilyPermission.DEVICE_READ));
+  const userMemberships = await rbacService.getUserFamilyMemberships(req.userId!);
+  const userFamilies: typeof userMemberships = [];
+  for (const m of userMemberships) {
+    if (await rbacService.hasFamilyPermission(req.userId!, m.familyId, FamilyPermission.DEVICE_READ)) {
+      userFamilies.push(m);
+    }
+  }
+
   if (userFamilies.length === 0) {
     return res.json([]);
   }
 
-  const devices = deviceService.getDevicesForParent(req.userId!);
+  const devices = await deviceService.getDevicesForParent(req.userId!);
   res.json(devices);
 });
 
 // Get devices for a specific child
-deviceRouter.get('/child/:childId', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res: Response) => {
-  const child = childService.getChild(req.params.childId);
+deviceRouter.get('/child/:childId', authMiddleware, requireVerifiedEmail, async (req: AuthenticatedRequest, res: Response) => {
+  const child = await childService.getChild(req.params.childId);
   if (!child) {
     return res.status(404).json({ error: 'Child not found.' });
   }
 
-  const family = rbacService.getFamilyForChild(child.id);
-  if (!family || !rbacService.getFamilyMembership(req.userId!, family.id)) {
+  const family = await rbacService.getFamilyForChild(child.id);
+  if (!family || !(await rbacService.getFamilyMembership(req.userId!, family.id))) {
     return res.status(403).json({ error: 'Forbidden: You do not belong to this family.' });
   }
 
-  if (!rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.DEVICE_READ)) {
+  if (!(await rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.DEVICE_READ))) {
     return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to view devices.' });
   }
 
-  const devices = deviceService.getDevicesForChild(req.params.childId);
+  const devices = await deviceService.getDevicesForChild(req.params.childId);
   res.json(devices);
 });
 
 // Self-Diagnostics ("Run Protection Check") - Parent diagnostic verification
-deviceRouter.post('/:id/diagnostics', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res: Response) => {
+deviceRouter.post('/:id/diagnostics', authMiddleware, requireVerifiedEmail, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const device = deviceService.getDevice(req.params.id);
+    const device = await deviceService.getDevice(req.params.id);
     if (!device) {
       return res.status(404).json({ error: 'Device not found.' });
     }
 
-    const family = rbacService.getFamilyForDevice(device.id);
-    if (!family || !rbacService.getFamilyMembership(req.userId!, family.id)) {
+    const family = await rbacService.getFamilyForDevice(device.id);
+    if (!family || !(await rbacService.getFamilyMembership(req.userId!, family.id))) {
       return res.status(403).json({ error: 'Forbidden: You do not belong to this family.' });
     }
 
-    if (!rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.DEVICE_READ)) {
+    if (!(await rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.DEVICE_READ))) {
       return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to run diagnostics.' });
     }
 
@@ -203,9 +229,9 @@ deviceRouter.post('/:id/diagnostics', authMiddleware, requireVerifiedEmail, (req
 });
 
 // Remove / unpair device
-deviceRouter.delete('/:id', authMiddleware, requireVerifiedEmail, (req: AuthenticatedRequest, res: Response) => {
+deviceRouter.delete('/:id', authMiddleware, requireVerifiedEmail, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    deviceService.removeDevice(req.params.id, req.userId!);
+    await deviceService.removeDevice(req.params.id, req.userId!);
     res.json({ success: true });
   } catch (e: any) {
     if (e.message.startsWith('Forbidden') || e.message.includes('Forbidden')) {

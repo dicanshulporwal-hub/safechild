@@ -1,4 +1,4 @@
-import { db } from '../db/store';
+import { prisma } from '../db/prisma';
 import { wsManager } from './websocket.service';
 
 export interface DeviceConsoleItem {
@@ -21,38 +21,40 @@ export interface DeviceConsoleItem {
 }
 
 export class SupportConsoleService {
-  private rolloutRings = {
-    ring0: ['dev-internal-1'],
-    ring1: [] as string[], // 1 family
-    ring2: [] as string[], // 3 families
-    ring3: [] as string[], // All beta families
-  };
-
-  private currentTargetVersion: string = '1.0.0';
   private rollbackTargetVersion: string = '0.9.9';
 
-  public getFleetOverview(): DeviceConsoleItem[] {
+  public async getFleetOverview(): Promise<DeviceConsoleItem[]> {
+    const devices = await prisma.device.findMany({
+      include: {
+        parent: true,
+        child: {
+          include: {
+            policy: true,
+          },
+        },
+      },
+    });
+
     const items: DeviceConsoleItem[] = [];
     const now = Date.now();
 
-    for (const device of db.devices.values()) {
-      const devAny = device as any;
-      const parent = db.users.get(device.parentId);
-      const child = db.children.get(device.childId);
-      const policy = db.policies.get(device.childId);
+    for (const device of devices) {
+      const parent = device.parent;
+      const child = device.child;
+      const policy = device.child?.policy;
 
-      const elapsedSec = (now - new Date(device.lastHeartbeatAt || 0).getTime()) / 1000;
-      let computedHealth = devAny.healthState || 'PROTECTED';
-      if (devAny.isRevoked || device.healthStatus === 'inactive') {
+      const elapsedSec = (now - device.lastHeartbeatAt.getTime()) / 1000;
+      let computedHealth = (device.healthState as string) || 'PROTECTED';
+      if (device.isRevoked || device.healthStatus === 'inactive') {
         computedHealth = 'INACTIVE';
       } else if (elapsedSec > 90) {
         computedHealth = 'OFFLINE';
-      } else if (policy && device.activePolicyVersion < policy.version) {
+      } else if (policy && 1 < policy.version) {
         computedHealth = 'WARNING';
       }
 
       items.push({
-        familyId: device.parentId,
+        familyId: device.familyId,
         parentEmail: parent?.email || 'unknown',
         childId: device.childId,
         childName: child?.name || 'Child',
@@ -60,13 +62,13 @@ export class SupportConsoleService {
         deviceName: device.name,
         platform: device.platform,
         agentVersion: device.agentVersion || '1.0.0',
-        activePolicyVersion: device.activePolicyVersion || 1,
+        activePolicyVersion: policy?.version || 1,
         latestPolicyVersion: policy?.version || 1,
         healthState: computedHealth,
         healthStatus: device.healthStatus || 'protected',
-        lastHeartbeatAt: device.lastHeartbeatAt,
+        lastHeartbeatAt: device.lastHeartbeatAt.toISOString(),
         enforcementStatus: computedHealth === 'PROTECTED' ? 'ACTIVE_ENFORCING' : 'SUSPENDED_OR_INACTIVE',
-        lastSyncAt: device.lastSyncAt,
+        lastSyncAt: device.updatedAt.toISOString(),
         recentErrors: computedHealth === 'INACTIVE' ? ['VPN disconnected / process stopped'] : [],
       });
     }
@@ -75,7 +77,6 @@ export class SupportConsoleService {
   }
 
   public triggerRemoteRollback(targetVersion: string, affectedDevices?: string[]) {
-    console.log(`[Support Console] 🚨 Triggering safe remote agent rollback to v${targetVersion}...`);
     this.rollbackTargetVersion = targetVersion;
 
     wsManager.broadcast({

@@ -1,4 +1,4 @@
-import { db } from '../db/store';
+import { prisma } from '../db/prisma';
 import {
   Policy,
   PolicyRule,
@@ -11,49 +11,69 @@ import { nanoid } from 'nanoid';
 import { wsManager } from './websocket.service';
 
 export class PolicyService {
-  public getPolicyForChild(childId: string): Policy {
-    let policy = db.policies.get(childId);
+  public async getPolicyForChild(childId: string): Promise<Policy> {
+    let policy = await prisma.policy.findUnique({
+      where: { childId },
+    });
+
     if (!policy) {
-      const child = db.children.get(childId);
+      const child = await prisma.child.findUnique({
+        where: { id: childId },
+      });
       if (!child || !child.familyId) {
         throw new Error('Mandatory tenancy error: Child not found or has no valid familyId.');
       }
-      policy = {
-        id: `policy-${nanoid(8)}`,
-        childId,
-        familyId: child.familyId,
-        version: 1,
-        isPaused: false,
-        rules: [],
-        updatedAt: new Date().toISOString(),
-      };
-      db.policies.set(childId, policy);
-      db.save();
+
+      policy = await prisma.policy.create({
+        data: {
+          id: `policy-${nanoid(8)}`,
+          childId,
+          familyId: child.familyId,
+          version: 1,
+          isPaused: false,
+          rules: [],
+        },
+      });
     }
-    return policy;
+
+    return {
+      id: policy.id,
+      childId: policy.childId,
+      familyId: policy.familyId,
+      version: policy.version,
+      isPaused: policy.isPaused,
+      rules: (policy.rules as any) || [],
+      updatedAt: policy.updatedAt.toISOString(),
+    };
   }
 
-  public getPolicyForDevice(deviceId: string): { policy: Policy; child: any } {
-    const device = db.devices.get(deviceId);
+  public async getPolicyForDevice(deviceId: string): Promise<{ policy: Policy; child: any }> {
+    const device = await prisma.device.findUnique({
+      where: { id: deviceId },
+    });
     if (!device) {
       throw new Error('Device not found.');
     }
-    const policy = this.getPolicyForChild(device.childId);
-    const child = db.children.get(device.childId);
+
+    const policy = await this.getPolicyForChild(device.childId);
+    const child = await prisma.child.findUnique({
+      where: { id: device.childId },
+    });
+
     return { policy, child };
   }
 
   /**
    * Adds or updates a rule for a child policy
    */
-  public addRule(
+  public async addRule(
     childId: string,
     domain: string,
     action: RuleAction,
     reason?: string,
     duration?: TemporaryApprovalDuration
-  ): Policy {
-    const policy = this.getPolicyForChild(childId);
+  ): Promise<Policy> {
+    const policy = await this.getPolicyForChild(childId);
     const normDomain = normalizeDomain(domain);
 
     if (!normDomain) {
@@ -68,7 +88,6 @@ export class PolicyService {
     let updatedRules: PolicyRule[];
 
     if (action === 'TEMPORARY_ALLOW') {
-      // Remove any existing temporary rule for this domain, but PRESERVE base permanent rules (e.g. BLOCK)
       const nonTempRules = policy.rules.filter(
         (r: PolicyRule) => !(r.domain === normDomain && r.action === 'TEMPORARY_ALLOW')
       );
@@ -82,7 +101,6 @@ export class PolicyService {
       };
       updatedRules = [newTempRule, ...nonTempRules];
     } else {
-      // Permanent rule: replace all existing rules for this domain
       const filteredRules = policy.rules.filter((r: PolicyRule) => r.domain !== normDomain);
       const newPermanentRule: PolicyRule = {
         id: `r-${nanoid(6)}`,
@@ -94,78 +112,102 @@ export class PolicyService {
       updatedRules = [newPermanentRule, ...filteredRules];
     }
 
-    policy.rules = updatedRules;
-    policy.version += 1;
-    policy.updatedAt = new Date().toISOString();
+    const updated = await prisma.policy.update({
+      where: { childId },
+      data: {
+        rules: updatedRules as any,
+        version: { increment: 1 },
+      },
+    });
 
-    db.policies.set(childId, policy);
-    db.save();
+    const resultPolicy: Policy = {
+      id: updated.id,
+      childId: updated.childId,
+      familyId: updated.familyId,
+      version: updated.version,
+      isPaused: updated.isPaused,
+      rules: (updated.rules as any) || [],
+      updatedAt: updated.updatedAt.toISOString(),
+    };
 
-    // Broadcast policy update to connected child devices and parent dashboard
     wsManager.broadcast({
       type: 'POLICY_UPDATED',
-      payload: policy,
+      payload: resultPolicy,
       childId,
     });
 
-    return policy;
+    return resultPolicy;
   }
 
   /**
    * Remove a rule by ruleId
    */
-  public removeRule(childId: string, ruleId: string): Policy {
-    const policy = this.getPolicyForChild(childId);
-    policy.rules = policy.rules.filter((r: PolicyRule) => r.id !== ruleId);
-    policy.version += 1;
-    policy.updatedAt = new Date().toISOString();
+  public async removeRule(childId: string, ruleId: string): Promise<Policy> {
+    const policy = await this.getPolicyForChild(childId);
+    const updatedRules = policy.rules.filter((r: PolicyRule) => r.id !== ruleId);
 
-    db.policies.set(childId, policy);
-    db.save();
+    const updated = await prisma.policy.update({
+      where: { childId },
+      data: {
+        rules: updatedRules as any,
+        version: { increment: 1 },
+      },
+    });
+
+    const resultPolicy: Policy = {
+      id: updated.id,
+      childId: updated.childId,
+      familyId: updated.familyId,
+      version: updated.version,
+      isPaused: updated.isPaused,
+      rules: (updated.rules as any) || [],
+      updatedAt: updated.updatedAt.toISOString(),
+    };
 
     wsManager.broadcast({
       type: 'POLICY_UPDATED',
-      payload: policy,
+      payload: resultPolicy,
       childId,
     });
 
-    return policy;
+    return resultPolicy;
   }
 
   /**
    * Pause or unpause internet access for a child
    */
-  public setInternetPause(
+  public async setInternetPause(
     childId: string,
     isPaused: boolean,
     duration?: '15m' | '30m' | '1h' | 'indefinite'
-  ): Policy {
-    const policy = this.getPolicyForChild(childId);
-    policy.isPaused = isPaused;
+  ): Promise<Policy> {
+    await this.getPolicyForChild(childId);
 
-    if (isPaused && duration && duration !== 'indefinite') {
-      const now = new Date();
-      if (duration === '15m') now.setMinutes(now.getMinutes() + 15);
-      if (duration === '30m') now.setMinutes(now.getMinutes() + 30);
-      if (duration === '1h') now.setHours(now.getHours() + 1);
-      policy.pauseExpiresAt = now.toISOString();
-    } else {
-      policy.pauseExpiresAt = null;
-    }
+    const updated = await prisma.policy.update({
+      where: { childId },
+      data: {
+        isPaused,
+        version: { increment: 1 },
+      },
+    });
 
-    policy.version += 1;
-    policy.updatedAt = new Date().toISOString();
-
-    db.policies.set(childId, policy);
-    db.save();
+    const resultPolicy: Policy = {
+      id: updated.id,
+      childId: updated.childId,
+      familyId: updated.familyId,
+      version: updated.version,
+      isPaused: updated.isPaused,
+      rules: (updated.rules as any) || [],
+      updatedAt: updated.updatedAt.toISOString(),
+    };
 
     wsManager.broadcast({
       type: 'POLICY_UPDATED',
-      payload: policy,
+      payload: resultPolicy,
       childId,
     });
 
-    return policy;
+    return resultPolicy;
   }
 }
 

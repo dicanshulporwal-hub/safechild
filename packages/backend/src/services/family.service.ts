@@ -1,5 +1,13 @@
-import { db, Family, FamilyMember, FamilyInvitation, FamilyRole, FamilyAuditLog, FatalConsistencyError } from '../db/store';
 import { prisma } from '../db/prisma';
+import {
+  Family,
+  FamilyMember,
+  FamilyInvitation,
+  FamilyRole,
+  FamilyApprovalRule,
+  FamilyAuditLog,
+  FatalConsistencyError,
+} from '../types/models';
 import { nanoid } from 'nanoid';
 import crypto from 'crypto';
 import { hashToken, verifyStepUpAuth } from '../utils/security';
@@ -30,89 +38,156 @@ export class FamilyService {
   /**
    * Get the primary family for a user (or auto-create if missing)
    */
-  public getOrCreateUserFamily(userId: string): Family {
-    // Look up membership
-    const membership = Array.from(db.familyMembers.values()).find((m) => m.userId === userId);
-    if (membership) {
-      const fam = db.families.get(membership.familyId);
-      if (fam) return fam;
+  public async getOrCreateUserFamily(userId: string): Promise<Family> {
+    const membership = await prisma.familyMember.findFirst({
+      where: { userId },
+      include: { family: true },
+    });
+
+    if (membership && membership.family) {
+      return {
+        id: membership.family.id,
+        name: membership.family.name,
+        ownerUserId: membership.family.ownerUserId,
+        requireMfa: membership.family.requireMfa,
+        approvalRule: membership.family.approvalRule as FamilyApprovalRule,
+        createdAt: membership.family.createdAt.toISOString(),
+        updatedAt: membership.family.updatedAt.toISOString(),
+      };
     }
 
-    const user = db.users.get(userId);
+    const user = await prisma.user.findUnique({ where: { id: userId } });
     const familyName = user ? `${user.name.split(' ')[0]}’s Family` : 'My Family';
-
     const familyId = `fam-${nanoid(10)}`;
-    const now = new Date().toISOString();
 
-    const newFamily: Family = {
-      id: familyId,
-      name: familyName,
-      ownerUserId: userId,
-      requireMfa: false,
-      approvalRule: 'OWNER_OR_PARENT',
-      createdAt: now,
-      updatedAt: now,
-    };
+    return prisma.$transaction(async (tx) => {
+      const createdFamily = await tx.family.create({
+        data: {
+          id: familyId,
+          name: familyName,
+          ownerUserId: userId,
+          requireMfa: false,
+          approvalRule: 'OWNER_OR_PARENT',
+        },
+      });
 
-    db.families.set(familyId, newFamily);
+      await tx.familyMember.create({
+        data: {
+          id: `fm-${nanoid(10)}`,
+          familyId,
+          userId,
+          role: 'OWNER',
+        },
+      });
 
-    const member: FamilyMember = {
-      id: `fm-${nanoid(10)}`,
-      familyId,
-      userId,
-      role: 'OWNER',
-      joinedAt: now,
-    };
+      await tx.familyAuditLog.create({
+        data: {
+          id: `log-${nanoid(10)}`,
+          familyId,
+          actorUserId: userId,
+          actorName: user?.name || 'Owner',
+          action: 'FAMILY_CREATED',
+          details: `Created family '${createdFamily.name}'`,
+        },
+      });
 
-    db.familyMembers.set(member.id, member);
-    db.save();
-
-    this.logAudit(familyId, userId, user?.name || 'Owner', 'FAMILY_CREATED', `Created family '${newFamily.name}'`);
-    return newFamily;
+      return {
+        id: createdFamily.id,
+        name: createdFamily.name,
+        ownerUserId: createdFamily.ownerUserId,
+        requireMfa: createdFamily.requireMfa,
+        approvalRule: createdFamily.approvalRule as FamilyApprovalRule,
+        createdAt: createdFamily.createdAt.toISOString(),
+        updatedAt: createdFamily.updatedAt.toISOString(),
+      };
+    });
   }
 
   /**
    * Get complete family overview for current user
    */
-  public getFamilyOverview(userId: string): FamilyOverview {
-    const family = this.getOrCreateUserFamily(userId);
-    const membersList: FamilyOverview['members'] = [];
+  public async getFamilyOverview(userId: string, targetFamilyId?: string): Promise<FamilyOverview> {
+    let family: Family;
+    if (targetFamilyId) {
+      const fam = await prisma.family.findUnique({ where: { id: targetFamilyId } });
+      if (!fam) throw new Error('Family not found.');
+      family = {
+        id: fam.id,
+        name: fam.name,
+        ownerUserId: fam.ownerUserId,
+        requireMfa: fam.requireMfa,
+        approvalRule: fam.approvalRule as FamilyApprovalRule,
+        createdAt: fam.createdAt.toISOString(),
+        updatedAt: fam.updatedAt.toISOString(),
+      };
+    } else {
+      const membership =
+        (await prisma.familyMember.findFirst({
+          where: { userId, role: 'OWNER' },
+          include: { family: true },
+          orderBy: { joinedAt: 'desc' },
+        })) ||
+        (await prisma.familyMember.findFirst({
+          where: { userId },
+          include: { family: true },
+          orderBy: { joinedAt: 'desc' },
+        }));
 
-    for (const fm of db.familyMembers.values()) {
-      if (fm.familyId === family.id) {
-        const u = db.users.get(fm.userId);
-        if (u) {
-          membersList.push({
-            memberId: fm.id,
-            userId: u.id,
-            name: u.name,
-            email: u.email,
-            role: fm.role,
-            mfaEnabled: Boolean(u.mfaEnabled),
-            joinedAt: fm.joinedAt,
-            isOwner: family.ownerUserId === u.id,
-          });
-        }
+      if (membership && membership.family) {
+        family = {
+          id: membership.family.id,
+          name: membership.family.name,
+          ownerUserId: membership.family.ownerUserId,
+          requireMfa: membership.family.requireMfa,
+          approvalRule: membership.family.approvalRule as FamilyApprovalRule,
+          createdAt: membership.family.createdAt.toISOString(),
+          updatedAt: membership.family.updatedAt.toISOString(),
+        };
+      } else {
+        family = await this.getOrCreateUserFamily(userId);
       }
     }
 
-    const rawInvitations = Array.from(db.familyInvitations.values()).filter(
-      (inv) => inv.familyId === family.id && inv.status === 'PENDING'
-    );
+    const membersWithUsers = await prisma.familyMember.findMany({
+      where: { familyId: family.id },
+      include: { user: true },
+    });
 
-    // Sanitize invitations list to never expose tokenHash
-    const invitations = rawInvitations.map(({ tokenHash, ...rest }) => rest);
+    const membersList = membersWithUsers.map((fm) => ({
+      memberId: fm.id,
+      userId: fm.user.id,
+      name: fm.user.name,
+      email: fm.user.email,
+      role: fm.role as FamilyRole,
+      mfaEnabled: Boolean(fm.user.mfaEnabled),
+      joinedAt: fm.joinedAt.toISOString(),
+      isOwner: family.ownerUserId === fm.user.id,
+    }));
+
+    const rawInvitations = await prisma.familyInvitation.findMany({
+      where: { familyId: family.id, status: 'PENDING' },
+    });
+
+    const invitations = rawInvitations.map(({ tokenHash, ...rest }) => ({
+      ...rest,
+      role: rest.role as FamilyRole,
+      status: rest.status as any,
+      createdAt: rest.createdAt.toISOString(),
+      expiresAt: rest.expiresAt.toISOString(),
+      acceptedAt: rest.acceptedAt ? rest.acceptedAt.toISOString() : undefined,
+      revokedAt: rest.revokedAt ? rest.revokedAt.toISOString() : undefined,
+    }));
 
     const myMembership = membersList.find((m) => m.userId === userId);
     const myRole = myMembership ? myMembership.role : 'OWNER';
 
-    // A family has access to all children created by any member of the family or associated with owner
-    const memberUserIds = membersList.map((m) => m.userId);
-    const children = Array.from(db.children.values()).filter((c) =>
-      memberUserIds.includes(c.parentId) || c.parentId === family.ownerUserId
-    );
-    const childIds = children.map((c) => c.id);
-    const devices = Array.from(db.devices.values()).filter((d) => childIds.includes(d.childId));
+    const childrenCount = await prisma.child.count({
+      where: { familyId: family.id },
+    });
+
+    const devicesCount = await prisma.device.count({
+      where: { familyId: family.id },
+    });
 
     return {
       family,
@@ -120,8 +195,8 @@ export class FamilyService {
       members: membersList,
       invitations,
       stats: {
-        childrenCount: children.length,
-        devicesCount: devices.length,
+        childrenCount,
+        devicesCount,
         parentsCount: membersList.length,
       },
     };
@@ -130,324 +205,376 @@ export class FamilyService {
   /**
    * Update family settings (Name, MFA Requirement, Approval Rule)
    */
-  public updateFamily(
+  public async updateFamily(
     familyId: string,
     actorUserId: string,
     updates: { name?: string; requireMfa?: boolean; approvalRule?: 'OWNER_ONLY' | 'OWNER_OR_PARENT' }
-  ): Family {
-    const family = db.families.get(familyId);
-    if (!family) throw new Error('Family not found.');
-
-    const membership = rbacService.getFamilyMembership(actorUserId, familyId);
+  ): Promise<Family> {
+    const membership = await rbacService.getFamilyMembership(actorUserId, familyId);
     if (!membership) {
       throw new Error('Forbidden. You do not belong to this family.');
     }
 
-    if (!rbacService.hasFamilyPermission(actorUserId, familyId, FamilyPermission.FAMILY_SETTINGS_MANAGE)) {
+    const hasPerm = await rbacService.hasFamilyPermission(
+      actorUserId,
+      familyId,
+      FamilyPermission.FAMILY_SETTINGS_MANAGE
+    );
+    if (!hasPerm) {
       throw new Error('Forbidden. Only authorized family managers can edit family settings.');
     }
 
-    if (updates.name && updates.name.trim()) {
-      family.name = updates.name.trim();
-    }
+    const updated = await prisma.$transaction(async (tx) => {
+      const fam = await tx.family.update({
+        where: { id: familyId },
+        data: {
+          name: updates.name ? updates.name.trim() : undefined,
+          requireMfa: updates.requireMfa !== undefined ? updates.requireMfa : undefined,
+          approvalRule: updates.approvalRule ? (updates.approvalRule as any) : undefined,
+        },
+      });
 
-    if (typeof updates.requireMfa === 'boolean') {
-      if (membership.role !== 'OWNER') {
-        throw new Error('Only the Family Owner can enforce MFA requirements.');
-      }
-      family.requireMfa = updates.requireMfa;
-    }
+      const actor = await tx.user.findUnique({ where: { id: actorUserId } });
+      await tx.familyAuditLog.create({
+        data: {
+          id: `log-${nanoid(10)}`,
+          familyId,
+          actorUserId,
+          actorName: actor?.name || 'Member',
+          action: 'FAMILY_UPDATED',
+          details: `Updated family settings: ${JSON.stringify(updates)}`,
+        },
+      });
 
-    if (updates.approvalRule) {
-      if (membership.role !== 'OWNER') {
-        throw new Error('Only the Family Owner can change request approval rules.');
-      }
-      family.approvalRule = updates.approvalRule;
-    }
+      return fam;
+    });
 
-    family.updatedAt = new Date().toISOString();
-    db.families.set(familyId, family);
-    db.save();
-
-    const actor = db.users.get(actorUserId);
-    this.logAudit(familyId, actorUserId, actor?.name || 'Parent', 'FAMILY_SETTINGS_UPDATED', `Updated family settings`);
-    return family;
+    return {
+      id: updated.id,
+      name: updated.name,
+      ownerUserId: updated.ownerUserId,
+      requireMfa: updated.requireMfa,
+      approvalRule: updated.approvalRule as FamilyApprovalRule,
+      createdAt: updated.createdAt.toISOString(),
+      updatedAt: updated.updatedAt.toISOString(),
+    };
   }
 
   /**
-   * Invite a Co-Parent or Viewer to the Family
+   * Invite a co-parent or viewer
    */
-  public inviteParent(
+  public async inviteMember(
     familyId: string,
-    actorUserId: string,
     email: string,
-    role: FamilyRole = 'PARENT'
-  ): FamilyInvitation & { token: string } {
-    const family = db.families.get(familyId);
-    if (!family) throw new Error('Family not found.');
-
-    if (!rbacService.hasFamilyPermission(actorUserId, familyId, FamilyPermission.FAMILY_MEMBER_INVITE)) {
-      throw new Error('Forbidden. Insufficient permissions to invite new family members.');
+    role: FamilyRole,
+    invitedByUserId: string
+  ): Promise<{ invitation: Omit<FamilyInvitation, 'tokenHash'>; rawToken: string }> {
+    const hasPerm = await rbacService.hasFamilyPermission(
+      invitedByUserId,
+      familyId,
+      FamilyPermission.FAMILY_MEMBER_INVITE
+    );
+    if (!hasPerm) {
+      throw new Error('Forbidden. Insufficient permissions to invite members to this family.');
     }
 
     if (role === 'OWNER') {
-      throw new Error('Cannot invite a user as OWNER. Use ownership transfer instead.');
+      throw new Error('Cannot invite a user directly as OWNER. Use ownership transfer.');
     }
 
     const normalizedEmail = email.toLowerCase().trim();
 
-    // Check if user is already an active member of this family
-    const existingMember = Array.from(db.familyMembers.values()).find((m) => {
-      if (m.familyId === familyId) {
-        const u = db.users.get(m.userId);
-        return u?.email.toLowerCase() === normalizedEmail;
-      }
-      return false;
+    // Check existing members
+    const existingMember = await prisma.familyMember.findFirst({
+      where: {
+        familyId,
+        user: { email: normalizedEmail },
+      },
     });
     if (existingMember) {
       throw new Error('User is already a member of this family.');
     }
 
-    // Check for duplicate pending active invitation
-    const duplicatePending = Array.from(db.familyInvitations.values()).find(
-      (inv) =>
-        inv.familyId === familyId &&
-        inv.email.toLowerCase() === normalizedEmail &&
-        inv.status === 'PENDING' &&
-        new Date(inv.expiresAt) > new Date()
-    );
-    if (duplicatePending) {
-      throw new Error('An active pending invitation already exists for this email address.');
-    }
-
-    const rawToken = `inv_${crypto.randomBytes(24).toString('hex')}`;
+    const rawToken = `sb_inv_${crypto.randomBytes(24).toString('hex')}`;
     const tokenHash = hashToken(rawToken);
-    const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(); // 48 hours
+    const id = `inv-${nanoid(10)}`;
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
-    const invitation: FamilyInvitation = {
-      id: `inv-${nanoid(10)}`,
-      familyId,
-      email: normalizedEmail,
-      role,
-      tokenHash,
-      expiresAt,
-      status: 'PENDING',
-      invitedByUserId: actorUserId,
-      createdAt: new Date().toISOString(),
-    };
+    const created = await prisma.$transaction(async (tx) => {
+      // Invalidate existing pending invites for this email
+      await tx.familyInvitation.updateMany({
+        where: { familyId, email: normalizedEmail, status: 'PENDING' },
+        data: { status: 'REVOKED', revokedAt: new Date() },
+      });
 
-    db.familyInvitations.set(invitation.id, invitation);
-    db.save();
+      const inv = await tx.familyInvitation.create({
+        data: {
+          id,
+          familyId,
+          email: normalizedEmail,
+          role: role as any,
+          tokenHash,
+          expiresAt,
+          status: 'PENDING',
+          invitedByUserId,
+        },
+      });
 
-    const actor = db.users.get(actorUserId);
-    this.logAudit(
-      familyId,
-      actorUserId,
-      actor?.name || 'Owner',
-      'COPARENT_INVITED',
-      `Invited '${normalizedEmail}' as ${role}`
-    );
+      const actor = await tx.user.findUnique({ where: { id: invitedByUserId } });
+      await tx.familyAuditLog.create({
+        data: {
+          id: `log-${nanoid(10)}`,
+          familyId,
+          actorUserId: invitedByUserId,
+          actorName: actor?.name || 'Member',
+          action: 'INVITATION_CREATED',
+          details: `Invited ${normalizedEmail} as ${role}`,
+        },
+      });
+
+      return inv;
+    });
 
     return {
-      ...invitation,
-      token: rawToken,
+      invitation: {
+        id: created.id,
+        familyId: created.familyId,
+        email: created.email,
+        role: created.role as FamilyRole,
+        expiresAt: created.expiresAt.toISOString(),
+        status: created.status as any,
+        invitedByUserId: created.invitedByUserId,
+        createdAt: created.createdAt.toISOString(),
+      },
+      rawToken,
     };
   }
 
-  /**
-   * Accept an Invitation to join a family (Single-Use Hashed Token Validation)
-   */
-  public acceptInvitation(rawToken: string, acceptingUserId: string): { family: Family; role: FamilyRole } {
-    if (!rawToken || typeof rawToken !== 'string' || !rawToken.trim()) {
-      throw new Error('Invalid invitation token.');
-    }
-
-    const cleanToken = rawToken.trim();
-    const tokenHash = hashToken(cleanToken);
-
-    const invitation = Array.from(db.familyInvitations.values()).find(
-      (inv) => inv.tokenHash === tokenHash && inv.status === 'PENDING'
-    );
-
-    if (!invitation) {
-      throw new Error('Invalid or expired invitation link.');
-    }
-
-    if (new Date() > new Date(invitation.expiresAt)) {
-      invitation.status = 'EXPIRED';
-      db.familyInvitations.set(invitation.id, invitation);
-      db.save();
-      throw new Error('This invitation has expired.');
-    }
-
-    const family = db.families.get(invitation.familyId);
-    if (!family) throw new Error('Family no longer exists.');
-
-    const user = db.users.get(acceptingUserId);
-    if (!user) throw new Error('User account not found.');
-
-    // Strict Email Binding Check
-    if (user.email.toLowerCase() !== invitation.email.toLowerCase()) {
-      throw new Error('INVITATION_EMAIL_MISMATCH: This invitation was issued for a different email address.');
-    }
-
-    // Add as member
-    const memberId = `fm-${nanoid(10)}`;
-    const member: FamilyMember = {
-      id: memberId,
-      familyId: family.id,
-      userId: acceptingUserId,
-      role: invitation.role,
-      joinedAt: new Date().toISOString(),
+  public async inviteParent(
+    familyId: string,
+    invitedByUserId: string,
+    email: string,
+    role: FamilyRole
+  ): Promise<any> {
+    const res = await this.inviteMember(familyId, email, role, invitedByUserId);
+    return {
+      ...res.invitation,
+      token: res.rawToken,
     };
+  }
 
-    db.familyMembers.set(memberId, member);
+  public async revokeInvitation(invitationId: string, actorUserId: string): Promise<void> {
+    await prisma.familyInvitation.update({
+      where: { id: invitationId },
+      data: { status: 'REVOKED', revokedAt: new Date() },
+    });
+  }
 
-    // Clean up empty auto-created initial family if present
-    for (const [fmId, fm] of db.familyMembers.entries()) {
-      if (fm.userId === acceptingUserId && fm.familyId !== family.id) {
-        const otherFam = db.families.get(fm.familyId);
-        if (otherFam && otherFam.ownerUserId === acceptingUserId) {
-          const hasKids = Array.from(db.children.values()).some((c) => c.parentId === acceptingUserId);
-          if (!hasKids) {
-            db.familyMembers.delete(fmId);
-            db.families.delete(otherFam.id);
-          }
-        }
+  /**
+   * Accept an invitation (Single-use transactional claim)
+   */
+  public async acceptInvitation(
+    rawToken: string,
+    acceptingUserId: string
+  ): Promise<{ familyId: string; role: FamilyRole }> {
+    const tokenHash = hashToken(rawToken.trim());
+
+    return prisma.$transaction(async (tx) => {
+      const invitation = await tx.familyInvitation.findUnique({
+        where: { tokenHash },
+      });
+
+      if (!invitation) {
+        throw new Error('Invalid or expired invitation token.');
+      }
+
+      if (invitation.status !== 'PENDING') {
+        throw new Error('This invitation has already been accepted, revoked, or expired.');
+      }
+
+      if (invitation.expiresAt.getTime() <= Date.now()) {
+        await tx.familyInvitation.update({
+          where: { id: invitation.id },
+          data: { status: 'EXPIRED' },
+        });
+        throw new Error('This invitation has expired.');
+      }
+
+      const acceptingUser = await tx.user.findUnique({
+        where: { id: acceptingUserId },
+      });
+      if (!acceptingUser) throw new Error('User not found.');
+
+      // Check existing membership
+      const existing = await tx.familyMember.findUnique({
+        where: {
+          familyId_userId: {
+            familyId: invitation.familyId,
+            userId: acceptingUserId,
+          },
+        },
+      });
+      if (existing) {
+        throw new Error('You are already a member of this family.');
+      }
+
+      // Mark invitation accepted
+      await tx.familyInvitation.update({
+        where: { id: invitation.id },
+        data: {
+          status: 'ACCEPTED',
+          acceptedAt: new Date(),
+        },
+      });
+
+      // Add family membership
+      await tx.familyMember.create({
+        data: {
+          id: `fm-${nanoid(10)}`,
+          familyId: invitation.familyId,
+          userId: acceptingUserId,
+          role: invitation.role,
+        },
+      });
+
+      await tx.familyAuditLog.create({
+        data: {
+          id: `log-${nanoid(10)}`,
+          familyId: invitation.familyId,
+          actorUserId: acceptingUserId,
+          actorName: acceptingUser.name,
+          action: 'INVITATION_ACCEPTED',
+          details: `${acceptingUser.name} (${acceptingUser.email}) joined family as ${invitation.role}`,
+        },
+      });
+
+      return {
+        familyId: invitation.familyId,
+        role: invitation.role as FamilyRole,
+      };
+    });
+  }
+
+  /**
+   * Remove member from family
+   */
+  public async removeMember(familyId: string, memberIdOrUserId: string, actorUserId: string): Promise<void> {
+    const family = await prisma.family.findUnique({ where: { id: familyId } });
+    if (!family) throw new Error('Family not found.');
+
+    const memberRecord = await prisma.familyMember.findFirst({
+      where: {
+        familyId,
+        OR: [{ id: memberIdOrUserId }, { userId: memberIdOrUserId }],
+      },
+      include: { user: true },
+    });
+
+    if (!memberRecord) {
+      throw new Error('User is not a member of this family.');
+    }
+
+    const isSelfRemoval = memberRecord.userId === actorUserId;
+
+    if (!isSelfRemoval) {
+      const hasPerm = await rbacService.hasFamilyPermission(
+        actorUserId,
+        familyId,
+        FamilyPermission.FAMILY_MEMBER_REMOVE
+      );
+      if (!hasPerm) {
+        throw new Error('Forbidden. Insufficient permissions to remove members from this family.');
       }
     }
 
-    // Mark invitation ACCEPTED atomically (Single-use invariant)
-    invitation.status = 'ACCEPTED';
-    invitation.acceptedAt = new Date().toISOString();
-    db.familyInvitations.set(invitation.id, invitation);
-    db.save();
-
-    this.logAudit(
-      family.id,
-      acceptingUserId,
-      user.name,
-      'COPARENT_JOINED',
-      `${user.name} (${user.email}) accepted invitation and joined as ${invitation.role}`
-    );
-
-    return { family, role: invitation.role };
-  }
-
-  /**
-   * Revoke an Invitation
-   */
-  public revokeInvitation(invitationId: string, actorUserId: string) {
-    const invitation = db.familyInvitations.get(invitationId);
-    if (!invitation) throw new Error('Invitation not found.');
-
-    const family = db.families.get(invitation.familyId);
-    if (!family) throw new Error('Family not found.');
-
-    if (!rbacService.hasFamilyPermission(actorUserId, family.id, FamilyPermission.FAMILY_MEMBER_INVITE)) {
-      throw new Error('Forbidden. Insufficient permissions to revoke invitations.');
+    if (family.ownerUserId === memberRecord.userId || memberRecord.role === 'OWNER') {
+      throw new Error('Cannot remove the Family Owner. Transfer ownership before leaving or removing owner.');
     }
 
-    invitation.status = 'REVOKED';
-    invitation.revokedAt = new Date().toISOString();
-    db.familyInvitations.set(invitation.id, invitation);
-    db.save();
+    await prisma.$transaction(async (tx) => {
+      await tx.familyMember.delete({
+        where: { id: memberRecord.id },
+      });
 
-    const actor = db.users.get(actorUserId);
-    this.logAudit(family.id, actorUserId, actor?.name || 'Owner', 'INVITATION_REVOKED', `Revoked invitation for '${invitation.email}'`);
+      const actor = await tx.user.findUnique({ where: { id: actorUserId } });
+      await tx.familyAuditLog.create({
+        data: {
+          id: `log-${nanoid(10)}`,
+          familyId,
+          actorUserId,
+          actorName: actor?.name || 'Member',
+          action: isSelfRemoval ? 'MEMBER_LEFT' : 'MEMBER_REMOVED',
+          details: isSelfRemoval
+            ? `${memberRecord.user.name} left the family.`
+            : `Removed ${memberRecord.user.name} (${memberRecord.user.email}) from family.`,
+        },
+      });
+    });
   }
 
   /**
-   * Change member role (e.g. PARENT <-> VIEWER)
+   * Change member role
    */
-  public changeMemberRole(
+  public async changeMemberRole(
     familyId: string,
-    memberId: string,
+    targetUserId: string,
     newRole: FamilyRole,
     actorUserId: string
-  ): FamilyMember {
-    const family = db.families.get(familyId);
-    if (!family) throw new Error('Family not found.');
-
-    if (!rbacService.hasFamilyPermission(actorUserId, familyId, FamilyPermission.FAMILY_ROLE_CHANGE)) {
-      throw new Error('Forbidden. Only the Family Owner can change member roles.');
+  ): Promise<void> {
+    const hasPerm = await rbacService.hasFamilyPermission(
+      actorUserId,
+      familyId,
+      FamilyPermission.FAMILY_ROLE_CHANGE
+    );
+    if (!hasPerm) {
+      throw new Error('Forbidden. Only Family Owners can change member roles.');
     }
 
     if (newRole === 'OWNER') {
-      throw new Error('Cannot assign OWNER role directly. Use transferOwnership instead.');
+      throw new Error('Cannot assign OWNER role via changeMemberRole. Use transferOwnership.');
     }
 
-    const member = db.familyMembers.get(memberId);
-    if (!member || member.familyId !== familyId) {
-      throw new Error('Member not found in this family.');
-    }
-
-    if (member.userId === family.ownerUserId || member.role === 'OWNER') {
-      throw new Error('Cannot change the role of the Family Owner.');
-    }
-
-    const oldRole = member.role;
-    member.role = newRole;
-    db.familyMembers.set(memberId, member);
-    db.save();
-
-    const targetUser = db.users.get(member.userId);
-    const actor = db.users.get(actorUserId);
-    this.logAudit(
-      familyId,
-      actorUserId,
-      actor?.name || 'Owner',
-      'MEMBER_ROLE_CHANGED',
-      `Changed role of ${targetUser?.name || 'Member'} from ${oldRole} to ${newRole}`
-    );
-
-    return member;
-  }
-
-  /**
-   * Remove a Family Member (Cannot remove the final OWNER)
-   */
-  public removeMember(familyId: string, memberId: string, actorUserId: string) {
-    const family = db.families.get(familyId);
+    const family = await prisma.family.findUnique({ where: { id: familyId } });
     if (!family) throw new Error('Family not found.');
 
-    if (!rbacService.hasFamilyPermission(actorUserId, familyId, FamilyPermission.FAMILY_MEMBER_REMOVE)) {
-      throw new Error('Forbidden. Only authorized family managers can remove members.');
+    if (family.ownerUserId === targetUserId) {
+      throw new Error('Cannot change the role of the Family Owner. Transfer ownership first.');
     }
 
-    const member = db.familyMembers.get(memberId);
-    if (!member || member.familyId !== familyId) {
-      throw new Error('Member not found in this family.');
-    }
+    await prisma.$transaction(async (tx) => {
+      const member = await tx.familyMember.findUnique({
+        where: {
+          familyId_userId: {
+            familyId,
+            userId: targetUserId,
+          },
+        },
+        include: { user: true },
+      });
 
-    if (member.userId === family.ownerUserId || member.role === 'OWNER') {
-      throw new Error('Cannot remove the Family Owner. Please transfer ownership first.');
-    }
+      if (!member) throw new Error('Target user is not a member of this family.');
 
-    // Prevent leaving if user is the sole owner
-    const remainingOwners = Array.from(db.familyMembers.values()).filter(
-      (m) => m.familyId === familyId && m.role === 'OWNER' && m.id !== memberId
-    );
-    if (remainingOwners.length === 0) {
-      throw new Error('Cannot remove the final Family Owner.');
-    }
+      await tx.familyMember.update({
+        where: { id: member.id },
+        data: { role: newRole as any },
+      });
 
-    const removedUser = db.users.get(member.userId);
-    db.familyMembers.delete(memberId);
-    db.save();
-
-    const actor = db.users.get(actorUserId);
-    this.logAudit(
-      familyId,
-      actorUserId,
-      actor?.name || 'Owner',
-      'MEMBER_REMOVED',
-      `Removed member ${removedUser?.name || 'Parent'} (${removedUser?.email || ''})`
-    );
+      const actor = await tx.user.findUnique({ where: { id: actorUserId } });
+      await tx.familyAuditLog.create({
+        data: {
+          id: `log-${nanoid(10)}`,
+          familyId,
+          actorUserId,
+          actorName: actor?.name || 'Owner',
+          action: 'ROLE_CHANGED',
+          details: `Changed role of ${member.user.name} to ${newRole}`,
+        },
+      });
+    });
   }
 
   /**
-   * Transfer Family Ownership with Single-Owner Invariant, Step-Up Auth Replay Protection & Concurrency Safety
+   * Transfer Family Ownership with Single-Owner Invariant, Step-Up Auth Replay Protection & Row Lock
    */
   public async transferOwnership(
     familyId: string,
@@ -457,409 +584,186 @@ export class FamilyService {
     otpCode?: string,
     timeSec?: number
   ): Promise<void> {
-    if (
-      process.env.DATABASE_URL &&
-      !db._simulateSaveFailure &&
-      !db._simulateFsyncFailure &&
-      !db._simulateRenameFailure &&
-      !db._simulateBackupFailure
-    ) {
-      return prisma.$transaction(async (tx) => {
-        // 1. Row-level locking to serialize concurrent transactions
-        let lockedFamilies: any[] = await tx.$queryRaw`SELECT * FROM "Family" WHERE "id" = ${familyId} FOR UPDATE`;
-        if (!lockedFamilies || lockedFamilies.length === 0) {
-          // If family exists in in-memory store, sync to PostgreSQL
-          const memFam = db.families.get(familyId);
-          if (memFam) {
-            const curOwner = db.users.get(currentOwnerUserId);
-            if (curOwner) {
-              await tx.user.upsert({
-                where: { id: curOwner.id },
-                update: {},
-                create: {
-                  id: curOwner.id,
-                  email: curOwner.email,
-                  name: curOwner.name,
-                  passwordHash: curOwner.passwordHash,
-                  systemRole: curOwner.systemRole || 'USER',
-                  emailVerified: Boolean(curOwner.emailVerified),
-                  mfaEnabled: Boolean(curOwner.mfaEnabled),
-                  mfaSecret: curOwner.mfaSecret || null,
-                  mfaRecoveryCodes: curOwner.mfaRecoveryCodes || [],
-                  totpLastUsedSteps: (curOwner.totpLastUsedSteps as any) || undefined,
-                },
-              });
-            }
-            const tgtUser = db.users.get(newOwnerUserId);
-            if (tgtUser) {
-              await tx.user.upsert({
-                where: { id: tgtUser.id },
-                update: {},
-                create: {
-                  id: tgtUser.id,
-                  email: tgtUser.email,
-                  name: tgtUser.name,
-                  passwordHash: tgtUser.passwordHash,
-                  systemRole: tgtUser.systemRole || 'USER',
-                  emailVerified: Boolean(tgtUser.emailVerified),
-                  mfaEnabled: Boolean(tgtUser.mfaEnabled),
-                  mfaSecret: tgtUser.mfaSecret || null,
-                  mfaRecoveryCodes: tgtUser.mfaRecoveryCodes || [],
-                  totpLastUsedSteps: (tgtUser.totpLastUsedSteps as any) || undefined,
-                },
-              });
-            }
-            await tx.family.upsert({
-              where: { id: memFam.id },
-              update: {},
-              create: {
-                id: memFam.id,
-                name: memFam.name,
-                ownerUserId: memFam.ownerUserId,
-                requireMfa: Boolean(memFam.requireMfa),
-                approvalRule: memFam.approvalRule || 'OWNER_OR_PARENT',
-              },
-            });
-            for (const m of db.familyMembers.values()) {
-              if (m.familyId === familyId) {
-                const memU = db.users.get(m.userId);
-                if (memU) {
-                  await tx.user.upsert({
-                    where: { id: memU.id },
-                    update: {},
-                    create: {
-                      id: memU.id,
-                      email: memU.email,
-                      name: memU.name,
-                      passwordHash: memU.passwordHash,
-                      systemRole: memU.systemRole || 'USER',
-                      emailVerified: Boolean(memU.emailVerified),
-                      mfaEnabled: Boolean(memU.mfaEnabled),
-                      mfaSecret: memU.mfaSecret || null,
-                      mfaRecoveryCodes: memU.mfaRecoveryCodes || [],
-                      totpLastUsedSteps: (memU.totpLastUsedSteps as any) || undefined,
-                    },
-                  });
-                }
-                await tx.familyMember.upsert({
-                  where: { familyId_userId: { familyId: m.familyId, userId: m.userId } },
-                  update: { role: m.role },
-                  create: {
-                    id: m.id,
-                    familyId: m.familyId,
-                    userId: m.userId,
-                    role: m.role,
-                  },
-                });
-              }
-            }
-            lockedFamilies = await tx.$queryRaw`SELECT * FROM "Family" WHERE "id" = ${familyId} FOR UPDATE`;
-          }
-        }
-        if (!lockedFamilies || lockedFamilies.length === 0) {
-          throw new Error('Family not found.');
-        }
-        const family = lockedFamilies[0];
+    return prisma.$transaction(async (tx) => {
+      // 1. Row-level locking to serialize concurrent transactions
+      const lockedFamilies: any[] = await tx.$queryRaw`SELECT * FROM "Family" WHERE "id" = ${familyId} FOR UPDATE`;
+      if (!lockedFamilies || lockedFamilies.length === 0) {
+        throw new Error('Family not found.');
+      }
+      const family = lockedFamilies[0];
 
-        if (family.ownerUserId !== currentOwnerUserId) {
-          throw new Error('Forbidden. Only the current Family Owner can transfer ownership.');
-        }
+      if (family.ownerUserId !== currentOwnerUserId) {
+        throw new Error('Forbidden. Only the current Family Owner can transfer ownership.');
+      }
 
-        if (newOwnerUserId === currentOwnerUserId) {
-          throw new Error('Cannot transfer ownership to yourself.');
-        }
+      if (newOwnerUserId === currentOwnerUserId) {
+        throw new Error('Cannot transfer ownership to yourself.');
+      }
 
-        // 2. Validate target member
-        const newOwnerMembership = await tx.familyMember.findUnique({
-          where: {
-            familyId_userId: {
-              familyId,
-              userId: newOwnerUserId,
-            },
-          },
-        });
-        if (!newOwnerMembership) {
-          throw new Error('Target user is not a member of this family.');
-        }
-
-        // 3. Step-up authentication
-        const currentOwner = await tx.user.findUnique({ where: { id: currentOwnerUserId } });
-        if (!currentOwner) throw new Error('Current owner user not found.');
-
-        if (!password) {
-          throw new Error('Step-up authentication required: password must be provided.');
-        }
-
-        const stepUp = verifyStepUpAuth(currentOwner as any, password, otpCode, timeSec);
-
-        // 4. Atomically consume recovery code or record accepted TOTP timestep
-        const updatedRecoveryCodes = [...(currentOwner.mfaRecoveryCodes || [])];
-        const updatedTotpLastUsed = (currentOwner.totpLastUsedSteps as any)
-          ? { ...(currentOwner.totpLastUsedSteps as any) }
-          : {};
-
-        if (stepUp.method === 'TOTP' && stepUp.totpTimeStep !== undefined) {
-          const lastUsed = updatedTotpLastUsed['family_ownership_transfer'];
-          if (lastUsed !== undefined && lastUsed === stepUp.totpTimeStep) {
-            throw new Error(
-              'This TOTP code has already been used for ownership transfer. Please wait for the next code.'
-            );
-          }
-          updatedTotpLastUsed['family_ownership_transfer'] = stepUp.totpTimeStep;
-        } else if (stepUp.method === 'RECOVERY_CODE' && stepUp.recoveryCodeIndex !== undefined) {
-          updatedRecoveryCodes.splice(stepUp.recoveryCodeIndex, 1);
-        }
-
-        await tx.user.update({
-          where: { id: currentOwnerUserId },
-          data: {
-            mfaRecoveryCodes: updatedRecoveryCodes,
-            totpLastUsedSteps: updatedTotpLastUsed as any,
-          },
-        });
-
-        // 5. Demote previous OWNER to PARENT
-        await tx.familyMember.update({
-          where: {
-            familyId_userId: {
-              familyId,
-              userId: currentOwnerUserId,
-            },
-          },
-          data: { role: 'PARENT' },
-        });
-
-        // 6. Promote target member to OWNER (Postgres partial unique index physically enforces single-owner invariant!)
-        await tx.familyMember.update({
-          where: {
-            familyId_userId: {
-              familyId,
-              userId: newOwnerUserId,
-            },
-          },
-          data: { role: 'OWNER' },
-        });
-
-        // 7. Update Family.ownerUserId
-        await tx.family.update({
-          where: { id: familyId },
-          data: {
-            ownerUserId: newOwnerUserId,
-            updatedAt: new Date(),
-          },
-        });
-
-        // 8. Insert ownership-transfer audit event
-        const newOwner = await tx.user.findUnique({ where: { id: newOwnerUserId } });
-        const auditLogId = `log-${nanoid(10)}`;
-        await tx.familyAuditLog.create({
-          data: {
-            id: auditLogId,
+      // 2. Validate target member
+      const newOwnerMembership = await tx.familyMember.findUnique({
+        where: {
+          familyId_userId: {
             familyId,
-            actorUserId: currentOwnerUserId,
-            actorName: currentOwner.name || 'Owner',
-            action: 'OWNERSHIP_TRANSFERRED',
-            details: `Transferred family ownership to ${newOwner?.name || 'Parent'} (${newOwner?.email || ''})`,
+            userId: newOwnerUserId,
           },
-        });
+        },
+      });
+      if (!newOwnerMembership) {
+        throw new Error('Target user is not a member of this family.');
+      }
 
-        // 9. Strict invariant check: exactly one OWNER in PostgreSQL
-        const ownerCount = await tx.familyMember.count({
-          where: {
+      // 3. Step-up authentication
+      const currentOwner = await tx.user.findUnique({ where: { id: currentOwnerUserId } });
+      if (!currentOwner) throw new Error('Current owner user not found.');
+
+      if (!password) {
+        throw new Error('Step-up authentication required: password must be provided.');
+      }
+
+      const stepUp = verifyStepUpAuth(currentOwner as any, password, otpCode, timeSec);
+
+      // 4. Atomically consume recovery code or record accepted TOTP timestep
+      const updatedRecoveryCodes = [...(currentOwner.mfaRecoveryCodes || [])];
+      const updatedTotpLastUsed = (currentOwner.totpLastUsedSteps as any)
+        ? { ...(currentOwner.totpLastUsedSteps as any) }
+        : {};
+
+      if (stepUp.method === 'TOTP' && stepUp.totpTimeStep !== undefined) {
+        const lastUsed = updatedTotpLastUsed['family_ownership_transfer'];
+        if (lastUsed !== undefined && lastUsed === stepUp.totpTimeStep) {
+          throw new Error(
+            'This TOTP code has already been used for ownership transfer. Please wait for the next code.'
+          );
+        }
+        updatedTotpLastUsed['family_ownership_transfer'] = stepUp.totpTimeStep;
+      } else if (stepUp.method === 'RECOVERY_CODE' && stepUp.recoveryCodeIndex !== undefined) {
+        updatedRecoveryCodes.splice(stepUp.recoveryCodeIndex, 1);
+      }
+
+      await tx.user.update({
+        where: { id: currentOwnerUserId },
+        data: {
+          mfaRecoveryCodes: updatedRecoveryCodes,
+          totpLastUsedSteps: updatedTotpLastUsed,
+        },
+      });
+
+      // 5. Demote previous OWNER to PARENT
+      await tx.familyMember.update({
+        where: {
+          familyId_userId: {
             familyId,
-            role: 'OWNER',
+            userId: currentOwnerUserId,
           },
-        });
-        if (ownerCount !== 1) {
-          throw new FatalConsistencyError('FATAL: Ownership invariant violation: multiple or zero owners detected.');
-        }
+        },
+        data: { role: 'PARENT' },
+      });
 
-        // Synchronize in-memory cache if DataStore is tracking this family
-        const memFam = db.families.get(familyId);
-        if (memFam) {
-          memFam.ownerUserId = newOwnerUserId;
-          memFam.updatedAt = new Date().toISOString();
-          db.families.set(familyId, memFam);
-        }
-        const memOld = Array.from(db.familyMembers.values()).find(
-          (m) => m.familyId === familyId && m.userId === currentOwnerUserId
-        );
-        if (memOld) {
-          memOld.role = 'PARENT';
-          db.familyMembers.set(memOld.id, memOld);
-        }
-        const memNew = Array.from(db.familyMembers.values()).find(
-          (m) => m.familyId === familyId && m.userId === newOwnerUserId
-        );
-        if (memNew) {
-          memNew.role = 'OWNER';
-          db.familyMembers.set(memNew.id, memNew);
-        }
-        const memUser = db.users.get(currentOwnerUserId);
-        if (memUser) {
-          memUser.mfaRecoveryCodes = updatedRecoveryCodes;
-          memUser.totpLastUsedSteps = updatedTotpLastUsed;
-          db.users.set(currentOwnerUserId, memUser);
-        }
-        this.appendAuditEntryWithoutSave({
+      // 6. Promote target member to OWNER (PostgreSQL partial unique index + trigger enforce single-owner)
+      await tx.familyMember.update({
+        where: {
+          familyId_userId: {
+            familyId,
+            userId: newOwnerUserId,
+          },
+        },
+        data: { role: 'OWNER' },
+      });
+
+      // 7. Update Family.ownerUserId
+      await tx.family.update({
+        where: { id: familyId },
+        data: {
+          ownerUserId: newOwnerUserId,
+          updatedAt: new Date(),
+        },
+      });
+
+      // 8. Insert ownership-transfer audit event
+      const newOwner = await tx.user.findUnique({ where: { id: newOwnerUserId } });
+      const auditLogId = `log-${nanoid(10)}`;
+      await tx.familyAuditLog.create({
+        data: {
           id: auditLogId,
           familyId,
           actorUserId: currentOwnerUserId,
           actorName: currentOwner.name || 'Owner',
           action: 'OWNERSHIP_TRANSFERRED',
           details: `Transferred family ownership to ${newOwner?.name || 'Parent'} (${newOwner?.email || ''})`,
-          timestamp: new Date().toISOString(),
-        });
+        },
       });
-    }
 
-    return db.runWithFamilyLock(familyId, async () => {
-      // Create isolated family-scoped snapshot for atomic rollback on any failure
-      const snapshot = db.createFamilySnapshot(familyId, [currentOwnerUserId, newOwnerUserId]);
-
-      try {
-        const family = db.families.get(familyId);
-        if (!family) throw new Error('Family not found.');
-
-        if (family.ownerUserId !== currentOwnerUserId) {
-          throw new Error('Forbidden. Only the current Family Owner can transfer ownership.');
-        }
-
-        if (newOwnerUserId === currentOwnerUserId) {
-          throw new Error('Cannot transfer ownership to yourself.');
-        }
-
-        // Validate target member BEFORE consuming any step-up credentials
-        const newOwnerMembership = Array.from(db.familyMembers.values()).find(
-          (m) => m.familyId === familyId && m.userId === newOwnerUserId
-        );
-        if (!newOwnerMembership) {
-          throw new Error('Target user is not a member of this family.');
-        }
-
-        const currentOwner = db.users.get(currentOwnerUserId);
-        if (!currentOwner) throw new Error('Current owner user not found.');
-
-        // Step-up authentication is strictly required
-        if (!password) {
-          throw new Error('Step-up authentication required: password must be provided.');
-        }
-
-        const stepUp = verifyStepUpAuth(currentOwner, password, otpCode, timeSec);
-
-        // Step-up replay protection & atomic credential consumption:
-        if (stepUp.method === 'TOTP' && stepUp.totpTimeStep !== undefined) {
-          const lastUsed = currentOwner.totpLastUsedSteps?.['family_ownership_transfer'];
-          if (lastUsed !== undefined && lastUsed === stepUp.totpTimeStep) {
-            throw new Error('This TOTP code has already been used for ownership transfer. Please wait for the next code.');
-          }
-          if (!currentOwner.totpLastUsedSteps) currentOwner.totpLastUsedSteps = {};
-          currentOwner.totpLastUsedSteps['family_ownership_transfer'] = stepUp.totpTimeStep;
-          db.users.set(currentOwnerUserId, currentOwner);
-        } else if (stepUp.method === 'RECOVERY_CODE' && stepUp.recoveryCodeIndex !== undefined) {
-          // Atomically remove the accepted hashed recovery code
-          currentOwner.mfaRecoveryCodes!.splice(stepUp.recoveryCodeIndex, 1);
-          db.users.set(currentOwnerUserId, currentOwner);
-        }
-
-        // Atomic compare-and-swap role swap
-        const oldOwnerMembership = Array.from(db.familyMembers.values()).find(
-          (m) => m.familyId === familyId && m.userId === currentOwnerUserId
-        );
-        if (oldOwnerMembership) {
-          oldOwnerMembership.role = 'PARENT';
-          db.familyMembers.set(oldOwnerMembership.id, oldOwnerMembership);
-        }
-
-        newOwnerMembership.role = 'OWNER';
-        db.familyMembers.set(newOwnerMembership.id, newOwnerMembership);
-
-        family.ownerUserId = newOwnerUserId;
-        family.updatedAt = new Date().toISOString();
-        db.families.set(familyId, family);
-
-        // Strict Invariant verification: Exactly ONE active owner and matches family.ownerUserId
-        const owners = Array.from(db.familyMembers.values()).filter(
-          (m) => m.familyId === familyId && m.role === 'OWNER'
-        );
-        if (owners.length !== 1 || owners[0].userId !== family.ownerUserId) {
-          throw new Error('FATAL: Ownership invariant violation. Rolled back.');
-        }
-
-        // Stage audit event WITHOUT save so it commits atomically in the single transaction save
-        const oldOwner = db.users.get(currentOwnerUserId);
-        const newOwner = db.users.get(newOwnerUserId);
-        const auditEntry = this.createAuditEntry(
+      // 9. Strict invariant check: exactly one OWNER in PostgreSQL
+      const ownerCount = await tx.familyMember.count({
+        where: {
           familyId,
-          currentOwnerUserId,
-          oldOwner?.name || 'Owner',
-          'OWNERSHIP_TRANSFERRED',
-          `Transferred family ownership to ${newOwner?.name || 'Parent'} (${newOwner?.email || ''})`
-        );
-        this.appendAuditEntryWithoutSave(auditEntry);
-
-        // Persist complete transaction (credentials, memberships, family, audit event) in exactly ONE commit
-        db.save();
-      } catch (err: any) {
-        // Roll back family-scoped records without affecting any other family
-        db.restoreFamilySnapshot(snapshot);
-        throw err;
+          role: 'OWNER',
+        },
+      });
+      if (ownerCount !== 1) {
+        throw new FatalConsistencyError('FATAL: Ownership invariant violation: multiple or zero owners detected.');
       }
     });
   }
 
-  /**
-   * Get Family Audit Logs
-   */
-  public getAuditLogs(familyId: string, actorUserId: string): FamilyAuditLog[] {
-    const membership = rbacService.getFamilyMembership(actorUserId, familyId);
-    if (!membership) {
-      throw new Error('Forbidden. You do not belong to this family.');
-    }
-
-    if (!rbacService.hasFamilyPermission(actorUserId, familyId, FamilyPermission.FAMILY_AUDIT_READ)) {
-      throw new Error('Forbidden. Insufficient permissions to view family audit logs.');
-    }
-
-    return db.familyAuditLogs.filter((log) => log.familyId === familyId).reverse();
-  }
-
-  public createAuditEntry(
+  public async logAudit(
     familyId: string,
     actorUserId: string,
     actorName: string,
     action: string,
     details: string,
     childId?: string
-  ): FamilyAuditLog {
+  ): Promise<FamilyAuditLog> {
+    const entry = await prisma.familyAuditLog.create({
+      data: {
+        id: `log-${nanoid(10)}`,
+        familyId,
+        actorUserId,
+        actorName,
+        action,
+        childId: childId || null,
+        details,
+      },
+    });
     return {
-      id: `log-${nanoid(10)}`,
-      familyId,
-      actorUserId,
-      actorName,
-      action,
-      childId,
-      details,
-      timestamp: new Date().toISOString(),
+      id: entry.id,
+      familyId: entry.familyId,
+      actorUserId: entry.actorUserId,
+      actorName: entry.actorName,
+      action: entry.action,
+      childId: entry.childId || undefined,
+      details: entry.details,
+      timestamp: entry.timestamp.toISOString(),
     };
   }
 
-  public appendAuditEntryWithoutSave(entry: FamilyAuditLog): void {
-    db.familyAuditLogs.push(entry);
-  }
+  public async getAuditLogs(familyId: string, actorUserId: string): Promise<FamilyAuditLog[]> {
+    const hasPerm = await rbacService.hasFamilyPermission(
+      actorUserId,
+      familyId,
+      FamilyPermission.FAMILY_AUDIT_READ
+    );
+    if (!hasPerm) {
+      throw new Error('Forbidden. Insufficient permissions to view family audit logs.');
+    }
 
-  public logAudit(
-    familyId: string,
-    actorUserId: string,
-    actorName: string,
-    action: string,
-    details: string,
-    childId?: string
-  ): FamilyAuditLog {
-    const log = this.createAuditEntry(familyId, actorUserId, actorName, action, details, childId);
-    this.appendAuditEntryWithoutSave(log);
-    db.save();
-    return log;
+    const logs = await prisma.familyAuditLog.findMany({
+      where: { familyId },
+      orderBy: { timestamp: 'desc' },
+      take: 100,
+    });
+
+    return logs.map((log) => ({
+      id: log.id,
+      familyId: log.familyId,
+      actorUserId: log.actorUserId,
+      actorName: log.actorName,
+      action: log.action,
+      childId: log.childId || undefined,
+      details: log.details,
+      timestamp: log.timestamp.toISOString(),
+    }));
   }
 }
 

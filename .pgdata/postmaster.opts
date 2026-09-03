@@ -1,0 +1,1 @@
+C:/Users/acer/projects/safechild/node_modules/@embedded-postgres/windows-x64/native/bin/postgres.exe "-D" "C:\Users\acer\projects\safechild\.pgdata" "-p" "5432"

@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { generateSecret, generateURI, generateSync, verifySync } from 'otplib';
 import QRCode from 'qrcode';
-import { ParentUser } from '../db/store';
+import { ParentUser } from '../types/models';
 
 export function getEncryptionKeyBuffer(): Buffer {
   const envKey = process.env.MFA_ENCRYPTION_KEY;

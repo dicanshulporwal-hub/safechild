@@ -1,4 +1,4 @@
-import { db } from '../db/store';
+import { prisma } from '../db/prisma';
 import { TimelineEvent } from '@safebrowse/protocol';
 import { nanoid } from 'nanoid';
 import { wsManager } from './websocket.service';
@@ -6,7 +6,7 @@ import { wsManager } from './websocket.service';
 export class TimelineService {
   private timelineLogs: TimelineEvent[] = [];
 
-  public logEvent(event: Omit<TimelineEvent, 'id' | 'timestamp'>): TimelineEvent {
+  public async logEvent(event: Omit<TimelineEvent, 'id' | 'timestamp'>): Promise<TimelineEvent> {
     const fullEvent: TimelineEvent = {
       ...event,
       id: `evt-${nanoid(10)}`,
@@ -18,8 +18,10 @@ export class TimelineService {
       this.timelineLogs = this.timelineLogs.slice(-1000);
     }
 
-    // Broadcast live to parent dashboard
-    const child = db.children.get(event.childId);
+    const child = await prisma.child.findUnique({
+      where: { id: event.childId },
+    });
+
     if (child) {
       wsManager.broadcast({
         type: 'TIMELINE_EVENT',

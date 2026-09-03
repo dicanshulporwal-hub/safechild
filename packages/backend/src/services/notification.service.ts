@@ -1,20 +1,23 @@
-import { db } from '../db/store';
+import { prisma } from '../db/prisma';
 import { NotificationItem } from '@safebrowse/protocol';
 import { nanoid } from 'nanoid';
 import { wsManager } from './websocket.service';
+import { rbacService } from './rbac.service';
 
 export class NotificationService {
   private notifications: NotificationItem[] = [];
 
-  public createNotification(
+  public async createNotification(
     childId: string,
     type: NotificationItem['type'],
     title: string,
     message: string,
     deviceId?: string,
     deviceName?: string
-  ): NotificationItem {
-    const child = db.children.get(childId);
+  ): Promise<NotificationItem> {
+    const child = await prisma.child.findUnique({
+      where: { id: childId },
+    });
     const childName = child ? child.name : 'Child';
 
     const item: NotificationItem = {
@@ -47,20 +50,16 @@ export class NotificationService {
     return item;
   }
 
-  public getNotificationsForParent(parentId: string, familyId?: string): NotificationItem[] {
-    const userFamilyIds = Array.from(db.familyMembers.values())
-      .filter((m) => m.userId === parentId)
-      .map((m) => m.familyId);
-    const ownedFamilies = Array.from(db.families.values())
-      .filter((f) => f.ownerUserId === parentId)
-      .map((f) => f.id);
-    const allFamilyIds = new Set([...userFamilyIds, ...ownedFamilies]);
-    const targetFamilyIds = familyId ? [familyId] : Array.from(allFamilyIds);
-    const allowedSet = new Set<string>(targetFamilyIds.filter((fid: string) => allFamilyIds.has(fid)));
+  public async getNotificationsForParent(parentId: string, familyId?: string): Promise<NotificationItem[]> {
+    const userFamilyIds = (await rbacService.getUserFamilyMemberships(parentId)).map((m) => m.familyId);
+    const targetFamilyIds = familyId ? [familyId] : userFamilyIds;
+    const allowedSet = targetFamilyIds.filter((fid) => userFamilyIds.includes(fid));
 
-    const familyChildIds = Array.from(db.children.values())
-      .filter((c) => c.familyId && allowedSet.has(c.familyId))
-      .map((c) => c.id);
+    const children = await prisma.child.findMany({
+      where: { familyId: { in: allowedSet } },
+      select: { id: true },
+    });
+    const familyChildIds = children.map((c) => c.id);
 
     return this.notifications.filter((n) => familyChildIds.includes(n.childId));
   }

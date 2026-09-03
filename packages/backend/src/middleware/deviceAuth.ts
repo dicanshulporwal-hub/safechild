@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { db } from '../db/store';
+import { prisma } from '../db/prisma';
 import { Device } from '@safebrowse/shared';
 
 export interface AuthenticatedDeviceRequest extends Request {
@@ -18,7 +18,7 @@ export interface AuthenticatedDeviceRequest extends Request {
  * - If request specifies childId, validates child/device association (device.childId === req.body.childId)
  * - Rejects parent JWT tokens as device credentials
  */
-export function deviceAuthMiddleware(
+export async function deviceAuthMiddleware(
   req: AuthenticatedDeviceRequest,
   res: Response,
   next: NextFunction
@@ -56,30 +56,37 @@ export function deviceAuthMiddleware(
     return res.status(401).json({ error: 'Device authentication failed: deviceToken is required.' });
   }
 
-  const device = db.devices.get(deviceId.trim());
-  if (!device) {
-    return res.status(401).json({ error: 'Device authentication failed: Device not found.' });
-  }
-
-  if ((device as any).isRevoked) {
-    return res.status(403).json({ error: 'Forbidden: Device credentials have been revoked.' });
-  }
-
-  if (device.deviceToken !== deviceToken.trim()) {
-    return res.status(401).json({ error: 'Device authentication failed: Invalid device token.' });
-  }
-
-  // If request specifies a childId in body or query, enforce strict child/device tenancy association
-  const targetChildId = (req.body && req.body.childId) || (req.query && req.query.childId);
-  if (targetChildId && targetChildId !== device.childId) {
-    return res.status(403).json({
-      error: 'Forbidden: Device is not associated with the requested child profile.',
+  try {
+    const device = await prisma.device.findUnique({
+      where: { id: deviceId.trim() },
     });
+
+    if (!device) {
+      return res.status(401).json({ error: 'Device authentication failed: Device not found.' });
+    }
+
+    if (device.isRevoked) {
+      return res.status(403).json({ error: 'Forbidden: Device credentials have been revoked.' });
+    }
+
+    if (device.deviceToken !== deviceToken.trim()) {
+      return res.status(401).json({ error: 'Device authentication failed: Invalid device token.' });
+    }
+
+    // If request specifies a childId in body or query, enforce strict child/device tenancy association
+    const targetChildId = (req.body && req.body.childId) || (req.query && req.query.childId);
+    if (targetChildId && targetChildId !== device.childId) {
+      return res.status(403).json({
+        error: 'Forbidden: Device is not associated with the requested child profile.',
+      });
+    }
+
+    req.device = device as any;
+    req.deviceId = device.id;
+    req.childId = device.childId;
+
+    next();
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Internal server error validating device authentication.' });
   }
-
-  req.device = device;
-  req.deviceId = device.id;
-  req.childId = device.childId;
-
-  next();
 }

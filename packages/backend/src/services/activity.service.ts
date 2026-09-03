@@ -1,4 +1,4 @@
-import { db } from '../db/store';
+import { prisma } from '../db/prisma';
 import { ActivityEvent, normalizeDomain } from '@safebrowse/shared';
 import { nanoid } from 'nanoid';
 import { wsManager } from './websocket.service';
@@ -7,62 +7,97 @@ export class ActivityService {
   /**
    * Log privacy-first activity event (Domain-level only)
    */
-  public logActivity(
+  public async logActivity(
     childId: string,
     deviceId: string,
     rawDomain: string,
     action: 'BLOCKED' | 'ALLOWED' | 'TEMPORARY_ACCESSED'
-  ): ActivityEvent {
+  ): Promise<ActivityEvent> {
     const domain = normalizeDomain(rawDomain);
-    const device = db.devices.get(deviceId);
-    const child = db.children.get(childId);
+    const child = await prisma.child.findUnique({
+      where: { id: childId },
+    });
+    const device = await prisma.device.findUnique({
+      where: { id: deviceId },
+    });
+
+    if (!child) {
+      throw new Error('Child not found.');
+    }
+
+    const id = `act-${nanoid(8)}`;
+    const now = new Date();
+
+    const created = await prisma.activityEvent.create({
+      data: {
+        id,
+        familyId: child.familyId,
+        childId,
+        deviceId,
+        domain,
+        action,
+        category: 'GENERAL',
+        timestamp: now,
+      },
+    });
 
     const event: ActivityEvent = {
-      id: `act-${nanoid(8)}`,
-      childId,
-      deviceId,
+      id: created.id,
+      childId: created.childId,
+      deviceId: created.deviceId || deviceId,
       deviceName: device ? device.name : 'Child Device',
-      domain,
-      action,
-      timestamp: new Date().toISOString(),
+      domain: created.domain,
+      action: created.action as any,
+      timestamp: created.timestamp.toISOString(),
     };
 
-    db.activityLogs.push(event);
-    if (db.activityLogs.length > 1000) {
-      db.activityLogs.shift();
-    }
-    db.save();
-
-    // Broadcast activity to parent
     wsManager.broadcast({
       type: 'ACTIVITY_LOGGED',
       payload: event,
-      parentId: child ? child.parentId : undefined,
+      parentId: child.parentId,
       childId,
     });
 
     return event;
   }
 
-  public getActivityForChild(childId: string, limit: number = 50): ActivityEvent[] {
-    return db.activityLogs
-      .filter((a) => a.childId === childId)
-      .slice(-limit)
-      .reverse();
+  public async getActivityForChild(childId: string, limit: number = 50): Promise<ActivityEvent[]> {
+    const list = await prisma.activityEvent.findMany({
+      where: { childId },
+      include: { device: true },
+      orderBy: { timestamp: 'desc' },
+      take: limit,
+    });
+
+    return list.map((a) => ({
+      id: a.id,
+      childId: a.childId,
+      deviceId: a.deviceId || '',
+      deviceName: a.device?.name || 'Child Device',
+      domain: a.domain,
+      action: a.action as any,
+      timestamp: a.timestamp.toISOString(),
+    }));
   }
 
-  public getStatsForChild(childId: string) {
+  public async getStatsForChild(childId: string) {
     const now = new Date();
-    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-    const todayEvents = db.activityLogs.filter(
-      (a) => a.childId === childId && new Date(a.timestamp).getTime() >= startOfDay
-    );
+    const todayEvents = await prisma.activityEvent.findMany({
+      where: {
+        childId,
+        timestamp: { gte: startOfDay },
+      },
+    });
 
     const blockedCount = todayEvents.filter((a) => a.action === 'BLOCKED').length;
-    const pendingRequestsCount = Array.from(db.requests.values()).filter(
-      (r) => r.childId === childId && r.status === 'PENDING'
-    ).length;
+    const pendingRequestsCount = await prisma.accessRequest.count({
+      where: {
+        childId,
+        status: 'PENDING',
+      },
+    });
 
     return {
       todayBlockedCount: blockedCount,

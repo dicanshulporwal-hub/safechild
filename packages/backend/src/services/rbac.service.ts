@@ -1,4 +1,12 @@
-import { db, SystemRole, FamilyRole, FamilyMember, Family, SystemAuditLog, ParentUser } from '../db/store';
+import { prisma } from '../db/prisma';
+import {
+  SystemRole,
+  FamilyRole,
+  FamilyMember,
+  Family,
+  SystemAuditLog,
+  ParentUser,
+} from '../types/models';
 import { nanoid } from 'nanoid';
 
 // Typed System Permissions
@@ -92,16 +100,19 @@ export class RbacService {
   /**
    * Get user's system role (never inferred from email, family ownership, or routes)
    */
-  public getUserSystemRole(userId: string): SystemRole {
-    const user = db.users.get(userId);
-    return user?.systemRole || 'USER';
+  public async getUserSystemRole(userId: string): Promise<SystemRole> {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { systemRole: true },
+    });
+    return (user?.systemRole as SystemRole) || 'USER';
   }
 
   /**
    * Check if user has a system-level permission
    */
-  public hasSystemPermission(userId: string, permission: SystemPermission): boolean {
-    const role = this.getUserSystemRole(userId);
+  public async hasSystemPermission(userId: string, permission: SystemPermission): Promise<boolean> {
+    const role = await this.getUserSystemRole(userId);
     const permissions = SYSTEM_ROLE_PERMISSIONS[role];
     return permissions ? permissions.has(permission) : false;
   }
@@ -109,39 +120,66 @@ export class RbacService {
   /**
    * Check if user is a SYSTEM_ADMIN
    */
-  public isSystemAdmin(userId: string): boolean {
-    return this.getUserSystemRole(userId) === 'SYSTEM_ADMIN';
+  public async isSystemAdmin(userId: string): Promise<boolean> {
+    const role = await this.getUserSystemRole(userId);
+    return role === 'SYSTEM_ADMIN';
   }
 
   /**
    * Get family membership for a specific user and family
    */
-  public getFamilyMembership(userId: string, familyId: string): FamilyMember | undefined {
-    return Array.from(db.familyMembers.values()).find(
-      (m) => m.familyId === familyId && m.userId === userId
-    );
+  public async getFamilyMembership(userId: string, familyId: string): Promise<FamilyMember | null> {
+    const mem = await prisma.familyMember.findUnique({
+      where: {
+        familyId_userId: {
+          familyId,
+          userId,
+        },
+      },
+    });
+    if (!mem) return null;
+    return {
+      id: mem.id,
+      familyId: mem.familyId,
+      userId: mem.userId,
+      role: mem.role as FamilyRole,
+      joinedAt: mem.joinedAt.toISOString(),
+    };
   }
 
   /**
    * Get all family memberships for a user
    */
-  public getUserFamilyMemberships(userId: string): FamilyMember[] {
-    return Array.from(db.familyMembers.values()).filter((m) => m.userId === userId);
+  public async getUserFamilyMemberships(userId: string): Promise<FamilyMember[]> {
+    const list = await prisma.familyMember.findMany({
+      where: { userId },
+    });
+    return list.map((mem) => ({
+      id: mem.id,
+      familyId: mem.familyId,
+      userId: mem.userId,
+      role: mem.role as FamilyRole,
+      joinedAt: mem.joinedAt.toISOString(),
+    }));
   }
 
   /**
    * Get user's role in a specific family
    */
-  public getUserFamilyRole(userId: string, familyId: string): FamilyRole | null {
-    const membership = this.getFamilyMembership(userId, familyId);
+  public async getUserFamilyRole(userId: string, familyId: string): Promise<FamilyRole | null> {
+    const membership = await this.getFamilyMembership(userId, familyId);
     return membership ? membership.role : null;
   }
 
   /**
    * Check if user has a family-level permission in a specific family
    */
-  public hasFamilyPermission(userId: string, familyId: string, permission: FamilyPermission): boolean {
-    const role = this.getUserFamilyRole(userId, familyId);
+  public async hasFamilyPermission(
+    userId: string,
+    familyId: string,
+    permission: FamilyPermission
+  ): Promise<boolean> {
+    const role = await this.getUserFamilyRole(userId, familyId);
     if (!role) return false;
 
     const permissions = FAMILY_ROLE_PERMISSIONS[role];
@@ -149,78 +187,131 @@ export class RbacService {
   }
 
   /**
-   * Resolve family for a child profile
-   */
-  /**
    * Resolve family for a child profile (Uses child.familyId directly; no fallbacks)
    */
-  public getFamilyForChild(childId: string): Family | undefined {
-    const child = db.children.get(childId);
-    if (!child || !child.familyId) return undefined;
-    return db.families.get(child.familyId);
+  public async getFamilyForChild(childId: string): Promise<Family | null> {
+    const child = await prisma.child.findUnique({
+      where: { id: childId },
+      include: { family: true },
+    });
+    if (!child || !child.family) return null;
+    return {
+      id: child.family.id,
+      name: child.family.name,
+      ownerUserId: child.family.ownerUserId,
+      requireMfa: child.family.requireMfa,
+      approvalRule: child.family.approvalRule as any,
+      createdAt: child.family.createdAt.toISOString(),
+      updatedAt: child.family.updatedAt.toISOString(),
+    };
   }
 
   /**
    * Resolve family for a device (Uses device.familyId directly; no fallbacks)
    */
-  public getFamilyForDevice(deviceId: string): Family | undefined {
-    const device = db.devices.get(deviceId);
-    if (!device || !device.familyId) return undefined;
-    return db.families.get(device.familyId);
+  public async getFamilyForDevice(deviceId: string): Promise<Family | null> {
+    const device = await prisma.device.findUnique({
+      where: { id: deviceId },
+      include: { family: true },
+    });
+    if (!device || !device.family) return null;
+    return {
+      id: device.family.id,
+      name: device.family.name,
+      ownerUserId: device.family.ownerUserId,
+      requireMfa: device.family.requireMfa,
+      approvalRule: device.family.approvalRule as any,
+      createdAt: device.family.createdAt.toISOString(),
+      updatedAt: device.family.updatedAt.toISOString(),
+    };
   }
 
   /**
    * Resolve family for a policy (Uses policy.familyId directly; no fallbacks)
    */
-  public getFamilyForPolicy(childId: string): Family | undefined {
-    const policy = db.policies.get(childId);
-    if (!policy || !policy.familyId) return undefined;
-    return db.families.get(policy.familyId);
+  public async getFamilyForPolicy(childId: string): Promise<Family | null> {
+    const policy = await prisma.policy.findUnique({
+      where: { childId },
+      include: { family: true },
+    });
+    if (!policy || !policy.family) return null;
+    return {
+      id: policy.family.id,
+      name: policy.family.name,
+      ownerUserId: policy.family.ownerUserId,
+      requireMfa: policy.family.requireMfa,
+      approvalRule: policy.family.approvalRule as any,
+      createdAt: policy.family.createdAt.toISOString(),
+      updatedAt: policy.family.updatedAt.toISOString(),
+    };
   }
 
   /**
    * Resolve family for an access request (Uses req.familyId directly; no fallbacks)
    */
-  public getFamilyForRequest(requestId: string): Family | undefined {
-    const req = db.requests.get(requestId);
-    if (!req || !req.familyId) return undefined;
-    return db.families.get(req.familyId);
+  public async getFamilyForRequest(requestId: string): Promise<Family | null> {
+    const req = await prisma.accessRequest.findUnique({
+      where: { id: requestId },
+      include: { family: true },
+    });
+    if (!req || !req.family) return null;
+    return {
+      id: req.family.id,
+      name: req.family.name,
+      ownerUserId: req.family.ownerUserId,
+      requireMfa: req.family.requireMfa,
+      approvalRule: req.family.approvalRule as any,
+      createdAt: req.family.createdAt.toISOString(),
+      updatedAt: req.family.updatedAt.toISOString(),
+    };
   }
 
   /**
    * Resolve family for a child usage record
    */
-  public getFamilyForUsage(childId: string): Family | undefined {
+  public async getFamilyForUsage(childId: string): Promise<Family | null> {
     return this.getFamilyForChild(childId);
   }
 
   /**
    * Validate if user can approve an access request taking family approval rule into account
    */
-  public canApproveRequest(userId: string, requestId: string): { allowed: boolean; reason?: string } {
-    const req = db.requests.get(requestId);
+  public async canApproveRequest(
+    userId: string,
+    requestId: string
+  ): Promise<{ allowed: boolean; reason?: string }> {
+    const req = await prisma.accessRequest.findUnique({
+      where: { id: requestId },
+    });
     if (!req) {
       return { allowed: false, reason: 'Request not found.' };
     }
 
-    const family = this.getFamilyForRequest(requestId);
+    const family = await this.getFamilyForRequest(requestId);
     if (!family) {
       return { allowed: false, reason: 'Family not found for this request.' };
     }
 
-    const membership = this.getFamilyMembership(userId, family.id);
+    const membership = await this.getFamilyMembership(userId, family.id);
     if (!membership) {
-      return { allowed: false, reason: 'You are not a member of the family associated with this request.' };
+      return {
+        allowed: false,
+        reason: 'You are not a member of the family associated with this request.',
+      };
     }
 
     // Check base permission
-    if (!this.hasFamilyPermission(userId, family.id, FamilyPermission.REQUEST_APPROVE)) {
+    const hasPerm = await this.hasFamilyPermission(userId, family.id, FamilyPermission.REQUEST_APPROVE);
+    if (!hasPerm) {
       return { allowed: false, reason: 'Your family role does not permit approving access requests.' };
     }
 
     // If family rule is OWNER_ONLY, only OWNER can approve
     if (family.approvalRule === 'OWNER_ONLY' && membership.role !== 'OWNER') {
-      return { allowed: false, reason: 'Family policy requires the Family Owner to approve access requests.' };
+      return {
+        allowed: false,
+        reason: 'Family policy requires the Family Owner to approve access requests.',
+      };
     }
 
     return { allowed: true };
@@ -229,30 +320,60 @@ export class RbacService {
   /**
    * Record append-only system audit log for privileged administrative actions
    */
-  public logSystemAudit(actorUserId: string, action: string, details: string, ipAddress?: string): SystemAuditLog {
-    const actor = db.users.get(actorUserId);
-    const log: SystemAuditLog = {
-      id: `syslog-${nanoid(10)}`,
-      actorUserId,
-      actorEmail: actor?.email || 'unknown',
-      action,
-      details,
-      ipAddress,
-      timestamp: new Date().toISOString(),
+  public async logSystemAudit(
+    actorUserId: string,
+    action: string,
+    details: string,
+    ipAddress?: string
+  ): Promise<SystemAuditLog> {
+    const actor = await prisma.user.findUnique({
+      where: { id: actorUserId },
+      select: { email: true },
+    });
+
+    const id = `syslog-${nanoid(10)}`;
+    const log = await prisma.systemAuditLog.create({
+      data: {
+        id,
+        actorUserId,
+        actorEmail: actor?.email || 'unknown',
+        action,
+        details,
+        ipAddress: ipAddress || null,
+      },
+    });
+
+    return {
+      id: log.id,
+      actorUserId: log.actorUserId,
+      actorEmail: log.actorEmail,
+      action: log.action,
+      details: log.details,
+      timestamp: log.timestamp.toISOString(),
+      ipAddress: log.ipAddress || undefined,
     };
-    db.systemAuditLogs.push(log);
-    db.save();
-    return log;
   }
 
   /**
    * Get system audit logs (SYSTEM_ADMIN only)
    */
-  public getSystemAuditLogs(actorUserId: string): SystemAuditLog[] {
-    if (!this.hasSystemPermission(actorUserId, SystemPermission.SYSTEM_AUDIT_READ)) {
+  public async getSystemAuditLogs(actorUserId: string): Promise<SystemAuditLog[]> {
+    const hasPerm = await this.hasSystemPermission(actorUserId, SystemPermission.SYSTEM_AUDIT_READ);
+    if (!hasPerm) {
       throw new Error('Forbidden. System administrator privilege required to view system audit logs.');
     }
-    return [...db.systemAuditLogs].reverse();
+    const logs = await prisma.systemAuditLog.findMany({
+      orderBy: { timestamp: 'desc' },
+    });
+    return logs.map((log) => ({
+      id: log.id,
+      actorUserId: log.actorUserId,
+      actorEmail: log.actorEmail,
+      action: log.action,
+      details: log.details,
+      timestamp: log.timestamp.toISOString(),
+      ipAddress: log.ipAddress || undefined,
+    }));
   }
 
   /**
@@ -262,7 +383,7 @@ export class RbacService {
    * - Requires ENABLE_DEV_ADMIN_BOOTSTRAP === 'true'
    * - Requires valid x-admin-bootstrap-secret matching DEV_ADMIN_BOOTSTRAP_SECRET
    */
-  public bootstrapDevAdmin(userId: string, bootstrapSecret?: string): ParentUser {
+  public async bootstrapDevAdmin(userId: string, bootstrapSecret?: string): Promise<ParentUser> {
     const isProduction = process.env.NODE_ENV === 'production';
 
     // Production MUST reject bootstrap unconditionally, even if ENABLE_DEV_ADMIN_BOOTSTRAP=true
@@ -278,22 +399,40 @@ export class RbacService {
 
     const expectedSecret = process.env.DEV_ADMIN_BOOTSTRAP_SECRET;
     if (!expectedSecret || expectedSecret.trim().length < 16) {
-      throw new Error('Admin bootstrap requires DEV_ADMIN_BOOTSTRAP_SECRET (min 16 chars) configured in development.');
+      throw new Error(
+        'Admin bootstrap requires DEV_ADMIN_BOOTSTRAP_SECRET (min 16 chars) configured in development.'
+      );
     }
 
     if (!bootstrapSecret || bootstrapSecret !== expectedSecret) {
       throw new Error('Forbidden: Invalid admin bootstrap secret.');
     }
 
-    const user = db.users.get(userId);
-    if (!user) throw new Error('User not found.');
+    const updatedUser = await prisma.user.update({
+      where: { id: userId },
+      data: { systemRole: 'SYSTEM_ADMIN' },
+    });
 
-    user.systemRole = 'SYSTEM_ADMIN';
-    db.users.set(userId, user);
-    db.save();
+    await this.logSystemAudit(
+      userId,
+      'DEV_ADMIN_BOOTSTRAPPED',
+      `User ${updatedUser.email} promoted to SYSTEM_ADMIN via development bootstrap.`
+    );
 
-    this.logSystemAudit(userId, 'DEV_ADMIN_BOOTSTRAPPED', `User ${user.email} promoted to SYSTEM_ADMIN via development bootstrap.`);
-    return user;
+    return {
+      id: updatedUser.id,
+      email: updatedUser.email,
+      name: updatedUser.name,
+      passwordHash: updatedUser.passwordHash,
+      systemRole: updatedUser.systemRole as SystemRole,
+      emailVerified: updatedUser.emailVerified,
+      mfaEnabled: updatedUser.mfaEnabled,
+      mfaSecret: updatedUser.mfaSecret,
+      mfaRecoveryCodes: updatedUser.mfaRecoveryCodes,
+      totpLastUsedSteps: updatedUser.totpLastUsedSteps as any,
+      tokenVersion: updatedUser.tokenVersion,
+      createdAt: updatedUser.createdAt.toISOString(),
+    };
   }
 }
 

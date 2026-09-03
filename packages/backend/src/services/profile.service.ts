@@ -1,8 +1,7 @@
-import { db, ParentUser, UserSession, ParentNotificationPrefs } from '../db/store';
 import { prisma } from '../db/prisma';
+import { ParentUser, UserSession, ParentNotificationPrefs } from '../types/models';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import { familyService } from './family.service';
 import {
   validatePasswordPolicy,
   encryptMfaSecret,
@@ -14,6 +13,7 @@ import {
   generateLocalQrDataUrl,
   verifyTotpToken,
 } from '../utils/security';
+import { nanoid } from 'nanoid';
 
 export interface UserProfileResponse {
   id: string;
@@ -46,12 +46,16 @@ export class ProfileService {
   /**
    * Get authenticated parent's full profile
    */
-  public getProfile(userId: string): UserProfileResponse {
-    const user = db.users.get(userId);
+  public async getProfile(userId: string): Promise<UserProfileResponse> {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+    });
     if (!user) throw new Error('User not found.');
 
-    const member = Array.from(db.familyMembers.values()).find((m) => m.userId === userId);
-    const family = member ? db.families.get(member.familyId) : undefined;
+    const member = await prisma.familyMember.findFirst({
+      where: { userId },
+      include: { family: true },
+    });
 
     return {
       id: user.id,
@@ -61,7 +65,7 @@ export class ProfileService {
       profilePhoto: user.profilePhoto || '',
       timezone: user.timezone || 'UTC',
       language: user.language || 'en-US',
-      notificationPrefs: user.notificationPrefs || {
+      notificationPrefs: (user.notificationPrefs as any) || {
         emailAlerts: true,
         pushNotifications: true,
         requestAlerts: true,
@@ -70,17 +74,17 @@ export class ProfileService {
       },
       mfaEnabled: Boolean(user.mfaEnabled),
       emailVerified: Boolean(user.emailVerified),
-      lastLoginAt: user.lastLoginAt,
-      createdAt: user.createdAt,
+      lastLoginAt: user.lastLoginAt ? user.lastLoginAt.toISOString() : undefined,
+      createdAt: user.createdAt.toISOString(),
       familyRole: member?.role || 'OWNER',
-      familyName: family?.name || "Parent's Family",
+      familyName: member?.family?.name || "Parent's Family",
     };
   }
 
   /**
    * Update parent profile details
    */
-  public updateProfile(
+  public async updateProfile(
     userId: string,
     updates: {
       name?: string;
@@ -90,30 +94,33 @@ export class ProfileService {
       language?: string;
       notificationPrefs?: Partial<ParentNotificationPrefs>;
     }
-  ): UserProfileResponse {
-    const user = db.users.get(userId);
+  ): Promise<UserProfileResponse> {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new Error('User not found.');
 
-    if (updates.name) user.name = updates.name.trim();
-    if (updates.mobileNumber !== undefined) user.mobileNumber = updates.mobileNumber.trim();
-    if (updates.profilePhoto !== undefined) user.profilePhoto = updates.profilePhoto;
-    if (updates.timezone) user.timezone = updates.timezone;
-    if (updates.language) user.language = updates.language;
-    if (updates.notificationPrefs) {
-      user.notificationPrefs = {
-        ...(user.notificationPrefs || {
-          emailAlerts: true,
-          pushNotifications: true,
-          requestAlerts: true,
-          tamperAlerts: true,
-          weeklySummary: true,
-        }),
-        ...updates.notificationPrefs,
-      };
-    }
+    const currentPrefs = (user.notificationPrefs as any) || {
+      emailAlerts: true,
+      pushNotifications: true,
+      requestAlerts: true,
+      tamperAlerts: true,
+      weeklySummary: true,
+    };
 
-    db.users.set(userId, user);
-    db.save();
+    const newPrefs = updates.notificationPrefs
+      ? { ...currentPrefs, ...updates.notificationPrefs }
+      : currentPrefs;
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: {
+        name: updates.name ? updates.name.trim() : undefined,
+        mobileNumber: updates.mobileNumber !== undefined ? updates.mobileNumber.trim() : undefined,
+        profilePhoto: updates.profilePhoto !== undefined ? updates.profilePhoto : undefined,
+        timezone: updates.timezone || undefined,
+        language: updates.language || undefined,
+        notificationPrefs: newPrefs,
+      },
+    });
 
     return this.getProfile(userId);
   }
@@ -121,13 +128,13 @@ export class ProfileService {
   /**
    * Change account password
    */
-  public changePassword(
+  public async changePassword(
     userId: string,
     currentPassword: string,
     newPassword: string,
     currentSessionId?: string
-  ): void {
-    const user = db.users.get(userId);
+  ): Promise<void> {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new Error('User not found.');
 
     if (!bcrypt.compareSync(currentPassword, user.passwordHash)) {
@@ -137,44 +144,64 @@ export class ProfileService {
     validatePasswordPolicy(newPassword, Boolean(user.mfaEnabled));
 
     const salt = bcrypt.genSaltSync(12);
-    user.passwordHash = bcrypt.hashSync(newPassword, salt);
-    user.tokenVersion = (user.tokenVersion || 1) + 1; // Invalidate all prior tokens
-    db.users.set(userId, user);
+    const newHash = bcrypt.hashSync(newPassword, salt);
 
-    // Invalidate other active sessions
-    for (const session of db.userSessions.values()) {
-      if (session.userId === userId && session.id !== currentSessionId) {
-        session.isRevoked = true;
+    await prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: userId },
+        data: {
+          passwordHash: newHash,
+          tokenVersion: { increment: 1 },
+        },
+      });
+
+      // Invalidate other active sessions
+      if (currentSessionId) {
+        await tx.userSession.updateMany({
+          where: {
+            userId,
+            id: { not: currentSessionId },
+          },
+          data: { isRevoked: true },
+        });
       }
-    }
 
-    db.save();
-
-    const family = familyService.getOrCreateUserFamily(userId);
-    familyService.logAudit(
-      family.id,
-      userId,
-      user.name,
-      'PASSWORD_CHANGED',
-      `Account password was updated successfully. Other sessions revoked.`
-    );
+      const fam = await tx.familyMember.findFirst({
+        where: { userId },
+      });
+      if (fam) {
+        await tx.familyAuditLog.create({
+          data: {
+            id: `log-${nanoid(10)}`,
+            familyId: fam.familyId,
+            actorUserId: userId,
+            actorName: user.name,
+            action: 'PASSWORD_CHANGED',
+            details: 'Account password was updated successfully. Other sessions revoked.',
+          },
+        });
+      }
+    });
   }
 
   /**
    * MFA Setup: Generate 160-bit Base32 TOTP Secret & Local QR Data URL
    */
-  public async setupMfa(userId: string): Promise<{ secret: string; otpAuthUrl: string; qrDataUrl: string }> {
-    const user = db.users.get(userId);
+  public async setupMfa(
+    userId: string
+  ): Promise<{ secret: string; otpAuthUrl: string; qrDataUrl: string }> {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new Error('User not found.');
 
     const rawSecret = generateBase32Secret();
-    // Encrypt at rest with AES-256-GCM
-    user.pendingMfaSecret = encryptMfaSecret(rawSecret);
-    db.users.set(userId, user);
-    db.save();
+    const encryptedSecret = encryptMfaSecret(rawSecret);
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: { pendingMfaSecret: encryptedSecret },
+    });
 
     const otpAuthUrl = generateOtpAuthUri(user.email, rawSecret, 'SafeBrowse Family');
-    // Generate local QR code without calling external APIs
     const qrDataUrl = await generateLocalQrDataUrl(otpAuthUrl);
 
     return {
@@ -185,10 +212,14 @@ export class ProfileService {
   }
 
   /**
-   * MFA Verify & Activate: Check 6-digit OTP code against pending secret and issue 8 hashed recovery codes
+   * MFA Verify & Activate
    */
-  public verifyAndEnableMfa(userId: string, otpCode: string, timeSec?: number): { recoveryCodes: string[] } {
-    const user = db.users.get(userId);
+  public async verifyAndEnableMfa(
+    userId: string,
+    otpCode: string,
+    timeSec?: number
+  ): Promise<{ recoveryCodes: string[] }> {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user || !user.pendingMfaSecret) {
       throw new Error('MFA setup has not been initiated.');
     }
@@ -200,7 +231,6 @@ export class ProfileService {
       throw new Error('Invalid MFA verification code. Please check your authenticator app and try again.');
     }
 
-    // Generate 8 high-entropy recovery codes (e.g. 8A3F-C29D)
     const recoveryCodes: string[] = [];
     const hashedCodes: string[] = [];
 
@@ -212,103 +242,125 @@ export class ProfileService {
       hashedCodes.push(bcrypt.hashSync(code, 12));
     }
 
-    user.mfaEnabled = true;
-    user.mfaSecret = user.pendingMfaSecret;
-    user.pendingMfaSecret = undefined;
-    user.mfaRecoveryCodes = hashedCodes;
+    const totpSteps = (user.totpLastUsedSteps as any) ? { ...(user.totpLastUsedSteps as any) } : {};
     if (totpResult.acceptedTimeStep !== undefined) {
-      if (!user.totpLastUsedSteps) user.totpLastUsedSteps = {};
-      user.totpLastUsedSteps['mfa_setup'] = totpResult.acceptedTimeStep;
+      totpSteps['mfa_setup'] = totpResult.acceptedTimeStep;
     }
-    db.users.set(userId, user);
-    db.save();
 
-    const family = familyService.getOrCreateUserFamily(userId);
-    familyService.logAudit(family.id, userId, user.name, 'MFA_ENABLED', `Multi-Factor Authentication was enabled.`);
+    await prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: userId },
+        data: {
+          mfaEnabled: true,
+          mfaSecret: user.pendingMfaSecret,
+          pendingMfaSecret: null,
+          mfaRecoveryCodes: hashedCodes,
+          totpLastUsedSteps: totpSteps,
+        },
+      });
 
-    // Display plaintext recovery codes only once upon activation
+      const fam = await tx.familyMember.findFirst({
+        where: { userId },
+      });
+      if (fam) {
+        await tx.familyAuditLog.create({
+          data: {
+            id: `log-${nanoid(10)}`,
+            familyId: fam.familyId,
+            actorUserId: userId,
+            actorName: user.name,
+            action: 'MFA_ENABLED',
+            details: 'Multi-Factor Authentication was enabled.',
+          },
+        });
+      }
+    });
+
     return { recoveryCodes };
   }
 
   /**
-   * Disable MFA with step-up authentication (password + OTP or recovery code).
-   * Consumes the recovery code if one was used in step-up.
-   * Tracks TOTP timestep to prevent same-code replay.
+   * Disable MFA with step-up authentication
    */
-  public disableMfa(userId: string, passwordCheck: string, otpCode?: string, timeSec?: number): void {
-    const user = db.users.get(userId);
+  public async disableMfa(
+    userId: string,
+    passwordCheck: string,
+    otpCode?: string,
+    timeSec?: number
+  ): Promise<void> {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new Error('User not found.');
 
-    const stepUp = verifyStepUpAuth(user, passwordCheck, otpCode, timeSec);
+    const stepUp = verifyStepUpAuth(user as any, passwordCheck, otpCode, timeSec);
 
-    // TOTP timestep replay protection for MFA disablement
+    const updatedRecoveryCodes = [...user.mfaRecoveryCodes];
+    const updatedTotpSteps = (user.totpLastUsedSteps as any) ? { ...(user.totpLastUsedSteps as any) } : {};
+
     if (stepUp.method === 'TOTP' && stepUp.totpTimeStep !== undefined) {
-      const lastUsed = user.totpLastUsedSteps?.['mfa_disable'];
+      const lastUsed = updatedTotpSteps['mfa_disable'];
       if (lastUsed !== undefined && lastUsed === stepUp.totpTimeStep) {
         throw new Error('This TOTP code has already been used. Please wait for the next code.');
       }
-      if (!user.totpLastUsedSteps) user.totpLastUsedSteps = {};
-      user.totpLastUsedSteps['mfa_disable'] = stepUp.totpTimeStep;
+      updatedTotpSteps['mfa_disable'] = stepUp.totpTimeStep;
+    } else if (stepUp.method === 'RECOVERY_CODE' && stepUp.recoveryCodeIndex !== undefined) {
+      updatedRecoveryCodes.splice(stepUp.recoveryCodeIndex, 1);
     }
 
-    // Atomically consume recovery code if used in step-up
-    if (stepUp.method === 'RECOVERY_CODE' && stepUp.recoveryCodeIndex !== undefined) {
-      user.mfaRecoveryCodes!.splice(stepUp.recoveryCodeIndex, 1);
-    }
+    await prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: userId },
+        data: {
+          mfaEnabled: false,
+          mfaSecret: null,
+          pendingMfaSecret: null,
+          mfaRecoveryCodes: [],
+          totpLastUsedSteps: updatedTotpSteps,
+        },
+      });
 
-    user.mfaEnabled = false;
-    user.mfaSecret = undefined;
-    user.pendingMfaSecret = undefined;
-    user.mfaRecoveryCodes = [];
-    db.users.set(userId, user);
-    db.save();
-
-    const family = familyService.getOrCreateUserFamily(userId);
-    familyService.logAudit(family.id, userId, user.name, 'MFA_DISABLED', `Multi-Factor Authentication was disabled.`);
+      const fam = await tx.familyMember.findFirst({
+        where: { userId },
+      });
+      if (fam) {
+        await tx.familyAuditLog.create({
+          data: {
+            id: `log-${nanoid(10)}`,
+            familyId: fam.familyId,
+            actorUserId: userId,
+            actorName: user.name,
+            action: 'MFA_DISABLED',
+            details: 'Multi-Factor Authentication was disabled.',
+          },
+        });
+      }
+    });
   }
 
   /**
-   * Regenerate MFA Recovery Codes (Requires step-up authentication)
-   * Password and MFA verification (TOTP / existing recovery code) are MANDATORY.
+   * Regenerate MFA Recovery Codes
    */
-  public regenerateRecoveryCodes(
+  public async regenerateRecoveryCodes(
     userId: string,
     password: string,
     otpCode?: string,
     timeSec?: number
-  ): { recoveryCodes: string[] } {
-    const user = db.users.get(userId);
+  ): Promise<{ recoveryCodes: string[] }> {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
     if (!user || !user.mfaEnabled) {
       throw new Error('MFA is not enabled on this account.');
     }
 
-    // Always enforce step-up authentication unconditionally
-    const stepUp = verifyStepUpAuth(user, password, otpCode, timeSec);
+    const stepUp = verifyStepUpAuth(user as any, password, otpCode, timeSec);
 
-    // Anti-replay check for TOTP timestep on recovery codes regeneration
+    const updatedTotpSteps = (user.totpLastUsedSteps as any) ? { ...(user.totpLastUsedSteps as any) } : {};
     if (stepUp.method === 'TOTP' && stepUp.totpTimeStep !== undefined) {
-      const lastUsed = user.totpLastUsedSteps?.['mfa_recovery_regen'];
+      const lastUsed = updatedTotpSteps['mfa_recovery_regen'];
       if (lastUsed !== undefined && lastUsed === stepUp.totpTimeStep) {
         throw new Error('This TOTP code has already been used. Please wait for the next code.');
       }
-      if (!user.totpLastUsedSteps) user.totpLastUsedSteps = {};
-      user.totpLastUsedSteps['mfa_recovery_regen'] = stepUp.totpTimeStep;
+      updatedTotpSteps['mfa_recovery_regen'] = stepUp.totpTimeStep;
     }
 
-    const family = familyService.getOrCreateUserFamily(userId);
-
-    // If step-up was performed with a recovery code, log that it was used
-    if (stepUp.method === 'RECOVERY_CODE' && stepUp.recoveryCodeIndex !== undefined) {
-      familyService.logAudit(
-        family.id,
-        userId,
-        user.name,
-        'MFA_RECOVERY_CODE_USED',
-        `Recovery code used for step-up authentication during code regeneration.`
-      );
-    }
-
-    // Invalidate all previous recovery codes and generate 8 new high-entropy codes
     const recoveryCodes: string[] = [];
     const hashedCodes: string[] = [];
 
@@ -320,148 +372,163 @@ export class ProfileService {
       hashedCodes.push(bcrypt.hashSync(code, 12));
     }
 
-    user.mfaRecoveryCodes = hashedCodes;
-    db.users.set(userId, user);
-    db.save();
+    await prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: userId },
+        data: {
+          mfaRecoveryCodes: hashedCodes,
+          totpLastUsedSteps: updatedTotpSteps,
+        },
+      });
 
-    familyService.logAudit(
-      family.id,
-      userId,
-      user.name,
-      'RECOVERY_CODES_REGENERATED',
-      `One-time MFA recovery codes were regenerated. Previous codes invalidated.`
-    );
+      const fam = await tx.familyMember.findFirst({
+        where: { userId },
+      });
+      if (fam) {
+        await tx.familyAuditLog.create({
+          data: {
+            id: `log-${nanoid(10)}`,
+            familyId: fam.familyId,
+            actorUserId: userId,
+            actorName: user.name,
+            action: 'MFA_RECOVERY_CODES_REGENERATED',
+            details: 'Regenerated MFA one-time recovery codes via step-up authentication.',
+          },
+        });
+      }
+    });
 
     return { recoveryCodes };
   }
 
   /**
-   * Get active user sessions (Sanitized: NEVER returns tokens, hashes or secrets)
+   * Get all active sessions for user
    */
-  public getSessions(userId: string, currentSessionId?: string): SanitizedSessionResponse[] {
-    return Array.from(db.userSessions.values())
-      .filter((s) => s.userId === userId && !s.isRevoked && new Date(s.expiresAt).getTime() > Date.now())
-      .sort((a, b) => new Date(b.lastSeenAt).getTime() - new Date(a.lastSeenAt).getTime())
-      .map((s) => ({
-        id: s.id,
-        deviceInfo: s.deviceInfo,
-        ipAddress: s.ipAddress,
-        createdAt: s.createdAt,
-        lastSeenAt: s.lastSeenAt,
-        expiresAt: s.expiresAt,
-        isCurrent: currentSessionId ? s.id === currentSessionId : false,
-      }));
+  public async getUserSessions(
+    userId: string,
+    currentSessionId?: string
+  ): Promise<SanitizedSessionResponse[]> {
+    const sessions = await prisma.userSession.findMany({
+      where: {
+        userId,
+        isRevoked: false,
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { lastSeenAt: 'desc' },
+    });
+
+    return sessions.map((s) => ({
+      id: s.id,
+      deviceInfo: s.deviceInfo,
+      ipAddress: s.ipAddress || undefined,
+      createdAt: s.createdAt.toISOString(),
+      lastSeenAt: s.lastSeenAt.toISOString(),
+      expiresAt: s.expiresAt.toISOString(),
+      isCurrent: currentSessionId ? s.id === currentSessionId : false,
+    }));
+  }
+
+  public async getSessions(userId: string, currentSessionId?: string): Promise<SanitizedSessionResponse[]> {
+    return this.getUserSessions(userId, currentSessionId);
   }
 
   /**
    * Revoke a specific session
    */
-  public revokeSession(userId: string, sessionId: string): void {
-    const session = db.userSessions.get(sessionId);
+  public async revokeSession(userId: string, sessionId: string): Promise<void> {
+    const session = await prisma.userSession.findUnique({
+      where: { id: sessionId },
+    });
     if (!session || session.userId !== userId) {
       throw new Error('Session not found.');
     }
-    session.isRevoked = true;
-    db.userSessions.set(sessionId, session);
-    db.save();
 
-    const user = db.users.get(userId);
+    await prisma.userSession.update({
+      where: { id: sessionId },
+      data: { isRevoked: true },
+    });
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
     if (user) {
-      const family = familyService.getOrCreateUserFamily(userId);
-      familyService.logAudit(
-        family.id,
-        userId,
-        user.name,
-        'SESSION_REVOKED',
-        `User session (${session.deviceInfo}) was revoked.`
-      );
+      const fam = await prisma.familyMember.findFirst({ where: { userId } });
+      if (fam) {
+        await prisma.familyAuditLog.create({
+          data: {
+            id: `log-${nanoid(10)}`,
+            familyId: fam.familyId,
+            actorUserId: userId,
+            actorName: user.name,
+            action: 'SESSION_REVOKED',
+            details: `User session (${session.deviceInfo}) was revoked.`,
+          },
+        });
+      }
     }
   }
 
   /**
    * Revoke all other sessions
    */
-  public revokeOtherSessions(userId: string, currentSessionId?: string): void {
-    for (const [id, s] of db.userSessions.entries()) {
-      if (s.userId === userId && s.id !== currentSessionId) {
-        s.isRevoked = true;
-        db.userSessions.set(id, s);
-      }
-    }
-    db.save();
-
-    const user = db.users.get(userId);
-    if (user) {
-      const family = familyService.getOrCreateUserFamily(userId);
-      familyService.logAudit(
-        family.id,
+  public async revokeOtherSessions(userId: string, currentSessionId?: string): Promise<void> {
+    await prisma.userSession.updateMany({
+      where: {
         userId,
-        user.name,
-        'ALL_OTHER_SESSIONS_REVOKED',
-        `All other active sessions were revoked.`
-      );
+        id: currentSessionId ? { not: currentSessionId } : undefined,
+      },
+      data: { isRevoked: true },
+    });
+
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (user) {
+      const fam = await prisma.familyMember.findFirst({ where: { userId } });
+      if (fam) {
+        await prisma.familyAuditLog.create({
+          data: {
+            id: `log-${nanoid(10)}`,
+            familyId: fam.familyId,
+            actorUserId: userId,
+            actorName: user.name,
+            action: 'ALL_OTHER_SESSIONS_REVOKED',
+            details: 'All other active sessions were revoked.',
+          },
+        });
+      }
     }
   }
 
   /**
    * Delete User Account Transactionally
-   * - Sole OWNER cannot delete account without transferring ownership first.
-   * - Deleting PARENT or VIEWER removes their family memberships, cascades sessions/tokens, but does not delete shared family resources.
    */
-  public async deleteAccount(userId: string): Promise<void> {
-    if (process.env.DATABASE_URL) {
-      return prisma.$transaction(async (tx) => {
-        // Check if user is the OWNER of any family
-        const ownedFamilies = await tx.family.findMany({
-          where: { ownerUserId: userId },
-        });
+  public async deleteAccount(userId: string, password?: string): Promise<void> {
+    if (password) {
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
+        throw new Error('Invalid password provided.');
+      }
+    }
 
-        if (ownedFamilies.length > 0) {
-          throw new Error(
-            `Cannot delete account: You are the sole owner of family '${ownedFamilies[0].name}'. You must transfer family ownership before deleting your account.`
-          );
-        }
-
-        // Delete user's memberships (does not delete family or resources)
-        await tx.familyMember.deleteMany({
-          where: { userId },
-        });
-
-        // Delete user (sessions, tokens, challenges cascade via schema)
-        await tx.user.delete({
-          where: { id: userId },
-        });
-
-        // Update in-memory store
-        for (const [id, m] of db.familyMembers.entries()) {
-          if (m.userId === userId) db.familyMembers.delete(id);
-        }
-        for (const [id, s] of db.userSessions.entries()) {
-          if (s.userId === userId) db.userSessions.delete(id);
-        }
-        db.users.delete(userId);
+    return prisma.$transaction(async (tx) => {
+      // Check if user is the OWNER of any family
+      const ownedFamilies = await tx.family.findMany({
+        where: { ownerUserId: userId },
       });
-    }
 
-    // In-memory fallback
-    const ownedFamilies = Array.from(db.families.values()).filter((f) => f.ownerUserId === userId);
-    if (ownedFamilies.length > 0) {
-      throw new Error(
-        `Cannot delete account: You are the sole owner of family '${ownedFamilies[0].name}'. You must transfer family ownership before deleting your account.`
-      );
-    }
+      if (ownedFamilies.length > 0) {
+        throw new Error(
+          `Cannot delete account: You are the sole owner of family '${ownedFamilies[0].name}'. You must transfer family ownership before deleting your account.`
+        );
+      }
 
-    // Remove memberships
-    for (const [id, m] of db.familyMembers.entries()) {
-      if (m.userId === userId) db.familyMembers.delete(id);
-    }
-    // Remove sessions
-    for (const [id, s] of db.userSessions.entries()) {
-      if (s.userId === userId) db.userSessions.delete(id);
-    }
-    // Remove user
-    db.users.delete(userId);
-    db.save();
+      // Delete user's memberships (does not delete family or resources)
+      await tx.familyMember.deleteMany({
+        where: { userId },
+      });
+
+      // Delete user (sessions, tokens, challenges cascade via schema)
+      await tx.user.delete({
+        where: { id: userId },
+      });
+    });
   }
 }
 

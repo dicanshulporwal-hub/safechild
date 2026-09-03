@@ -102,22 +102,24 @@ async function runPostgresTransactionProbe() {
   // Helper: create family directly in Postgres
   async function createPgFamily(ownerUserId: string, name: string) {
     const familyId = `fam-${nanoid(10)}`;
-    const family = await prisma.family.create({
-      data: {
-        id: familyId,
-        name,
-        ownerUserId,
-      },
+    return prisma.$transaction(async (tx) => {
+      const family = await tx.family.create({
+        data: {
+          id: familyId,
+          name,
+          ownerUserId,
+        },
+      });
+      await tx.familyMember.create({
+        data: {
+          id: `fm-${nanoid(10)}`,
+          familyId,
+          userId: ownerUserId,
+          role: 'OWNER',
+        },
+      });
+      return family;
     });
-    await prisma.familyMember.create({
-      data: {
-        id: `fm-${nanoid(10)}`,
-        familyId,
-        userId: ownerUserId,
-        role: 'OWNER',
-      },
-    });
-    return family;
   }
 
   // Helper: add member directly in Postgres
@@ -127,7 +129,7 @@ async function runPostgresTransactionProbe() {
         id: `fm-${nanoid(10)}`,
         familyId,
         userId,
-        role,
+        role: role as any,
       },
     });
   }
@@ -269,8 +271,8 @@ async function runPostgresTransactionProbe() {
     const famB = await createPgFamily(uOwnerB.id, 'Family B');
 
     // Check RBAC cross-family access
-    const canReadCross = rbacService.hasFamilyPermission(uOwnerB.id, famA.id, FamilyPermission.CHILD_READ);
-    const canModifyCross = rbacService.hasFamilyPermission(uOwnerB.id, famA.id, FamilyPermission.POLICY_MANAGE);
+    const canReadCross = await rbacService.hasFamilyPermission(uOwnerB.id, famA.id, FamilyPermission.CHILD_READ);
+    const canModifyCross = await rbacService.hasFamilyPermission(uOwnerB.id, famA.id, FamilyPermission.POLICY_MANAGE);
 
     results.crossFamilyResourceAccessed = canReadCross;
     results.crossFamilyResourceModified = canModifyCross;
@@ -343,7 +345,7 @@ async function runPostgresTransactionProbe() {
     // -------------------------------------------------------------
     // Invariant 11: Parent Cannot Access System Admin
     // -------------------------------------------------------------
-    const isSysAdmin = rbacService.isSystemAdmin(uOwnerA.id);
+    const isSysAdmin = await rbacService.isSystemAdmin(uOwnerA.id);
     results.parentTreatedAsSystemAdmin = isSysAdmin;
 
     // -------------------------------------------------------------
@@ -388,7 +390,7 @@ async function runPostgresTransactionProbe() {
 
     let sessionlessAccepted = false;
     try {
-      authService.verifyToken(badJwt);
+      await authService.verifyToken(badJwt);
       sessionlessAccepted = true;
     } catch {
       sessionlessAccepted = false;

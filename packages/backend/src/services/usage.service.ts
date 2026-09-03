@@ -1,14 +1,13 @@
-import { db } from '../db/store';
+import { prisma } from '../db/prisma';
 import {
   UsageBudget,
-  ChildUsageRecord,
   BudgetTargetType,
   SafeSearchConfig,
   Policy,
 } from '@safebrowse/shared';
 import { nanoid } from 'nanoid';
-import { familyService } from './family.service';
 import { wsManager } from './websocket.service';
+import { rbacService } from './rbac.service';
 
 export interface BudgetUsageSummary {
   budget: UsageBudget;
@@ -30,71 +29,69 @@ export class UsageService {
   /**
    * Record Cross-Device Usage Sync with Time Integrity Validation
    */
-  public recordUsageSync(
+  public async recordUsageSync(
     childId: string,
     deviceId: string,
     target: string,
     targetType: BudgetTargetType,
     secondsIncrement: number,
     clientWallIso?: string
-  ): { consumedSeconds: number; remainingSeconds: number; isLimitReached: boolean } {
-    const child = db.children.get(childId);
+  ): Promise<{ consumedSeconds: number; remainingSeconds: number; isLimitReached: boolean }> {
+    const child = await prisma.child.findUnique({
+      where: { id: childId },
+    });
     if (!child) throw new Error('Child profile not found.');
 
-    const policy = db.policies.get(childId);
+    const policy = await prisma.policy.findUnique({
+      where: { childId },
+    });
     if (!policy) throw new Error('Child policy not found.');
 
-    const budget = policy.usageBudgets?.find(
+    const usageBudgets = (policy.usageBudgets as any as UsageBudget[]) || [];
+    const budget = usageBudgets.find(
       (b) => b.target.toLowerCase() === target.toLowerCase() && b.targetType === targetType && b.enabled
     );
 
     const todayDate = this.getTodayDateString(budget?.timezone || 'UTC');
-    const usageKey = `${childId}:${target.toLowerCase()}:${todayDate}`;
+    const cleanIncrement = Math.max(0, Math.min(secondsIncrement, 3600));
 
-    let usage = db.childUsage.get(usageKey);
-    const nowIso = new Date().toISOString();
+    const existingUsage = await prisma.childUsageRecord.findUnique({
+      where: {
+        childId_target_date: {
+          childId,
+          target: target.toLowerCase(),
+          date: todayDate,
+        },
+      },
+    });
 
-    if (!usage) {
-      usage = {
+    const now = new Date();
+    const id = existingUsage ? existingUsage.id : `use-${nanoid(10)}`;
+
+    const usage = await prisma.childUsageRecord.upsert({
+      where: {
+        childId_target_date: {
+          childId,
+          target: target.toLowerCase(),
+          date: todayDate,
+        },
+      },
+      create: {
+        id,
+        familyId: child.familyId,
         childId,
+        deviceId,
         target: target.toLowerCase(),
-        targetType,
         date: todayDate,
-        consumedSeconds: 0,
-        lastCheckpointTimestamp: nowIso,
-        lastDeviceUsed: deviceId,
-        updatedAt: nowIso,
-      };
-    }
-
-    // Time Integrity & Clock Rollback Detection
-    if (clientWallIso) {
-      const clientTime = new Date(clientWallIso).getTime();
-      const lastCheckTime = new Date(usage.lastCheckpointTimestamp).getTime();
-
-      // If client clock is significantly behind last trusted checkpoint (>60s)
-      if (clientTime < lastCheckTime - 60000) {
-        if (child.familyId) {
-          familyService.logAudit(
-            child.familyId,
-            childId,
-            child.name,
-            'CLOCK_TAMPER_DETECTED',
-            `Suspicious clock rollback detected on device ${deviceId} (Client: ${clientWallIso}, Server Last Seen: ${usage.lastCheckpointTimestamp}). Consumed quota preserved.`
-          );
-        }
-      }
-    }
-
-    // Increment consumed seconds monotonically
-    const cleanIncrement = Math.max(0, Math.min(secondsIncrement, 3600)); // Cap single increment to 1 hour
-    usage.consumedSeconds += cleanIncrement;
-    usage.lastCheckpointTimestamp = nowIso;
-    usage.lastDeviceUsed = deviceId;
-    usage.updatedAt = nowIso;
-
-    db.childUsage.set(usageKey, usage);
-    db.save();
+        consumedSeconds: cleanIncrement,
+        lastCheckpointTimestamp: now,
+      },
+      update: {
+        consumedSeconds: { increment: cleanIncrement },
+        deviceId,
+        lastCheckpointTimestamp: now,
+      },
+    });
 
     let remainingSeconds = 999999;
     let isLimitReached = false;
@@ -110,7 +107,6 @@ export class UsageService {
       }
     }
 
-    // Broadcast usage sync update to all connected devices for this child
     wsManager.broadcast({
       type: 'USAGE_UPDATED',
       payload: {
@@ -135,22 +131,30 @@ export class UsageService {
   /**
    * Get all active budgets with live consumed seconds for today
    */
-  public getBudgetsWithUsage(childId: string): BudgetUsageSummary[] {
-    const policy = db.policies.get(childId);
-    if (!policy || !policy.usageBudgets) return [];
+  public async getBudgetsWithUsage(childId: string): Promise<BudgetUsageSummary[]> {
+    const policy = await prisma.policy.findUnique({
+      where: { childId },
+    });
+    const usageBudgets = (policy?.usageBudgets as any as UsageBudget[]) || [];
+    if (usageBudgets.length === 0) return [];
 
     const results: BudgetUsageSummary[] = [];
 
-    for (const budget of policy.usageBudgets) {
+    for (const budget of usageBudgets) {
       const todayDate = this.getTodayDateString(budget.timezone || 'UTC');
-      const usageKey = `${childId}:${budget.target.toLowerCase()}:${todayDate}`;
-      const usage = db.childUsage.get(usageKey);
-      const consumed = usage ? usage.consumedSeconds : 0;
+      const usage = await prisma.childUsageRecord.findUnique({
+        where: {
+          childId_target_date: {
+            childId,
+            target: budget.target.toLowerCase(),
+            date: todayDate,
+          },
+        },
+      });
 
+      const consumed = usage ? usage.consumedSeconds : 0;
       const totalAllowed = budget.dailyLimitSeconds + (budget.bonusSeconds || 0);
-      const remainingSeconds = budget.unlimitedToday
-        ? 999999
-        : Math.max(0, totalAllowed - consumed);
+      const remainingSeconds = budget.unlimitedToday ? 999999 : Math.max(0, totalAllowed - consumed);
       const isLimitReached = !budget.unlimitedToday && consumed >= totalAllowed;
 
       results.push({
@@ -167,20 +171,21 @@ export class UsageService {
   /**
    * Set or update a usage limit (Screen Time Quota)
    */
-  public setUsageBudget(
+  public async setUsageBudget(
     childId: string,
     target: string,
     targetType: BudgetTargetType,
     dailyLimitMinutes: number,
     actorUserId?: string
-  ): UsageBudget {
-    const policy = db.policies.get(childId);
+  ): Promise<UsageBudget> {
+    const policy = await prisma.policy.findUnique({
+      where: { childId },
+    });
     if (!policy) throw new Error('Policy not found.');
 
-    if (!policy.usageBudgets) policy.usageBudgets = [];
-
+    const usageBudgets = (policy.usageBudgets as any as UsageBudget[]) || [];
     const cleanTarget = target.trim();
-    const existingIndex = policy.usageBudgets.findIndex(
+    const existingIndex = usageBudgets.findIndex(
       (b) => b.target.toLowerCase() === cleanTarget.toLowerCase() && b.targetType === targetType
     );
 
@@ -191,13 +196,13 @@ export class UsageService {
 
     if (existingIndex >= 0) {
       budget = {
-        ...policy.usageBudgets[existingIndex],
+        ...usageBudgets[existingIndex],
         dailyLimitSeconds,
         enabled: true,
         updatedAt: now,
         policyVersion: policy.version + 1,
       };
-      policy.usageBudgets[existingIndex] = budget;
+      usageBudgets[existingIndex] = budget;
     } else {
       budget = {
         id: `ub-${nanoid(10)}`,
@@ -211,57 +216,75 @@ export class UsageService {
         policyVersion: policy.version + 1,
         updatedAt: now,
       };
-      policy.usageBudgets.push(budget);
+      usageBudgets.push(budget);
     }
 
-    policy.version += 1;
-    policy.updatedAt = now;
-    db.policies.set(childId, policy);
-    db.save();
+    await prisma.policy.update({
+      where: { childId },
+      data: {
+        usageBudgets: usageBudgets as any,
+        version: { increment: 1 },
+      },
+    });
 
-    const child = db.children.get(childId);
+    const child = await prisma.child.findUnique({ where: { id: childId } });
     if (child && actorUserId && child.familyId) {
-      const actor = db.users.get(actorUserId);
-      familyService.logAudit(
-        child.familyId,
-        actorUserId,
-        actor?.name || 'Parent',
-        'SCREEN_TIME_UPDATED',
-        `Set daily limit of ${dailyLimitMinutes} min on '${cleanTarget}' for ${child.name}`
-      );
+      const actor = await prisma.user.findUnique({ where: { id: actorUserId } });
+      await prisma.familyAuditLog.create({
+        data: {
+          id: `log-${nanoid(10)}`,
+          familyId: child.familyId,
+          actorUserId,
+          actorName: actor?.name || 'Parent',
+          action: 'SCREEN_TIME_UPDATED',
+          details: `Set daily limit of ${dailyLimitMinutes} min on '${cleanTarget}' for ${child.name}`,
+        },
+      });
     }
 
     return budget;
   }
 
   /**
-   * Add bonus minutes to a budget (e.g. +15m, +30m)
+   * Add bonus minutes to a budget
    */
-  public addBonusTime(childId: string, budgetId: string, bonusMinutes: number, actorUserId?: string) {
-    const policy = db.policies.get(childId);
-    if (!policy || !policy.usageBudgets) throw new Error('Budget not found.');
-
-    const budget = policy.usageBudgets.find((b) => b.id === budgetId);
+  public async addBonusTime(
+    childId: string,
+    budgetId: string,
+    bonusMinutes: number,
+    actorUserId?: string
+  ): Promise<UsageBudget> {
+    const policy = await prisma.policy.findUnique({
+      where: { childId },
+    });
+    const usageBudgets = (policy?.usageBudgets as any as UsageBudget[]) || [];
+    const budget = usageBudgets.find((b) => b.id === budgetId);
     if (!budget) throw new Error('Budget not found.');
 
     budget.bonusSeconds = (budget.bonusSeconds || 0) + bonusMinutes * 60;
     budget.updatedAt = new Date().toISOString();
-    policy.version += 1;
-    policy.updatedAt = new Date().toISOString();
 
-    db.policies.set(childId, policy);
-    db.save();
+    await prisma.policy.update({
+      where: { childId },
+      data: {
+        usageBudgets: usageBudgets as any,
+        version: { increment: 1 },
+      },
+    });
 
-    const child = db.children.get(childId);
+    const child = await prisma.child.findUnique({ where: { id: childId } });
     if (child && actorUserId && child.familyId) {
-      const actor = db.users.get(actorUserId);
-      familyService.logAudit(
-        child.familyId,
-        actorUserId,
-        actor?.name || 'Parent',
-        'BONUS_TIME_GRANTED',
-        `Granted +${bonusMinutes} min bonus on '${budget.target}' for ${child.name}`
-      );
+      const actor = await prisma.user.findUnique({ where: { id: actorUserId } });
+      await prisma.familyAuditLog.create({
+        data: {
+          id: `log-${nanoid(10)}`,
+          familyId: child.familyId,
+          actorUserId,
+          actorName: actor?.name || 'Parent',
+          action: 'BONUS_TIME_GRANTED',
+          details: `Granted +${bonusMinutes} min bonus on '${budget.target}' for ${child.name}`,
+        },
+      });
     }
 
     return budget;
@@ -270,31 +293,42 @@ export class UsageService {
   /**
    * Set unlimited access for today
    */
-  public setUnlimitedToday(childId: string, budgetId: string, actorUserId?: string) {
-    const policy = db.policies.get(childId);
-    if (!policy || !policy.usageBudgets) throw new Error('Budget not found.');
-
-    const budget = policy.usageBudgets.find((b) => b.id === budgetId);
+  public async setUnlimitedToday(
+    childId: string,
+    budgetId: string,
+    actorUserId?: string
+  ): Promise<UsageBudget> {
+    const policy = await prisma.policy.findUnique({
+      where: { childId },
+    });
+    const usageBudgets = (policy?.usageBudgets as any as UsageBudget[]) || [];
+    const budget = usageBudgets.find((b) => b.id === budgetId);
     if (!budget) throw new Error('Budget not found.');
 
     budget.unlimitedToday = true;
     budget.updatedAt = new Date().toISOString();
-    policy.version += 1;
-    policy.updatedAt = new Date().toISOString();
 
-    db.policies.set(childId, policy);
-    db.save();
+    await prisma.policy.update({
+      where: { childId },
+      data: {
+        usageBudgets: usageBudgets as any,
+        version: { increment: 1 },
+      },
+    });
 
-    const child = db.children.get(childId);
+    const child = await prisma.child.findUnique({ where: { id: childId } });
     if (child && actorUserId && child.familyId) {
-      const actor = db.users.get(actorUserId);
-      familyService.logAudit(
-        child.familyId,
-        actorUserId,
-        actor?.name || 'Parent',
-        'UNLIMITED_TODAY_GRANTED',
-        `Granted Unlimited Today on '${budget.target}' for ${child.name}`
-      );
+      const actor = await prisma.user.findUnique({ where: { id: actorUserId } });
+      await prisma.familyAuditLog.create({
+        data: {
+          id: `log-${nanoid(10)}`,
+          familyId: child.familyId,
+          actorUserId,
+          actorName: actor?.name || 'Parent',
+          action: 'UNLIMITED_TODAY_GRANTED',
+          details: `Granted Unlimited Today on '${budget.target}' for ${child.name}`,
+        },
+      });
     }
 
     return budget;
@@ -303,81 +337,95 @@ export class UsageService {
   /**
    * Remove a usage budget
    */
-  public removeUsageBudget(childId: string, budgetId: string) {
-    const policy = db.policies.get(childId);
-    if (!policy || !policy.usageBudgets) return policy;
+  public async removeUsageBudget(childId: string, budgetId: string) {
+    const policy = await prisma.policy.findUnique({
+      where: { childId },
+    });
+    const usageBudgets = (policy?.usageBudgets as any as UsageBudget[]) || [];
+    const filtered = usageBudgets.filter((b) => b.id !== budgetId);
 
-    policy.usageBudgets = policy.usageBudgets.filter((b) => b.id !== budgetId);
-    policy.version += 1;
-    policy.updatedAt = new Date().toISOString();
+    const updated = await prisma.policy.update({
+      where: { childId },
+      data: {
+        usageBudgets: filtered as any,
+        version: { increment: 1 },
+      },
+    });
 
-    db.policies.set(childId, policy);
-    db.save();
-    return policy;
+    return updated;
   }
 
   /**
    * Update SafeSearch configuration
    */
-  public updateSafeSearch(childId: string, config: SafeSearchConfig, actorUserId?: string): Policy {
-    const policy = db.policies.get(childId);
-    if (!policy) throw new Error('Policy not found.');
+  public async updateSafeSearch(
+    childId: string,
+    config: SafeSearchConfig,
+    actorUserId?: string
+  ): Promise<any> {
+    const updated = await prisma.policy.update({
+      where: { childId },
+      data: {
+        safeSearch: config as any,
+        version: { increment: 1 },
+      },
+    });
 
-    policy.safeSearch = config;
-    policy.version += 1;
-    policy.updatedAt = new Date().toISOString();
-
-    db.policies.set(childId, policy);
-    db.save();
-
-    const child = db.children.get(childId);
+    const child = await prisma.child.findUnique({ where: { id: childId } });
     if (child && actorUserId && child.familyId) {
-      const actor = db.users.get(actorUserId);
-      familyService.logAudit(
-        child.familyId,
-        actorUserId,
-        actor?.name || 'Parent',
-        'SAFE_SEARCH_UPDATED',
-        `Updated SafeSearch and YouTube Restricted Mode settings for ${child.name}`
-      );
+      const actor = await prisma.user.findUnique({ where: { id: actorUserId } });
+      await prisma.familyAuditLog.create({
+        data: {
+          id: `log-${nanoid(10)}`,
+          familyId: child.familyId,
+          actorUserId,
+          actorName: actor?.name || 'Parent',
+          action: 'SAFE_SEARCH_UPDATED',
+          details: `Updated SafeSearch and YouTube Restricted Mode settings for ${child.name}`,
+        },
+      });
     }
 
-    return policy;
+    return updated;
   }
 
   /**
    * Generate privacy-first weekly summary
    */
-  public getWeeklyDigest(userId: string, familyId?: string) {
-    const { rbacService } = require('./rbac.service');
-    const userFamilyIds = rbacService.getUserFamilyMemberships(userId).map((m: any) => m.familyId);
+  public async getWeeklyDigest(userId: string, familyId?: string) {
+    const userFamilyIds = (await rbacService.getUserFamilyMemberships(userId)).map((m) => m.familyId);
     const targetFamilyIds = familyId ? [familyId] : userFamilyIds;
-    const allowedSet = new Set<string>(targetFamilyIds.filter((fid: string) => userFamilyIds.includes(fid)));
+    const allowedSet = targetFamilyIds.filter((fid) => userFamilyIds.includes(fid));
 
-    const children = Array.from(db.children.values()).filter(
-      (c) => c.familyId && allowedSet.has(c.familyId)
-    );
+    const children = await prisma.child.findMany({
+      where: { familyId: { in: allowedSet } },
+    });
     const childIds = children.map((c) => c.id);
 
-    const now = Date.now();
-    const sevenDaysAgo = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-    const recentLogs = db.activityLogs.filter(
-      (a) => childIds.includes(a.childId) && a.timestamp >= sevenDaysAgo
-    );
+    const recentLogs = await prisma.activityEvent.findMany({
+      where: {
+        childId: { in: childIds },
+        timestamp: { gte: sevenDaysAgo },
+      },
+    });
 
     const totalBlocked = recentLogs.filter((a) => a.action === 'BLOCKED').length;
     const totalAllowed = recentLogs.filter((a) => a.action === 'ALLOWED').length;
 
     const categoryBreakdown: Record<string, number> = {};
     recentLogs.forEach((a) => {
-      const cat = a.category || 'UNCATEGORIZED';
+      const cat = (a as any).category || 'UNCATEGORIZED';
       categoryBreakdown[cat] = (categoryBreakdown[cat] || 0) + 1;
     });
 
-    const requests = Array.from(db.requests.values()).filter(
-      (r) => childIds.includes(r.childId) && r.requestedAt >= sevenDaysAgo
-    );
+    const requests = await prisma.accessRequest.findMany({
+      where: {
+        childId: { in: childIds },
+        requestedAt: { gte: sevenDaysAgo },
+      },
+    });
 
     return {
       period: 'Past 7 Days',
@@ -387,7 +435,7 @@ export class UsageService {
       totalAllowedEvents: totalAllowed,
       categoryBreakdown,
       askParentTotal: requests.length,
-      askParentApproved: requests.filter((r) => r.status === 'APPROVED').length,
+      askParentApproved: requests.filter((r) => (r.status as string) === 'APPROVED').length,
       childrenSummaries: children.map((c) => ({
         id: c.id,
         name: c.name,

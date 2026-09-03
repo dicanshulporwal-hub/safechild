@@ -1,5 +1,5 @@
 import { nanoid } from 'nanoid';
-import { db } from '../db/store';
+import { prisma } from '../db/prisma';
 
 export type FeedbackCategory =
   | 'WEBSITE_WRONGLY_BLOCKED'
@@ -40,8 +40,16 @@ export class FeedbackService {
   private feedbackList: ParentFeedback[] = [];
   private falsePositiveReports: FalsePositiveReport[] = [];
 
-  public submitFeedback(parentId: string, category: FeedbackCategory, notes?: string): ParentFeedback {
-    const user = db.users.get(parentId);
+  public async submitFeedback(
+    parentId: string,
+    category: FeedbackCategory,
+    notes?: string
+  ): Promise<ParentFeedback> {
+    const user = await prisma.user.findUnique({
+      where: { id: parentId },
+      select: { email: true },
+    });
+
     const item: ParentFeedback = {
       id: `fb-${nanoid(10)}`,
       parentId,

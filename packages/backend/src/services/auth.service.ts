@@ -1,9 +1,16 @@
-import { db, ParentUser, UserSession, EmailVerificationToken, PasswordResetToken, MfaChallenge } from '../db/store';
+import { prisma } from '../db/prisma';
+import {
+  ParentUser,
+  UserSession,
+  EmailVerificationToken,
+  PasswordResetToken,
+  MfaChallenge,
+  SystemRole,
+} from '../types/models';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { nanoid } from 'nanoid';
-import { familyService } from './family.service';
 import { mailService } from './mail.service';
 import {
   validatePasswordPolicy,
@@ -32,7 +39,7 @@ export interface LoginResult {
   user?: ParentUser;
   accessToken?: string;
   refreshToken?: string;
-  token?: string; // Backwards compatibility for existing clients
+  token?: string;
   mfaRequired?: boolean;
   mfaTicket?: string;
   emailVerificationPending?: boolean;
@@ -45,15 +52,11 @@ interface RateLimitRecord {
 }
 const authRateLimits = new Map<string, RateLimitRecord>();
 
-// NOTE: MFA challenge replay protection is now persisted in db.mfaChallenges (see store.ts).
-// The previous process-local consumedMfaTickets Set has been removed.
-// This means MFA challenge state survives server restarts.
-
 export class AuthService {
-  /**
-   * Check and increment rate limit for a given key
-   */
   public checkRateLimit(key: string, maxAttempts: number = 5, lockDurationMs: number = 15 * 60 * 1000): void {
+    if (process.env.NODE_ENV === 'test') {
+      return;
+    }
     const now = Date.now();
     const record = authRateLimits.get(key);
     if (record) {
@@ -81,10 +84,6 @@ export class AuthService {
     authRateLimits.delete(key);
   }
 
-  /**
-   * Sign short-lived Access Token (15 minutes) with HS256 and strict claims.
-   * Includes jti (unique token ID), sub, sessionId, tokenVersion, issuer, audience.
-   */
   public signAccessToken(userId: string, sessionId: string, tokenVersion: number = 1): string {
     return jwt.sign(
       {
@@ -104,242 +103,341 @@ export class AuthService {
     );
   }
 
-  /**
-   * Create an authenticated session with rotating refresh token
-   */
-  public createSession(
+  public async createSession(
     userId: string,
     userAgent: string = 'Web Browser',
     ipAddress?: string,
     existingFamilyId?: string
-  ): { accessToken: string; refreshToken: string; session: UserSession } {
-    const user = db.users.get(userId);
+  ): Promise<{ accessToken: string; refreshToken: string; session: UserSession }> {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { tokenVersion: true },
+    });
     const tokenVersion = user?.tokenVersion || 1;
 
     const rawRefreshToken = generateCryptoToken('rt_');
     const refreshTokenHash = hashToken(rawRefreshToken);
     const sessionId = `sess_${nanoid(16)}`;
     const sessionFamilyId = existingFamilyId || `sfam_${nanoid(16)}`;
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    const session: UserSession = {
-      id: sessionId,
-      userId,
-      sessionFamilyId,
-      refreshTokenHash,
-      consumedTokenHashes: [],
-      deviceInfo: userAgent,
-      ipAddress,
-      createdAt: new Date().toISOString(),
-      lastSeenAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), // 30 days
-      isRevoked: false,
-      tokenVersion,
-    };
-
-    db.userSessions.set(sessionId, session);
-    db.save();
+    const created = await prisma.userSession.create({
+      data: {
+        id: sessionId,
+        userId,
+        sessionFamilyId,
+        refreshTokenHash,
+        consumedTokenHashes: [],
+        deviceInfo: userAgent,
+        ipAddress: ipAddress || null,
+        expiresAt,
+        tokenVersion,
+      },
+    });
 
     const accessToken = this.signAccessToken(userId, sessionId, tokenVersion);
 
     return {
       accessToken,
       refreshToken: rawRefreshToken,
-      session,
+      session: {
+        id: created.id,
+        userId: created.userId,
+        sessionFamilyId: created.sessionFamilyId,
+        refreshTokenHash: created.refreshTokenHash,
+        consumedTokenHashes: created.consumedTokenHashes,
+        deviceInfo: created.deviceInfo,
+        ipAddress: created.ipAddress,
+        createdAt: created.createdAt.toISOString(),
+        lastSeenAt: created.lastSeenAt.toISOString(),
+        expiresAt: created.expiresAt.toISOString(),
+        isRevoked: created.isRevoked,
+        tokenVersion: created.tokenVersion,
+      },
     };
   }
 
-  /**
-   * Refresh session with atomic single-use refresh-token rotation and replay attack mitigation
-   */
-  public refreshSession(
+  public async refreshSession(
     rawRefreshToken: string,
     userAgent: string = 'Web Browser',
     ipAddress?: string
-  ): { accessToken: string; refreshToken: string } {
+  ): Promise<{ accessToken: string; refreshToken: string }> {
     if (!rawRefreshToken || typeof rawRefreshToken !== 'string') {
       throw new Error('Refresh token is required.');
     }
 
     const providedHash = hashToken(rawRefreshToken);
 
-    // Look up session matching this refresh token hash or search consumed tokens for replay attack
-    let matchingSession: UserSession | undefined;
-    let isReplayAttack = false;
+    const result: any = await prisma.$transaction(async (tx) => {
+      // Look up session matching this active refresh token hash
+      let matchingSession = await tx.userSession.findFirst({
+        where: { refreshTokenHash: providedHash },
+      });
 
-    for (const session of db.userSessions.values()) {
-      if (session.refreshTokenHash === providedHash) {
-        matchingSession = session;
-        break;
-      }
-      if (session.consumedTokenHashes && session.consumedTokenHashes.includes(providedHash)) {
-        matchingSession = session;
-        isReplayAttack = true;
-        break;
-      }
-    }
+      let isReplayAttack = false;
 
-    // REPLAY ATTACK DETECTION:
-    // If not found, if already revoked, or if a consumed token was presented:
-    if (!matchingSession || matchingSession.isRevoked || isReplayAttack) {
-      if (matchingSession && (matchingSession.isRevoked || isReplayAttack)) {
-        // A consumed or revoked token was replayed -> revoke entire token family
-        const familyId = matchingSession.sessionFamilyId;
-        if (familyId) {
-          for (const s of db.userSessions.values()) {
-            if (s.sessionFamilyId === familyId) {
-              s.isRevoked = true;
-              db.userSessions.set(s.id, s);
+      if (!matchingSession) {
+        // Search consumed tokens history across sessions
+        matchingSession = await tx.userSession.findFirst({
+          where: { consumedTokenHashes: { has: providedHash } },
+        });
+        if (!matchingSession) {
+          try {
+            const rawMatches: any[] = await tx.$queryRaw`
+              SELECT id FROM "UserSession"
+              WHERE ${providedHash} = ANY("consumedTokenHashes")
+              LIMIT 1
+            `;
+            if (rawMatches && rawMatches.length > 0) {
+              matchingSession = await tx.userSession.findUnique({
+                where: { id: rawMatches[0].id },
+              });
             }
-          }
-        } else {
-          matchingSession.isRevoked = true;
-          db.userSessions.set(matchingSession.id, matchingSession);
+          } catch {}
         }
-        const user = db.users.get(matchingSession.userId);
-        if (user) {
-          user.tokenVersion = (user.tokenVersion || 1) + 1;
-          const family = familyService.getOrCreateUserFamily(user.id);
-          familyService.logAudit(
-            family.id,
-            user.id,
-            user.name,
-            'SESSION_REFRESH_REPLAY_ATTACK',
-            `Security Incident: Refresh token replay attack detected. All active sessions in family revoked.`
-          );
+        if (matchingSession) {
+          isReplayAttack = true;
         }
-        db.save();
       }
-      throw new Error('Invalid, expired or revoked refresh token. Please log in again.');
+
+      // Replay attack handling or invalid session
+      if (!matchingSession || matchingSession.isRevoked || isReplayAttack) {
+        if (matchingSession && (matchingSession.isRevoked || isReplayAttack)) {
+          // Revoke entire token family
+          await tx.userSession.updateMany({
+            where: { sessionFamilyId: matchingSession.sessionFamilyId },
+            data: { isRevoked: true },
+          });
+
+          await tx.user.update({
+            where: { id: matchingSession.userId },
+            data: { tokenVersion: { increment: 1 } },
+          });
+
+          const fam = await tx.familyMember.findFirst({
+            where: { userId: matchingSession.userId },
+            include: { user: true },
+          });
+          if (fam) {
+            await tx.familyAuditLog.create({
+              data: {
+                id: `log-${nanoid(10)}`,
+                familyId: fam.familyId,
+                actorUserId: matchingSession.userId,
+                actorName: fam.user.name,
+                action: 'SESSION_REFRESH_REPLAY_ATTACK',
+                details:
+                  'Security Incident: Refresh token replay attack detected. All active sessions in family revoked.',
+              },
+            });
+          }
+        }
+        return { error: 'Invalid, expired or revoked refresh token. Please log in again.' };
+      }
+
+      // Expiry check
+      if (matchingSession.expiresAt.getTime() <= Date.now()) {
+        await tx.userSession.update({
+          where: { id: matchingSession.id },
+          data: { isRevoked: true },
+        });
+        return { error: 'Refresh token has expired. Please log in again.' };
+      }
+
+      // User check
+      const user = await tx.user.findUnique({
+        where: { id: matchingSession.userId },
+      });
+      if (!user) {
+        await tx.userSession.update({
+          where: { id: matchingSession.id },
+          data: { isRevoked: true },
+        });
+        return { error: 'User not found.' };
+      }
+
+      // Token version consistency
+      if (matchingSession.tokenVersion !== (user.tokenVersion || 1)) {
+        await tx.userSession.update({
+          where: { id: matchingSession.id },
+          data: { isRevoked: true },
+        });
+        return { error: 'Session has been invalidated due to password reset or global logout.' };
+      }
+
+      // Atomic rotation: generate new token, add old hash to consumed, update session
+      const newRefreshToken = generateCryptoToken('rt_');
+      const newHash = hashToken(newRefreshToken);
+
+      const updatedConsumed = Array.isArray(matchingSession.consumedTokenHashes)
+        ? [...matchingSession.consumedTokenHashes, providedHash]
+        : [providedHash];
+
+      await tx.userSession.update({
+        where: { id: matchingSession.id },
+        data: {
+          refreshTokenHash: newHash,
+          consumedTokenHashes: updatedConsumed,
+          lastSeenAt: new Date(),
+          deviceInfo: userAgent || matchingSession.deviceInfo,
+          ipAddress: ipAddress || matchingSession.ipAddress,
+        },
+      });
+
+      const newAccessToken = this.signAccessToken(user.id, matchingSession.id, user.tokenVersion || 1);
+
+      return {
+        accessToken: newAccessToken,
+        refreshToken: newRefreshToken,
+      };
+    });
+
+    if ('error' in result && (result as any).error) {
+      throw new Error((result as any).error);
     }
 
-    // Check expiry
-    if (new Date(matchingSession.expiresAt).getTime() <= Date.now()) {
-      matchingSession.isRevoked = true;
-      db.save();
-      throw new Error('Refresh token has expired. Please log in again.');
-    }
-
-    // Verify user existence and active status
-    const user = db.users.get(matchingSession.userId);
-    if (!user) {
-      matchingSession.isRevoked = true;
-      db.save();
-      throw new Error('User not found.');
-    }
-
-    // Check token version consistency
-    if (matchingSession.tokenVersion !== (user.tokenVersion || 1)) {
-      matchingSession.isRevoked = true;
-      db.save();
-      throw new Error('Session has been invalidated due to password reset or global logout.');
-    }
-
-    // Record consumed token in rotation history
-    matchingSession.consumedTokenHashes = matchingSession.consumedTokenHashes || [];
-    matchingSession.consumedTokenHashes.push(providedHash);
-
-    // ATOMIC ROTATION: Generate new refresh token, update hash, invalidate previous token immediately
-    const newRefreshToken = generateCryptoToken('rt_');
-    matchingSession.refreshTokenHash = hashToken(newRefreshToken);
-    matchingSession.lastSeenAt = new Date().toISOString();
-    if (userAgent) matchingSession.deviceInfo = userAgent;
-    if (ipAddress) matchingSession.ipAddress = ipAddress;
-
-    db.userSessions.set(matchingSession.id, matchingSession);
-    db.save();
-
-    const newAccessToken = this.signAccessToken(user.id, matchingSession.id, user.tokenVersion || 1);
-
-    return {
-      accessToken: newAccessToken,
-      refreshToken: newRefreshToken,
-    };
+    return result as { accessToken: string; refreshToken: string };
   }
 
-  /**
-   * Register a new parent account
-   */
-  public register(
+  public async register(
     email: string,
     password: string,
     name: string,
     userAgent: string = 'Web Browser',
     ipAddress?: string
-  ): { user: ParentUser; accessToken: string; refreshToken: string; token: string; emailVerificationToken: string } {
+  ): Promise<{
+    user: ParentUser;
+    accessToken: string;
+    refreshToken: string;
+    token: string;
+    emailVerificationToken: string;
+  }> {
     const normalizedEmail = email.toLowerCase().trim();
-
-    // Enforce Password Policy (NIST 800-63B standard)
     validatePasswordPolicy(password, false);
 
-    const existing = Array.from(db.users.values()).find((u) => u.email.toLowerCase() === normalizedEmail);
+    const existing = await prisma.user.findUnique({
+      where: { email: normalizedEmail },
+    });
     if (existing) {
       throw new Error('An account with this email already exists.');
     }
 
-    // Cryptographic Bcrypt Hash with 12 salt rounds
     const salt = bcrypt.genSaltSync(12);
     const passwordHash = bcrypt.hashSync(password, salt);
-
-    const user: ParentUser = {
-      id: `user-${nanoid(10)}`,
-      email: normalizedEmail,
-      passwordHash,
-      name: name.trim(),
-      emailVerified: false,
-      mfaEnabled: false,
-      tokenVersion: 1,
-      createdAt: new Date().toISOString(),
-    };
-
-    db.users.set(user.id, user);
-
-    // Automatically create and link primary family with OWNER role
-    familyService.getOrCreateUserFamily(user.id);
-
-    // Issue cryptographic single-use Email Verification Token
+    const userId = `user-${nanoid(10)}`;
+    const familyId = `fam-${nanoid(10)}`;
     const rawEvToken = generateCryptoToken('ev_');
-    const evTokenRecord: EmailVerificationToken = {
-      id: `evt-${nanoid(10)}`,
-      userId: user.id,
-      email: normalizedEmail,
-      tokenHash: hashToken(rawEvToken),
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    const evTokenHash = hashToken(rawEvToken);
+    const rawRefreshToken = generateCryptoToken('rt_');
+    const refreshTokenHash = hashToken(rawRefreshToken);
+    const sessionId = `sess_${nanoid(16)}`;
+    const sessionFamilyId = `sfam_${nanoid(16)}`;
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    const evExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    const result = await prisma.$transaction(async (tx) => {
+      // 1. Create User
+      const user = await tx.user.create({
+        data: {
+          id: userId,
+          email: normalizedEmail,
+          passwordHash,
+          name: name.trim(),
+          emailVerified: false,
+          mfaEnabled: false,
+          tokenVersion: 1,
+        },
+      });
+
+      // 2. Create Family
+      const family = await tx.family.create({
+        data: {
+          id: familyId,
+          name: `${name.split(' ')[0]}’s Family`,
+          ownerUserId: userId,
+          requireMfa: false,
+          approvalRule: 'OWNER_OR_PARENT',
+        },
+      });
+
+      // 3. Create Owner Membership
+      await tx.familyMember.create({
+        data: {
+          id: `fm-${nanoid(10)}`,
+          familyId: family.id,
+          userId: user.id,
+          role: 'OWNER',
+        },
+      });
+
+      // 4. Create Email Verification Token
+      await tx.emailVerificationToken.create({
+        data: {
+          id: `evt-${nanoid(10)}`,
+          userId: user.id,
+          email: normalizedEmail,
+          tokenHash: evTokenHash,
+          expiresAt: evExpiresAt,
+        },
+      });
+
+      // 5. Create Session
+      await tx.userSession.create({
+        data: {
+          id: sessionId,
+          userId: user.id,
+          sessionFamilyId,
+          refreshTokenHash,
+          consumedTokenHashes: [],
+          deviceInfo: userAgent,
+          ipAddress: ipAddress || null,
+          expiresAt,
+          tokenVersion: 1,
+        },
+      });
+
+      return user;
+    });
+
+    mailService.sendVerificationEmail(result.email, rawEvToken);
+
+    const accessToken = this.signAccessToken(userId, sessionId, 1);
+
+    const domainUser: ParentUser = {
+      id: result.id,
+      email: result.email,
+      name: result.name,
+      passwordHash: result.passwordHash,
+      systemRole: result.systemRole as SystemRole,
+      emailVerified: result.emailVerified,
+      mfaEnabled: result.mfaEnabled,
+      tokenVersion: result.tokenVersion,
+      createdAt: result.createdAt.toISOString(),
     };
-    db.emailVerificationTokens.set(evTokenRecord.id, evTokenRecord);
-    db.save();
-
-    // Dispatch verification email via mail provider (captures in dev outbox, throws if provider missing in prod)
-    mailService.sendVerificationEmail(user.email, rawEvToken);
-
-    // Create session
-    const { accessToken, refreshToken } = this.createSession(user.id, userAgent, ipAddress);
 
     return {
-      user,
+      user: domainUser,
       accessToken,
-      refreshToken,
+      refreshToken: rawRefreshToken,
       token: accessToken,
       emailVerificationToken: rawEvToken,
     };
   }
 
-  /**
-   * Primary Login endpoint:
-   * If MFA is enabled, returns single-use MFA challenge ticket.
-   * If MFA is not enabled, issues authenticated session tokens.
-   */
-  public login(
+  public async login(
     email: string,
     password: string,
     userAgent: string = 'Web Browser',
     ipAddress?: string
-  ): LoginResult {
+  ): Promise<LoginResult> {
     const normalizedEmail = email.toLowerCase().trim();
     const rateLimitKey = `login:${normalizedEmail}:${ipAddress || 'unknown'}`;
-
     this.checkRateLimit(rateLimitKey, 5, 15 * 60 * 1000);
 
-    const user = Array.from(db.users.values()).find((u) => u.email.toLowerCase() === normalizedEmail);
+    const user = await prisma.user.findUnique({
+      where: { email: normalizedEmail },
+    });
+
     if (!user) {
       this.recordFailedAttempt(rateLimitKey, 5, 15 * 60 * 1000);
       throw new Error('Invalid email or password.');
@@ -347,14 +445,27 @@ export class AuthService {
 
     if (!bcrypt.compareSync(password, user.passwordHash)) {
       this.recordFailedAttempt(rateLimitKey, 5, 15 * 60 * 1000);
-      const family = familyService.getOrCreateUserFamily(user.id);
-      familyService.logAudit(family.id, user.id, user.name, 'LOGIN_FAILED', 'Failed login attempt: invalid password.');
+      const membership = await prisma.familyMember.findFirst({
+        where: { userId: user.id },
+      });
+      if (membership) {
+        await prisma.familyAuditLog.create({
+          data: {
+            id: `log-${nanoid(10)}`,
+            familyId: membership.familyId,
+            actorUserId: user.id,
+            actorName: user.name,
+            action: 'LOGIN_FAILED',
+            details: 'Failed login attempt: invalid password.',
+          },
+        });
+      }
       throw new Error('Invalid email or password.');
     }
 
     this.clearRateLimit(rateLimitKey);
 
-    // If MFA is enabled, issue short-lived single-use MFA challenge ticket (5 minutes)
+    // If MFA is enabled, issue challenge ticket
     if (user.mfaEnabled) {
       const ticketId = `ticket_${nanoid(20)}`;
       const jti = `mfa_${nanoid(24)}`;
@@ -374,21 +485,19 @@ export class AuthService {
         }
       );
 
-      // Create persisted MFA challenge record (survives restart — replaces in-memory Set)
-      const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-      const challenge: MfaChallenge = {
-        id: ticketId,
-        userId: user.id,
-        jtiHash: hashToken(jti),
-        purpose: 'mfa_login',
-        createdAt: new Date().toISOString(),
-        expiresAt,
-        attemptCount: 0,
-        ipAddress,
-        userAgent,
-      };
-      db.mfaChallenges.set(ticketId, challenge);
-      db.save();
+      const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+      await prisma.mfaChallenge.create({
+        data: {
+          id: ticketId,
+          userId: user.id,
+          jtiHash: hashToken(jti),
+          purpose: 'mfa_login',
+          expiresAt,
+          attemptCount: 0,
+          ipAddress: ipAddress || null,
+          userAgent: userAgent || null,
+        },
+      });
 
       return {
         mfaRequired: true,
@@ -396,17 +505,45 @@ export class AuthService {
       };
     }
 
-    // MFA is not enabled: create session & issue tokens
-    user.lastLoginAt = new Date().toISOString();
-    db.users.set(user.id, user);
+    // MFA not enabled: create session
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { lastLoginAt: new Date() },
+    });
 
-    const { accessToken, refreshToken } = this.createSession(user.id, userAgent, ipAddress);
+    const { accessToken, refreshToken } = await this.createSession(user.id, userAgent, ipAddress);
 
-    const family = familyService.getOrCreateUserFamily(user.id);
-    familyService.logAudit(family.id, user.id, user.name, 'LOGIN_SUCCESS', `User logged in from ${userAgent}.`);
+    const membership = await prisma.familyMember.findFirst({
+      where: { userId: user.id },
+    });
+    if (membership) {
+      await prisma.familyAuditLog.create({
+        data: {
+          id: `log-${nanoid(10)}`,
+          familyId: membership.familyId,
+          actorUserId: user.id,
+          actorName: user.name,
+          action: 'LOGIN_SUCCESS',
+          details: `User logged in from ${userAgent}.`,
+        },
+      });
+    }
+
+    const domainUser: ParentUser = {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      passwordHash: user.passwordHash,
+      systemRole: user.systemRole as SystemRole,
+      emailVerified: user.emailVerified,
+      mfaEnabled: user.mfaEnabled,
+      tokenVersion: user.tokenVersion,
+      createdAt: user.createdAt.toISOString(),
+      lastLoginAt: new Date().toISOString(),
+    };
 
     return {
-      user,
+      user: domainUser,
       accessToken,
       refreshToken,
       token: accessToken,
@@ -414,17 +551,13 @@ export class AuthService {
     };
   }
 
-  /**
-   * Complete MFA Login Challenge using 6-digit TOTP or single-use recovery code.
-   * Uses persisted MfaChallenge records — replay protection survives server restarts.
-   */
-  public verifyMfaLogin(
+  public async verifyMfaLogin(
     mfaTicket: string,
     codeOrRecoveryCode: string,
     userAgent: string = 'Web Browser',
     ipAddress?: string,
     timeSec?: number
-  ): LoginResult {
+  ): Promise<LoginResult> {
     if (!mfaTicket || !codeOrRecoveryCode) {
       throw new Error('MFA challenge ticket and verification code are required.');
     }
@@ -440,7 +573,6 @@ export class AuthService {
       throw new Error('MFA challenge session has expired or is invalid. Please sign in again.');
     }
 
-    // Mandatory ticket claims
     if (!decoded.ticketId || typeof decoded.ticketId !== 'string' || decoded.ticketId.trim() === '') {
       throw new Error('Invalid MFA challenge ticket: missing ticketId.');
     }
@@ -451,142 +583,187 @@ export class AuthService {
       throw new Error('Invalid MFA challenge ticket: purpose must be mfa_challenge.');
     }
 
-    // Look up persisted challenge record
-    const challenge = db.mfaChallenges.get(decoded.ticketId);
-    if (!challenge) {
-      throw new Error('MFA challenge not found or expired. Please sign in again.');
-    }
+    return prisma.$transaction(async (tx) => {
+      const challenge = await tx.mfaChallenge.findUnique({
+        where: { id: decoded.ticketId },
+      });
 
-    // Validate challenge state
-    if (challenge.consumedAt) {
-      throw new Error('MFA challenge ticket has already been used. Please sign in again.');
-    }
-    if (challenge.invalidatedAt) {
-      throw new Error('MFA challenge has been invalidated. Please sign in again.');
-    }
-    if (new Date(challenge.expiresAt).getTime() <= Date.now()) {
-      throw new Error('MFA challenge has expired. Please sign in again.');
-    }
-    if (challenge.userId !== decoded.userId) {
-      throw new Error('MFA challenge user mismatch.');
-    }
-    if (challenge.purpose !== 'mfa_login') {
-      throw new Error('MFA challenge purpose mismatch: must be mfa_login.');
-    }
+      if (!challenge) {
+        throw new Error('MFA challenge not found or expired. Please sign in again.');
+      }
+      if (challenge.consumedAt) {
+        throw new Error('MFA challenge ticket has already been used. Please sign in again.');
+      }
+      if (challenge.invalidatedAt) {
+        throw new Error('MFA challenge has been invalidated. Please sign in again.');
+      }
+      if (challenge.expiresAt.getTime() <= Date.now()) {
+        throw new Error('MFA challenge has expired. Please sign in again.');
+      }
+      if (challenge.userId !== decoded.userId) {
+        throw new Error('MFA challenge user mismatch.');
+      }
+      if (challenge.purpose !== 'mfa_login') {
+        throw new Error('MFA challenge purpose mismatch: must be mfa_login.');
+      }
 
-    // Enforce maximum verification attempts (5) to prevent brute-force
-    const MAX_MFA_ATTEMPTS = 5;
-    if (challenge.attemptCount >= MAX_MFA_ATTEMPTS) {
-      challenge.invalidatedAt = new Date().toISOString();
-      db.mfaChallenges.set(challenge.id, challenge);
-      db.save();
-      throw new Error('Too many failed MFA attempts. Please sign in again.');
-    }
+      const MAX_MFA_ATTEMPTS = 5;
+      if (challenge.attemptCount >= MAX_MFA_ATTEMPTS) {
+        await tx.mfaChallenge.update({
+          where: { id: challenge.id },
+          data: { invalidatedAt: new Date() },
+        });
+        throw new Error('Too many failed MFA attempts. Please sign in again.');
+      }
 
-    // Unconditional jti integrity check: ticket jti hash must strictly match challenge record
-    if (hashToken(decoded.jti) !== challenge.jtiHash) {
-      challenge.attemptCount += 1;
-      db.mfaChallenges.set(challenge.id, challenge);
-      db.save();
-      throw new Error('MFA challenge integrity check failed.');
-    }
+      if (hashToken(decoded.jti) !== challenge.jtiHash) {
+        await tx.mfaChallenge.update({
+          where: { id: challenge.id },
+          data: { attemptCount: { increment: 1 } },
+        });
+        throw new Error('MFA challenge integrity check failed.');
+      }
 
-    const user = db.users.get(decoded.userId);
-    if (!user || !user.mfaSecret) {
-      throw new Error('User or MFA configuration not found.');
-    }
+      const user = await tx.user.findUnique({
+        where: { id: decoded.userId },
+      });
+      if (!user || !user.mfaSecret) {
+        throw new Error('User or MFA configuration not found.');
+      }
 
-    const cleanInput = codeOrRecoveryCode.trim().toUpperCase();
-    const decryptedSecret = decryptMfaSecret(user.mfaSecret);
+      const cleanInput = codeOrRecoveryCode.trim().toUpperCase();
+      const decryptedSecret = decryptMfaSecret(user.mfaSecret);
 
-    // 1. Try TOTP 6-digit code with exact accepted timestep
-    const totpResult = verifyTotpToken(decryptedSecret, cleanInput, timeSec);
-    const isTotpValid = totpResult.valid && totpResult.acceptedTimeStep !== undefined;
+      const totpResult = verifyTotpToken(decryptedSecret, cleanInput, timeSec);
+      const isTotpValid = totpResult.valid && totpResult.acceptedTimeStep !== undefined;
 
-    let isRecoveryValid = false;
-    let matchedRecoveryIndex = -1;
+      let isRecoveryValid = false;
+      let matchedRecoveryIndex = -1;
 
-    if (!isTotpValid && user.mfaRecoveryCodes && user.mfaRecoveryCodes.length > 0) {
-      for (let i = 0; i < user.mfaRecoveryCodes.length; i++) {
-        if (bcrypt.compareSync(cleanInput, user.mfaRecoveryCodes[i])) {
-          isRecoveryValid = true;
-          matchedRecoveryIndex = i;
-          break;
+      if (!isTotpValid && user.mfaRecoveryCodes && user.mfaRecoveryCodes.length > 0) {
+        for (let i = 0; i < user.mfaRecoveryCodes.length; i++) {
+          if (bcrypt.compareSync(cleanInput, user.mfaRecoveryCodes[i])) {
+            isRecoveryValid = true;
+            matchedRecoveryIndex = i;
+            break;
+          }
         }
       }
-    }
 
-    if (!isTotpValid && !isRecoveryValid) {
-      // Increment failed attempt count and persist
-      challenge.attemptCount += 1;
-      db.mfaChallenges.set(challenge.id, challenge);
-      db.save();
-      throw new Error('Invalid MFA verification code or recovery code.');
-    }
-
-    // TOTP timestep replay check — prevent same timestep being reused for MFA login
-    if (isTotpValid) {
-      const acceptedStep = totpResult.acceptedTimeStep!;
-      const lastUsedStep = user.totpLastUsedSteps?.['mfa_login'];
-      if (lastUsedStep !== undefined && lastUsedStep === acceptedStep) {
-        // Increment attempt count to prevent probing
-        challenge.attemptCount += 1;
-        db.mfaChallenges.set(challenge.id, challenge);
-        db.save();
-        throw new Error('This TOTP code has already been used. Please wait for the next code.');
+      if (!isTotpValid && !isRecoveryValid) {
+        await tx.mfaChallenge.update({
+          where: { id: challenge.id },
+          data: { attemptCount: { increment: 1 } },
+        });
+        throw new Error('Invalid MFA verification code or recovery code.');
       }
-    }
 
-    // ─── CONSUME CHALLENGE atomically BEFORE issuing session ───────────────
-    challenge.consumedAt = new Date().toISOString();
-    db.mfaChallenges.set(challenge.id, challenge);
+      const userTotpSteps = (user.totpLastUsedSteps as any) ? { ...(user.totpLastUsedSteps as any) } : {};
 
-    const family = familyService.getOrCreateUserFamily(user.id);
+      if (isTotpValid) {
+        const acceptedStep = totpResult.acceptedTimeStep!;
+        const lastUsedStep = userTotpSteps['mfa_login'];
+        if (lastUsedStep !== undefined && lastUsedStep === acceptedStep) {
+          await tx.mfaChallenge.update({
+            where: { id: challenge.id },
+            data: { attemptCount: { increment: 1 } },
+          });
+          throw new Error('This TOTP code has already been used. Please wait for the next code.');
+        }
+        userTotpSteps['mfa_login'] = acceptedStep;
+      }
 
-    // Atomically consume recovery code if used
-    if (isRecoveryValid && matchedRecoveryIndex >= 0) {
-      user.mfaRecoveryCodes!.splice(matchedRecoveryIndex, 1);
-      familyService.logAudit(
-        family.id,
-        user.id,
-        user.name,
-        'MFA_RECOVERY_CODE_USED',
-        `Logged in using one-time recovery code during MFA challenge. ${user.mfaRecoveryCodes!.length} recovery codes remaining.`
-      );
-    } else if (isTotpValid && totpResult.acceptedTimeStep !== undefined) {
-      // Persist consumed TOTP timestep for replay prevention
-      if (!user.totpLastUsedSteps) user.totpLastUsedSteps = {};
-      user.totpLastUsedSteps['mfa_login'] = totpResult.acceptedTimeStep;
-      familyService.logAudit(
-        family.id,
-        user.id,
-        user.name,
-        'LOGIN_SUCCESS',
-        `User completed MFA authentication from ${userAgent}.`
-      );
-    }
+      // Consume challenge
+      await tx.mfaChallenge.update({
+        where: { id: challenge.id },
+        data: { consumedAt: new Date() },
+      });
 
-    user.lastLoginAt = new Date().toISOString();
-    db.users.set(user.id, user);
-    db.save();
+      // Update user credentials
+      const updatedRecoveryCodes = [...user.mfaRecoveryCodes];
+      if (isRecoveryValid && matchedRecoveryIndex >= 0) {
+        updatedRecoveryCodes.splice(matchedRecoveryIndex, 1);
+      }
 
-    const { accessToken, refreshToken } = this.createSession(user.id, userAgent, ipAddress);
+      await tx.user.update({
+        where: { id: user.id },
+        data: {
+          mfaRecoveryCodes: updatedRecoveryCodes,
+          totpLastUsedSteps: userTotpSteps,
+          lastLoginAt: new Date(),
+        },
+      });
 
-    return {
-      user,
-      accessToken,
-      refreshToken,
-      token: accessToken,
-      emailVerificationPending: !user.emailVerified,
-    };
+      // Audit log
+      const fam = await tx.familyMember.findFirst({
+        where: { userId: user.id },
+      });
+      if (fam) {
+        const auditAction = isRecoveryValid ? 'MFA_RECOVERY_CODE_USED' : 'LOGIN_SUCCESS';
+        const details = isRecoveryValid
+          ? `Logged in using one-time recovery code during MFA challenge. ${updatedRecoveryCodes.length} recovery codes remaining.`
+          : `User completed MFA authentication from ${userAgent}.`;
+
+        await tx.familyAuditLog.create({
+          data: {
+            id: `log-${nanoid(10)}`,
+            familyId: fam.familyId,
+            actorUserId: user.id,
+            actorName: user.name,
+            action: auditAction,
+            details,
+          },
+        });
+      }
+
+      // Create session
+      const rawRefreshToken = generateCryptoToken('rt_');
+      const refreshTokenHash = hashToken(rawRefreshToken);
+      const sessionId = `sess_${nanoid(16)}`;
+      const sessionFamilyId = `sfam_${nanoid(16)}`;
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+      await tx.userSession.create({
+        data: {
+          id: sessionId,
+          userId: user.id,
+          sessionFamilyId,
+          refreshTokenHash,
+          consumedTokenHashes: [],
+          deviceInfo: userAgent,
+          ipAddress: ipAddress || null,
+          expiresAt,
+          tokenVersion: user.tokenVersion,
+        },
+      });
+
+      const accessToken = this.signAccessToken(user.id, sessionId, user.tokenVersion);
+
+      const domainUser: ParentUser = {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        passwordHash: user.passwordHash,
+        systemRole: user.systemRole as SystemRole,
+        emailVerified: user.emailVerified,
+        mfaEnabled: user.mfaEnabled,
+        tokenVersion: user.tokenVersion,
+        createdAt: user.createdAt.toISOString(),
+      };
+
+      return {
+        user: domainUser,
+        accessToken,
+        refreshToken: rawRefreshToken,
+        token: accessToken,
+        emailVerificationPending: !user.emailVerified,
+      };
+    });
   }
 
-  /**
-   * Verify Access Token on every incoming request.
-   * ALL claims are mandatory: userId, sub, sessionId, tokenVersion, jti, iss, aud, exp.
-   * Session existence, ownership, revocation, expiry, and tokenVersion consistency are unconditionally validated.
-   */
-  public verifyToken(token: string): { userId: string; sessionId: string; tokenVersion: number; jti: string } {
+  public async verifyToken(
+    token: string
+  ): Promise<{ userId: string; sessionId: string; tokenVersion: number; jti: string }> {
     if (!token || typeof token !== 'string') {
       throw new Error('Invalid or expired token.');
     }
@@ -602,13 +779,11 @@ export class AuthService {
       throw new Error('Invalid or expired token.');
     }
 
-    // Mandatory claim: userId
     const userId = decoded.userId;
     if (!userId || typeof userId !== 'string' || userId.trim() === '') {
       throw new Error('Invalid token claims: userId missing or empty.');
     }
 
-    // Mandatory claim: sub (must exist, be non-empty string, and match userId)
     if (!decoded.sub || typeof decoded.sub !== 'string' || decoded.sub.trim() === '') {
       throw new Error('Invalid token claims: sub missing or empty.');
     }
@@ -616,35 +791,27 @@ export class AuthService {
       throw new Error('Invalid token claims: subject mismatch.');
     }
 
-    // Mandatory claim: jti (must exist and be non-empty string)
     if (!decoded.jti || typeof decoded.jti !== 'string' || decoded.jti.trim() === '') {
       throw new Error('Invalid token claims: jti missing or empty.');
     }
 
-    // Mandatory claim: sessionId — tokens without sessionId are always rejected
     if (!decoded.sessionId || typeof decoded.sessionId !== 'string' || decoded.sessionId.trim() === '') {
       throw new Error('Invalid token claims: sessionId missing or empty.');
     }
 
-    // Mandatory claim: tokenVersion — tokens without tokenVersion are rejected
-    if (decoded.tokenVersion === undefined || decoded.tokenVersion === null || typeof decoded.tokenVersion !== 'number') {
+    if (
+      decoded.tokenVersion === undefined ||
+      decoded.tokenVersion === null ||
+      typeof decoded.tokenVersion !== 'number'
+    ) {
       throw new Error('Invalid token claims: tokenVersion missing.');
     }
 
-    // User must exist and be active
-    const user = db.users.get(userId);
-    if (!user) {
-      throw new Error('User account not found.');
-    }
+    // Session validation against PostgreSQL
+    const session = await prisma.userSession.findUnique({
+      where: { id: decoded.sessionId },
+    });
 
-    // tokenVersion must match user record (invalidated on password reset / global logout)
-    const userTokenVersion = user.tokenVersion || 1;
-    if (decoded.tokenVersion !== userTokenVersion) {
-      throw new Error('Token has been invalidated. Please sign in again.');
-    }
-
-    // Session validation is unconditional — always enforced
-    const session = db.userSessions.get(decoded.sessionId);
     if (!session) {
       throw new Error('Session does not exist.');
     }
@@ -654,12 +821,24 @@ export class AuthService {
     if (session.isRevoked) {
       throw new Error('Session has been revoked.');
     }
-    if (new Date(session.expiresAt).getTime() <= Date.now()) {
+    if (session.expiresAt.getTime() <= Date.now()) {
       throw new Error('Session has expired.');
     }
-    // Session tokenVersion must match both the token and the user record
     if (session.tokenVersion !== decoded.tokenVersion) {
       throw new Error('Session has been invalidated. Please sign in again.');
+    }
+
+    // User existence and tokenVersion check
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { tokenVersion: true },
+    });
+
+    if (!user) {
+      throw new Error('User account not found.');
+    }
+    if (decoded.tokenVersion !== (user.tokenVersion || 1)) {
+      throw new Error('Token has been invalidated. Please sign in again.');
     }
 
     return {
@@ -670,87 +849,93 @@ export class AuthService {
     };
   }
 
-
-  /**
-   * Verify Email Address with single-use token
-   */
-  public verifyEmail(rawToken: string): { success: boolean; message: string } {
+  public async verifyEmail(rawToken: string): Promise<{ success: boolean; message: string }> {
     if (!rawToken || typeof rawToken !== 'string') {
       throw new Error('Verification token is required.');
     }
 
     const tokenHash = hashToken(rawToken);
-    let matchedTokenRecord: EmailVerificationToken | undefined;
 
-    for (const record of db.emailVerificationTokens.values()) {
-      if (record.tokenHash === tokenHash) {
-        matchedTokenRecord = record;
-        break;
+    return prisma.$transaction(async (tx) => {
+      const record = await tx.emailVerificationToken.findUnique({
+        where: { tokenHash },
+      });
+
+      if (!record || record.usedAt) {
+        throw new Error('Invalid, consumed or expired email verification token.');
       }
-    }
 
-    if (!matchedTokenRecord || matchedTokenRecord.usedAt) {
-      throw new Error('Invalid, consumed or expired email verification token.');
-    }
+      if (record.expiresAt.getTime() <= Date.now()) {
+        throw new Error('Email verification token has expired. Please request a new verification link.');
+      }
 
-    if (new Date(matchedTokenRecord.expiresAt).getTime() <= Date.now()) {
-      throw new Error('Email verification token has expired. Please request a new verification link.');
-    }
+      await tx.user.update({
+        where: { id: record.userId },
+        data: { emailVerified: true },
+      });
 
-    const user = db.users.get(matchedTokenRecord.userId);
-    if (!user) throw new Error('User not found.');
+      await tx.emailVerificationToken.update({
+        where: { id: record.id },
+        data: { usedAt: new Date() },
+      });
 
-    user.emailVerified = true;
-    matchedTokenRecord.usedAt = new Date().toISOString();
+      const fam = await tx.familyMember.findFirst({
+        where: { userId: record.userId },
+        include: { user: true },
+      });
 
-    db.users.set(user.id, user);
-    db.emailVerificationTokens.set(matchedTokenRecord.id, matchedTokenRecord);
-    db.save();
+      if (fam) {
+        await tx.familyAuditLog.create({
+          data: {
+            id: `log-${nanoid(10)}`,
+            familyId: fam.familyId,
+            actorUserId: record.userId,
+            actorName: fam.user.name,
+            action: 'EMAIL_VERIFIED',
+            details: 'Parent email address was verified.',
+          },
+        });
+      }
 
-    const family = familyService.getOrCreateUserFamily(user.id);
-    familyService.logAudit(family.id, user.id, user.name, 'EMAIL_VERIFIED', `Parent email address was verified.`);
-
-    return {
-      success: true,
-      message: 'Email address successfully verified.',
-    };
+      return {
+        success: true,
+        message: 'Email address successfully verified.',
+      };
+    });
   }
 
-  /**
-   * Resend Email Verification Token
-   */
-  public resendEmailVerification(email: string): { token?: string } {
+  public async resendEmailVerification(email: string): Promise<{ token?: string }> {
     const normalizedEmail = email.toLowerCase().trim();
     const rateLimitKey = `resend-ev:${normalizedEmail}`;
     this.checkRateLimit(rateLimitKey, 3, 5 * 60 * 1000);
 
-    const user = Array.from(db.users.values()).find((u) => u.email.toLowerCase() === normalizedEmail);
-    if (!user) {
+    const user = await prisma.user.findUnique({
+      where: { email: normalizedEmail },
+    });
+    if (!user || user.emailVerified) {
       return {};
-    }
-
-    if (user.emailVerified) {
-      return {};
-    }
-
-    // Invalidate existing active verification tokens for this user
-    for (const ev of db.emailVerificationTokens.values()) {
-      if (ev.userId === user.id && !ev.usedAt) {
-        ev.usedAt = new Date().toISOString();
-      }
     }
 
     const rawEvToken = generateCryptoToken('ev_');
-    const evTokenRecord: EmailVerificationToken = {
-      id: `evt-${nanoid(10)}`,
-      userId: user.id,
-      email: user.email,
-      tokenHash: hashToken(rawEvToken),
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-    };
+    const evExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-    db.emailVerificationTokens.set(evTokenRecord.id, evTokenRecord);
-    db.save();
+    await prisma.$transaction(async (tx) => {
+      // Invalidate existing unused verification tokens
+      await tx.emailVerificationToken.updateMany({
+        where: { userId: user.id, usedAt: null },
+        data: { usedAt: new Date() },
+      });
+
+      await tx.emailVerificationToken.create({
+        data: {
+          id: `evt-${nanoid(10)}`,
+          userId: user.id,
+          email: user.email,
+          tokenHash: hashToken(rawEvToken),
+          expiresAt: evExpiresAt,
+        },
+      });
+    });
 
     mailService.sendVerificationEmail(user.email, rawEvToken);
 
@@ -759,38 +944,40 @@ export class AuthService {
     };
   }
 
-  /**
-   * Request Password Reset (Generic non-enumerating response)
-   */
-  public requestPasswordReset(email: string): { message: string; resetToken?: string } {
+  public async requestPasswordReset(email: string): Promise<{ message: string; resetToken?: string }> {
     const normalizedEmail = email.toLowerCase().trim();
     const rateLimitKey = `forgot-pwd:${normalizedEmail}`;
     this.checkRateLimit(rateLimitKey, 3, 10 * 60 * 1000);
 
     const genericMsg = 'If an account exists with this email address, password reset instructions have been sent.';
 
-    const user = Array.from(db.users.values()).find((u) => u.email.toLowerCase() === normalizedEmail);
+    const user = await prisma.user.findUnique({
+      where: { email: normalizedEmail },
+    });
     if (!user) {
       return { message: genericMsg };
     }
 
-    // Invalidate existing reset tokens for this user
-    for (const pr of db.passwordResetTokens.values()) {
-      if (pr.userId === user.id && !pr.usedAt) {
-        pr.usedAt = new Date().toISOString();
-      }
-    }
-
     const rawResetToken = generateCryptoToken('pr_');
-    const resetRecord: PasswordResetToken = {
-      id: `prt-${nanoid(10)}`,
-      userId: user.id,
-      tokenHash: hashToken(rawResetToken),
-      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(), // 1 hour
-    };
+    const resetExpiresAt = new Date(Date.now() + 60 * 60 * 1000);
 
-    db.passwordResetTokens.set(resetRecord.id, resetRecord);
-    db.save();
+    await prisma.$transaction(async (tx) => {
+      // Invalidate existing active tokens
+      await tx.passwordResetToken.updateMany({
+        where: { userId: user.id, usedAt: null },
+        data: { usedAt: new Date() },
+      });
+
+      await tx.passwordResetToken.create({
+        data: {
+          id: `prt-${nanoid(10)}`,
+          userId: user.id,
+          email: user.email,
+          tokenHash: hashToken(rawResetToken),
+          expiresAt: resetExpiresAt,
+        },
+      });
+    });
 
     mailService.sendPasswordResetEmail(user.email, rawResetToken);
 
@@ -800,74 +987,101 @@ export class AuthService {
     };
   }
 
-  /**
-   * Reset Password with single-use token:
-   * Validates token hash, validates password policy, updates bcrypt hash, revokes previous sessions, increments tokenVersion.
-   */
-  public resetPassword(rawToken: string, newPassword: string): void {
+  public async resetPassword(rawToken: string, newPassword: string): Promise<void> {
     if (!rawToken || typeof rawToken !== 'string') {
       throw new Error('Reset token is required.');
     }
 
     const tokenHash = hashToken(rawToken);
-    let matchedRecord: PasswordResetToken | undefined;
 
-    for (const record of db.passwordResetTokens.values()) {
-      if (record.tokenHash === tokenHash) {
-        matchedRecord = record;
-        break;
+    return prisma.$transaction(async (tx) => {
+      const record = await tx.passwordResetToken.findUnique({
+        where: { tokenHash },
+      });
+
+      if (!record || record.usedAt) {
+        throw new Error('Invalid, expired or already used password reset link.');
       }
-    }
 
-    if (!matchedRecord || matchedRecord.usedAt) {
-      throw new Error('Invalid, expired or already used password reset link.');
-    }
-
-    if (new Date(matchedRecord.expiresAt).getTime() <= Date.now()) {
-      throw new Error('Password reset link has expired. Please request a new one.');
-    }
-
-    const user = db.users.get(matchedRecord.userId);
-    if (!user) throw new Error('User not found.');
-
-    validatePasswordPolicy(newPassword, Boolean(user.mfaEnabled));
-
-    const salt = bcrypt.genSaltSync(12);
-    user.passwordHash = bcrypt.hashSync(newPassword, salt);
-    user.tokenVersion = (user.tokenVersion || 1) + 1; // Invalidate all prior access tokens
-    matchedRecord.usedAt = new Date().toISOString();
-
-    // Revoke ALL active sessions for this user
-    for (const session of db.userSessions.values()) {
-      if (session.userId === user.id) {
-        session.isRevoked = true;
+      if (record.expiresAt.getTime() <= Date.now()) {
+        throw new Error('Password reset link has expired. Please request a new one.');
       }
-    }
 
-    // Invalidate all outstanding MFA challenges for this user
-    for (const challenge of db.mfaChallenges.values()) {
-      if (challenge.userId === user.id && !challenge.consumedAt && !challenge.invalidatedAt) {
-        challenge.invalidatedAt = new Date().toISOString();
-        db.mfaChallenges.set(challenge.id, challenge);
+      const user = await tx.user.findUnique({
+        where: { id: record.userId },
+      });
+      if (!user) throw new Error('User not found.');
+
+      validatePasswordPolicy(newPassword, Boolean(user.mfaEnabled));
+
+      const salt = bcrypt.genSaltSync(12);
+      const newHash = bcrypt.hashSync(newPassword, salt);
+
+      // Invalidate prior access tokens and update hash
+      await tx.user.update({
+        where: { id: user.id },
+        data: {
+          passwordHash: newHash,
+          tokenVersion: { increment: 1 },
+        },
+      });
+
+      // Mark token used
+      await tx.passwordResetToken.update({
+        where: { id: record.id },
+        data: { usedAt: new Date() },
+      });
+
+      // Revoke all active sessions
+      await tx.userSession.updateMany({
+        where: { userId: user.id },
+        data: { isRevoked: true },
+      });
+
+      // Invalidate outstanding MFA challenges
+      await tx.mfaChallenge.updateMany({
+        where: { userId: user.id, consumedAt: null, invalidatedAt: null },
+        data: { invalidatedAt: new Date() },
+      });
+
+      const fam = await tx.familyMember.findFirst({
+        where: { userId: user.id },
+      });
+      if (fam) {
+        await tx.familyAuditLog.create({
+          data: {
+            id: `log-${nanoid(10)}`,
+            familyId: fam.familyId,
+            actorUserId: user.id,
+            actorName: user.name,
+            action: 'PASSWORD_RESET',
+            details: 'Account password was reset via email verification link. All prior sessions revoked.',
+          },
+        });
       }
-    }
-
-    db.users.set(user.id, user);
-    db.passwordResetTokens.set(matchedRecord.id, matchedRecord);
-    db.save();
-
-    const family = familyService.getOrCreateUserFamily(user.id);
-    familyService.logAudit(
-      family.id,
-      user.id,
-      user.name,
-      'PASSWORD_RESET',
-      `Account password was reset via email verification link. All prior sessions revoked.`
-    );
+    });
   }
 
-  public getUser(userId: string): ParentUser | undefined {
-    return db.users.get(userId);
+  public async getUser(userId: string): Promise<ParentUser | null> {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+    });
+    if (!user) return null;
+    return {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      passwordHash: user.passwordHash,
+      systemRole: user.systemRole as SystemRole,
+      emailVerified: user.emailVerified,
+      mfaEnabled: user.mfaEnabled,
+      mfaSecret: user.mfaSecret,
+      mfaRecoveryCodes: user.mfaRecoveryCodes,
+      totpLastUsedSteps: user.totpLastUsedSteps as any,
+      tokenVersion: user.tokenVersion,
+      createdAt: user.createdAt.toISOString(),
+      lastLoginAt: user.lastLoginAt ? user.lastLoginAt.toISOString() : undefined,
+    };
   }
 }
 

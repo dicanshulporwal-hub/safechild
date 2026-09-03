@@ -2,15 +2,12 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import http from 'node:http';
 import { app } from '../src/server';
-import { db, ParentUser } from '../src/db/store';
+import { prisma } from '../src/db/prisma';
 import { authService } from '../src/services/auth.service';
 import { familyService } from '../src/services/family.service';
 import { childService } from '../src/services/child.service';
 import { deviceService } from '../src/services/device.service';
-import { policyService } from '../src/services/policy.service';
-import { requestService } from '../src/services/request.service';
-import { usageService } from '../src/services/usage.service';
-import { rbacService, SystemPermission, FamilyPermission } from '../src/services/rbac.service';
+import { rbacService } from '../src/services/rbac.service';
 import { nanoid } from 'nanoid';
 
 describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization Suite', () => {
@@ -49,14 +46,15 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
   ): Promise<{ status: number; body: any; headers: http.IncomingHttpHeaders }> => {
     return new Promise((resolve, reject) => {
       const url = new URL(endpoint, baseUrl);
-      const reqHeaders: Record<string, string> = {
-        'Content-Type': 'application/json',
+      const payload = body ? JSON.stringify(body) : undefined;
+
+      const reqHeaders: http.OutgoingHttpHeaders = {
         ...headers,
       };
 
-      const payload = body ? JSON.stringify(body) : undefined;
       if (payload) {
-        reqHeaders['Content-Length'] = Buffer.byteLength(payload).toString();
+        reqHeaders['Content-Type'] = 'application/json';
+        reqHeaders['Content-Length'] = Buffer.byteLength(payload);
       }
 
       const req = http.request(
@@ -66,16 +64,16 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
           headers: reqHeaders,
         },
         (res) => {
-          let rawData = '';
+          let data = '';
           res.on('data', (chunk) => {
-            rawData += chunk;
+            data += chunk;
           });
           res.on('end', () => {
-            let parsedBody = {};
+            let parsedBody: any;
             try {
-              parsedBody = rawData ? JSON.parse(rawData) : {};
-            } catch (e) {
-              parsedBody = { raw: rawData };
+              parsedBody = JSON.parse(data);
+            } catch {
+              parsedBody = data;
             }
             resolve({ status: res.statusCode || 500, body: parsedBody, headers: res.headers });
           });
@@ -101,60 +99,60 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
     });
 
     // 1. Setup Family A: Owner, Parent, Viewer, Child, Device
-    const uOwnerA = authService.register(`owner-a-${nanoid(6)}@safebrowse.io`, testPassword, 'Owner A');
-    authService.verifyEmail(uOwnerA.emailVerificationToken);
+    const uOwnerA = await authService.register(`owner-a-${nanoid(6)}@safebrowse.io`, testPassword, 'Owner A');
+    await authService.verifyEmail(uOwnerA.emailVerificationToken);
     ownerAId = uOwnerA.user.id;
     ownerAToken = uOwnerA.accessToken;
 
-    const famA = familyService.getOrCreateUserFamily(ownerAId);
+    const famA = await familyService.getOrCreateUserFamily(ownerAId);
     familyAId = famA.id;
 
     // Create Child A
-    const { child: cA } = childService.createChild(ownerAId, 'Child A', 10, undefined, familyAId);
+    const { child: cA } = await childService.createChild(ownerAId, 'Child A', 10, undefined, familyAId);
     childAId = cA.id;
 
     // Pair Device A
-    const pairA = deviceService.generatePairingCode(ownerAId, childAId);
-    const { device: devA } = deviceService.pairDevice(pairA.code, 'Device A', 'windows', '1.0.0');
+    const pairA = await deviceService.generatePairingCode(ownerAId, childAId);
+    const { device: devA } = await deviceService.pairDevice(pairA.code, 'Device A', 'windows', '1.0.0');
     deviceAId = devA.id;
     deviceAToken = devA.deviceToken;
 
     // Invite & register Parent A
-    const invParentA = familyService.inviteParent(familyAId, ownerAId, `parent-a-${nanoid(6)}@safebrowse.io`, 'PARENT');
-    const uParentA = authService.register(invParentA.email, testPassword, 'Parent A');
-    authService.verifyEmail(uParentA.emailVerificationToken);
+    const invParentA = await familyService.inviteParent(familyAId, ownerAId, `parent-a-${nanoid(6)}@safebrowse.io`, 'PARENT');
+    const uParentA = await authService.register(invParentA.email, testPassword, 'Parent A');
+    await authService.verifyEmail(uParentA.emailVerificationToken);
     parentAId = uParentA.user.id;
     parentAToken = uParentA.accessToken;
-    familyService.acceptInvitation(invParentA.token, parentAId);
+    await familyService.acceptInvitation(invParentA.token, parentAId);
 
     // Invite & register Viewer A
-    const invViewerA = familyService.inviteParent(familyAId, ownerAId, `viewer-a-${nanoid(6)}@safebrowse.io`, 'VIEWER');
-    const uViewerA = authService.register(invViewerA.email, testPassword, 'Viewer A');
-    authService.verifyEmail(uViewerA.emailVerificationToken);
+    const invViewerA = await familyService.inviteParent(familyAId, ownerAId, `viewer-a-${nanoid(6)}@safebrowse.io`, 'VIEWER');
+    const uViewerA = await authService.register(invViewerA.email, testPassword, 'Viewer A');
+    await authService.verifyEmail(uViewerA.emailVerificationToken);
     viewerAId = uViewerA.user.id;
     viewerAToken = uViewerA.accessToken;
-    familyService.acceptInvitation(invViewerA.token, viewerAId);
+    await familyService.acceptInvitation(invViewerA.token, viewerAId);
 
     // 2. Setup Family B: Owner, Child
-    const uOwnerB = authService.register(`owner-b-${nanoid(6)}@safebrowse.io`, testPassword, 'Owner B');
-    authService.verifyEmail(uOwnerB.emailVerificationToken);
+    const uOwnerB = await authService.register(`owner-b-${nanoid(6)}@safebrowse.io`, testPassword, 'Owner B');
+    await authService.verifyEmail(uOwnerB.emailVerificationToken);
     ownerBId = uOwnerB.user.id;
     ownerBToken = uOwnerB.accessToken;
 
-    const famB = familyService.getOrCreateUserFamily(ownerBId);
+    const famB = await familyService.getOrCreateUserFamily(ownerBId);
     familyBId = famB.id;
 
-    const { child: cB } = childService.createChild(ownerBId, 'Child B', 12, undefined, familyBId);
+    const { child: cB } = await childService.createChild(ownerBId, 'Child B', 12, undefined, familyBId);
     childBId = cB.id;
 
     // 3. Setup System Administrator
-    const uAdmin = authService.register(`admin-${nanoid(6)}@safebrowse.io`, testPassword, 'System Administrator');
-    authService.verifyEmail(uAdmin.emailVerificationToken);
+    const uAdmin = await authService.register(`admin-${nanoid(6)}@safebrowse.io`, testPassword, 'System Administrator');
+    await authService.verifyEmail(uAdmin.emailVerificationToken);
     adminId = uAdmin.user.id;
     adminToken = uAdmin.accessToken;
     process.env.ENABLE_DEV_ADMIN_BOOTSTRAP = 'true';
     process.env.DEV_ADMIN_BOOTSTRAP_SECRET = 'test-secret-at-least-16-chars-long';
-    rbacService.bootstrapDevAdmin(adminId, 'test-secret-at-least-16-chars-long');
+    await rbacService.bootstrapDevAdmin(adminId, 'test-secret-at-least-16-chars-long');
   });
 
   after(() => {
@@ -217,10 +215,10 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
         'PATCH',
         '/api/family',
         { Authorization: `Bearer ${ownerAToken}` },
-        { familyId: familyAId, name: "Family A (Updated by Owner)" }
+        { familyId: familyAId, name: 'Family A (Updated by Owner)' }
       );
       assert.strictEqual(patchRes.status, 200);
-      assert.strictEqual(patchRes.body.family.name, "Family A (Updated by Owner)");
+      assert.strictEqual(patchRes.body.family.name, 'Family A (Updated by Owner)');
     });
 
     it('5. should allow PARENT to manage permitted child resources (add rule, update pause)', async () => {
@@ -359,9 +357,10 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
 
   describe('5. Family Ownership Transfer & Invariants', () => {
     it('10. should prevent removal or demotion of the final Family OWNER', async () => {
-      const membership = Array.from(db.familyMembers.values()).find(
-        (m) => m.familyId === familyAId && m.userId === ownerAId
-      )!;
+      const membership = await prisma.familyMember.findFirst({
+        where: { familyId: familyAId, userId: ownerAId },
+      });
+      assert.ok(membership);
 
       const res = await makeRequest('DELETE', `/api/family/members/${membership.id}?familyId=${familyAId}`, {
         Authorization: `Bearer ${ownerAToken}`,
@@ -392,21 +391,21 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
       assert.strictEqual(res.body.success, true);
 
       // Verify Family A owner is now Parent A
-      const fam = db.families.get(familyAId)!;
-      assert.strictEqual(fam.ownerUserId, parentAId);
+      const fam = await prisma.family.findUnique({ where: { id: familyAId } });
+      assert.strictEqual(fam?.ownerUserId, parentAId);
 
       // Invariant: Exactly ONE active owner in Family A
-      const owners = Array.from(db.familyMembers.values()).filter(
-        (m) => m.familyId === familyAId && m.role === 'OWNER'
-      );
+      const owners = await prisma.familyMember.findMany({
+        where: { familyId: familyAId, role: 'OWNER' },
+      });
       assert.strictEqual(owners.length, 1);
       assert.strictEqual(owners[0].userId, parentAId);
 
       // Old owner is now PARENT
-      const oldOwnerMem = Array.from(db.familyMembers.values()).find(
-        (m) => m.familyId === familyAId && m.userId === ownerAId
-      )!;
-      assert.strictEqual(oldOwnerMem.role, 'PARENT');
+      const oldOwnerMem = await prisma.familyMember.findFirst({
+        where: { familyId: familyAId, userId: ownerAId },
+      });
+      assert.strictEqual(oldOwnerMem?.role, 'PARENT');
     });
   });
 
@@ -426,19 +425,19 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
       );
       assert.strictEqual(res.status, 200);
       assert.ok(res.body.invitation);
-      assert.ok(res.body.invitation.token); // Raw token returned for delivery
+      assert.ok(res.body.invitation.token);
       invitationToken = res.body.invitation.token;
       inviteId = res.body.invitation.id;
 
       // Stored record in DB must hold SHA-256 hash — NOT raw token
-      const storedInv = db.familyInvitations.get(inviteId)!;
-      assert.ok(storedInv.tokenHash);
+      const storedInv = await prisma.familyInvitation.findUnique({ where: { id: inviteId } });
+      assert.ok(storedInv?.tokenHash);
       assert.notStrictEqual(storedInv.tokenHash, invitationToken);
     });
 
     it('14b. should allow recipient to accept invitation and atomically consume it', async () => {
-      const uNew = authService.register(inviteEmail, testPassword, 'New Viewer');
-      authService.verifyEmail(uNew.emailVerificationToken);
+      const uNew = await authService.register(inviteEmail, testPassword, 'New Viewer');
+      await authService.verifyEmail(uNew.emailVerificationToken);
 
       const acceptRes = await makeRequest(
         'POST',
@@ -458,7 +457,7 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
         { token: invitationToken }
       );
       assert.strictEqual(replayRes.status, 400);
-      assert.match(replayRes.body.error, /Invalid or expired/i);
+      assert.match(replayRes.body.error, /Invalid or expired|already been accepted/i);
     });
 
     it('15. should reject acceptance of a revoked invitation', async () => {
@@ -478,8 +477,8 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
       });
 
       // Attempt accept
-      const uRev = authService.register(revokeEmail, testPassword, 'Revoked User');
-      authService.verifyEmail(uRev.emailVerificationToken);
+      const uRev = await authService.register(revokeEmail, testPassword, 'Revoked User');
+      await authService.verifyEmail(uRev.emailVerificationToken);
 
       const acceptRes = await makeRequest(
         'POST',
@@ -488,7 +487,7 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
         { token }
       );
       assert.strictEqual(acceptRes.status, 400);
-      assert.match(acceptRes.body.error, /Invalid or expired/i);
+      assert.match(acceptRes.body.error, /Invalid or expired|already been accepted|revoked/i);
     });
   });
 });

@@ -7,7 +7,7 @@ export interface AuthenticatedRequest extends Request {
   tokenVersion?: number;
 }
 
-export function authMiddleware(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+export async function authMiddleware(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   let token: string | undefined;
 
   const authHeader = req.headers.authorization;
@@ -22,7 +22,7 @@ export function authMiddleware(req: AuthenticatedRequest, res: Response, next: N
   }
 
   try {
-    const decoded = authService.verifyToken(token);
+    const decoded = await authService.verifyToken(token);
     req.userId = decoded.userId;
     req.sessionId = decoded.sessionId;
     req.tokenVersion = decoded.tokenVersion;

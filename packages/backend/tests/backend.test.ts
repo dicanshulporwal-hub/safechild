@@ -13,34 +13,35 @@ describe('SafeBrowse Backend Service Integration Tests', () => {
   let childId: string;
   let deviceId: string;
 
-  it('should register and authenticate test parent user', () => {
-    const reg = authService.register('test_parent_main@porwal.io', 'StrongTestPassphrase2026!', 'Test Parent');
-    authService.verifyEmail(reg.emailVerificationToken);
-    const { user, token } = authService.login('test_parent_main@porwal.io', 'StrongTestPassphrase2026!');
+  it('should register and authenticate test parent user', async () => {
+    const email = `test_parent_main_${Date.now()}@porwal.io`;
+    const reg = await authService.register(email, 'StrongTestPassphrase2026!', 'Test Parent');
+    await authService.verifyEmail(reg.emailVerificationToken);
+    const { user, token } = await authService.login(email, 'StrongTestPassphrase2026!');
     assert.ok(user);
     assert.ok(token);
-    assert.strictEqual(user.email, 'test_parent_main@porwal.io');
+    assert.strictEqual(user.email, email);
     parentId = user.id;
-    const fam = familyService.getOrCreateUserFamily(user.id);
+    const fam = await familyService.getOrCreateUserFamily(user.id);
 
-    const { child } = childService.createChild(parentId, 'Rahul', 10, '🧒', fam.id);
+    const { child } = await childService.createChild(parentId, 'Rahul', 10, '🧒', fam.id);
     assert.ok(child);
     childId = child.id;
   });
 
-  it('should list children and manage child profile', () => {
-    const children = childService.getChildrenForParent(parentId);
+  it('should list children and manage child profile', async () => {
+    const children = await childService.getChildrenForParent(parentId);
     assert.ok(children.length >= 1);
     const rahul = children.find((c) => c.name === 'Rahul');
     assert.ok(rahul);
     assert.strictEqual(rahul.id, childId);
   });
 
-  it('should generate pairing code and claim device', () => {
-    const pairing = deviceService.generatePairingCode(parentId, childId);
+  it('should generate pairing code and claim device', async () => {
+    const pairing = await deviceService.generatePairingCode(parentId, childId);
     assert.ok(pairing.code);
 
-    const { device, policy } = deviceService.pairDevice(
+    const { device, policy } = await deviceService.pairDevice(
       pairing.code,
       "Rahul's Windows Laptop",
       'windows',
@@ -55,11 +56,12 @@ describe('SafeBrowse Backend Service Integration Tests', () => {
     deviceId = device.id;
   });
 
-  it('should handle device heartbeat', () => {
-    const dev = deviceService.getDevicesForChild(childId).find((d) => d.id === deviceId);
+  it('should handle device heartbeat', async () => {
+    const devices = await deviceService.getDevicesForChild(childId);
+    const dev = devices.find((d) => d.id === deviceId);
     assert.ok(dev);
 
-    const hbRes = deviceService.processHeartbeat({
+    const hbRes = await deviceService.processHeartbeat({
       deviceId: dev.id,
       deviceToken: dev.deviceToken,
       activePolicyVersion: dev.activePolicyVersion,
@@ -72,20 +74,20 @@ describe('SafeBrowse Backend Service Integration Tests', () => {
     assert.strictEqual(hbRes.policyChanged, false);
   });
 
-  it('should add rules and increment policy version', () => {
-    const currentPolicy = policyService.getPolicyForChild(childId);
+  it('should add rules and increment policy version', async () => {
+    const currentPolicy = await policyService.getPolicyForChild(childId);
     const initialVersion = currentPolicy.version;
 
-    const updated = policyService.addRule(childId, 'https://www.tiktok.com', 'BLOCK', 'No TikTok');
+    const updated = await policyService.addRule(childId, 'https://www.tiktok.com', 'BLOCK', 'No TikTok');
     assert.strictEqual(updated.version, initialVersion + 1);
     const rule = updated.rules.find((r: PolicyRule) => r.domain === 'tiktok.com');
     assert.ok(rule);
     assert.strictEqual(rule.action, 'BLOCK');
   });
 
-  it('should process Ask Parent flow end-to-end', () => {
+  it('should process Ask Parent flow end-to-end', async () => {
     // 1. Child creates request for youtube.com
-    const req = requestService.createRequest(
+    const req = await requestService.createRequest(
       childId,
       deviceId,
       'youtube.com',
@@ -96,7 +98,7 @@ describe('SafeBrowse Backend Service Integration Tests', () => {
     assert.strictEqual(req.domain, 'youtube.com');
 
     // 2. Parent approves for 15 minutes
-    const { request: resolvedReq, policy: updatedPolicy } = requestService.resolveRequest(
+    const { request: resolvedReq, policy: updatedPolicy } = await requestService.resolveRequest(
       req.id,
       parentId,
       'APPROVE',

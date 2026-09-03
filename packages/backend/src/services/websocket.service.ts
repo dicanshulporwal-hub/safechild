@@ -2,7 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { Server } from 'http';
 import url from 'url';
 import { authService } from './auth.service';
-import { db } from '../db/store';
+import { prisma } from '../db/prisma';
 
 export type SocketEventType =
   | 'POLICY_UPDATED'
@@ -40,7 +40,7 @@ export class WebSocketManager {
   public init(server: Server) {
     this.wss = new WebSocketServer({ server, path: '/ws' });
 
-    this.wss.on('connection', (ws: WebSocket, req) => {
+    this.wss.on('connection', async (ws: WebSocket, req) => {
       const parsedUrl = url.parse(req.url || '', true);
       const token = parsedUrl.query.token as string | undefined;
       const deviceToken = parsedUrl.query.deviceToken as string | undefined;
@@ -55,7 +55,7 @@ export class WebSocketManager {
       // 1. Check if token provided in URL query string
       if (token) {
         try {
-          const decoded = authService.verifyToken(token);
+          const decoded = await authService.verifyToken(token);
           clientInfo.parentId = decoded.userId;
           clientInfo.authenticated = true;
           clientInfo.type = 'parent';
@@ -63,8 +63,10 @@ export class WebSocketManager {
           // invalid token
         }
       } else if (deviceToken && deviceId) {
-        const device = db.devices.get(deviceId);
-        if (device && device.deviceToken === deviceToken) {
+        const device = await prisma.device.findUnique({
+          where: { id: deviceId },
+        });
+        if (device && device.deviceToken === deviceToken && !device.isRevoked) {
           clientInfo.deviceId = device.id;
           clientInfo.childId = device.childId;
           clientInfo.parentId = device.parentId;
@@ -76,15 +78,15 @@ export class WebSocketManager {
       this.connections.add(clientInfo);
 
       // Authenticate message handler
-      ws.on('message', (data: string) => {
+      ws.on('message', async (data: string) => {
         try {
           const msg = JSON.parse(data.toString());
-          
+
           if (msg.type === 'AUTH_PARENT' || msg.type === 'REGISTER') {
             const authToken = msg.token || msg.jwt;
             if (authToken) {
               try {
-                const decoded = authService.verifyToken(authToken);
+                const decoded = await authService.verifyToken(authToken);
                 clientInfo.parentId = decoded.userId;
                 clientInfo.childId = msg.childId;
                 clientInfo.type = 'parent';
@@ -94,13 +96,14 @@ export class WebSocketManager {
                 ws.send(JSON.stringify({ type: 'AUTH_ERROR', message: 'Invalid JWT token' }));
               }
             } else if (msg.parentId && !clientInfo.authenticated) {
-              // Backward compatible registration if already authenticated or in dev
               clientInfo.childId = msg.childId;
             }
           } else if (msg.type === 'AUTH_DEVICE') {
             const { deviceId: dId, deviceToken: dTok } = msg;
-            const device = db.devices.get(dId);
-            if (device && device.deviceToken === dTok) {
+            const device = await prisma.device.findUnique({
+              where: { id: dId },
+            });
+            if (device && device.deviceToken === dTok && !device.isRevoked) {
               clientInfo.deviceId = device.id;
               clientInfo.childId = device.childId;
               clientInfo.parentId = device.parentId;
@@ -126,8 +129,6 @@ export class WebSocketManager {
     for (const conn of this.connections) {
       if (conn.ws.readyState !== WebSocket.OPEN) continue;
 
-      // Only send to authenticated connections
-      // If message is restricted to a parent, enforce tenancy
       if (message.parentId && conn.parentId && conn.parentId !== message.parentId) {
         continue;
       }
