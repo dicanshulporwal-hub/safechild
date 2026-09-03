@@ -2,14 +2,14 @@
   "version": "1.0.0",
   "stage": "Stage 11 Step 3F",
   "branch": "security/stage11-step3-rbac",
-  "commit": "4ea1fb47ec505de8b7ae89d65b2a04b947fd1337",
-  "cleanWorkingTree": false,
-  "timestamp": "2026-09-03T10:28:29.563Z",
+  "commit": "2e7c31613b24a1b4a8e9a9933c677f2d6765e341",
+  "cleanWorkingTree": true,
+  "timestamp": "2026-09-03T10:28:51.763Z",
   "archive": {
     "filename": "safebrowse-stage11-step3f-review.zip",
-    "sha256": "421afbbf2c46572612e03899a2819d4ac97356f34e6e44d09e4cfce478edd970",
-    "sizeBytes": 432058,
-    "totalFiles": 186
+    "sha256": "3f01254e3ad3a791425a64c443a70c53d9362106a84fed8bd32cac85626f1fb1",
+    "sizeBytes": 432940,
+    "totalFiles": 187
   },
   "status": "CERTIFIED",
   "singleSystemOfRecord": "PostgreSQL 16 via Prisma ORM",
