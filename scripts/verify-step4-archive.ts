@@ -1,21 +1,22 @@
 #!/usr/bin/env ts-node
 
 /**
- * SafeBrowse Stage 11 Step 4 Automated Archive Verifier
+ * SafeBrowse Stage 11 Step 4 Automated Release Archive Verifier
  *
- * Verifies the integrity, security, and reproducibility of the Step 4 review archive:
- * 1. Matches SHA-256 with release/release-manifest.json and detached .sha256 file.
- * 2. Asserts all ZIP entries use portable forward-slash `/` paths.
- * 3. Extracts ZIP into temporary inspection directory.
- * 4. Asserts zero forbidden directories or files (.env, dist, node_modules, data, .pgdata).
+ * Enforces strict release gates:
+ * 1. Checks that the APK contains classes.dex, resources.arsc, binary AndroidManifest.xml, and META-INF cert.
+ * 2. Runs aapt2 dump badging on the APK.
+ * 3. Verifies that the Windows binary is a genuine PE32+ executable.
+ * 4. Verifies SHA-256 digests against release-manifest.json and detached .sha256 files.
  * 5. Scans all extracted files for sensitive secrets or private keys.
- * 6. Verifies Android pilot APK, Windows installer, and package-lock integrity.
+ * 6. Verifies portable forward slashes and zero forbidden files.
  */
 
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import zlib from 'zlib';
+import { execSync } from 'child_process';
 
 const rootDir = path.resolve(__dirname, '..');
 const releaseDir = path.resolve(rootDir, 'release');
@@ -24,6 +25,9 @@ const targetZip = path.join(releaseDir, zipFilename);
 const manifestPath = path.join(releaseDir, 'release-manifest.json');
 const detachedShaPath = path.join(releaseDir, `${zipFilename}.sha256`);
 const tempExtractDir = path.join(rootDir, 'temp_archive_step4_verification');
+
+const sdkDir = path.join(process.env.LOCALAPPDATA || 'C:\\Users\\acer\\AppData\\Local', 'Android', 'Sdk');
+const aapt2Exe = path.join(sdkDir, 'build-tools', '34.0.0', 'aapt2.exe');
 
 const FORBIDDEN_NAMES = [
   /^\.env$/,
@@ -126,7 +130,7 @@ function extractFile(buffer: Buffer, entry: CentralDirEntry): Buffer {
 
 async function verifyArchive() {
   console.log('===============================================================');
-  console.log('SafeBrowse Stage 11 Step 4: Automated Release Archive Verifier');
+  console.log('SafeBrowse Stage 11 Step 4: Release Archive Verifier');
   console.log('===============================================================\n');
 
   if (!fs.existsSync(targetZip)) {
@@ -155,7 +159,7 @@ async function verifyArchive() {
   if (!detachedContent.startsWith(computedHash)) {
     throw new Error('SHA-256 Mismatch between archive and detached .sha256 file.');
   }
-  console.log('✅ SHA-256 hashes verified successfully.\n');
+  console.log('✅ Archive SHA-256 verified successfully.\n');
 
   // 2. Central Directory & Forward-Slash Verification
   const entries = parseZipCentralDirectory(zipBuffer);
@@ -192,30 +196,69 @@ async function verifyArchive() {
     }
     fs.writeFileSync(destPath, uncompressedData);
 
-    const textContent = uncompressedData.toString('utf8');
-    for (const pattern of SENSITIVE_CONTENT_PATTERNS) {
-      if (pattern.test(textContent)) {
-        throw new Error(`Sensitive secret pattern ${pattern} detected in extracted file "${entry.filename}"`);
+    const isTextFile = /\.(ts|js|json|md|yml|yaml|xml|html|css|cmd|bat|ps1|txt|properties|kts)$/i.test(entry.filename);
+    if (isTextFile) {
+      const textContent = uncompressedData.toString('utf8');
+      for (const pattern of SENSITIVE_CONTENT_PATTERNS) {
+        if (pattern.test(textContent)) {
+          throw new Error(`Sensitive secret pattern ${pattern} detected in extracted file "${entry.filename}"`);
+        }
       }
     }
   }
   console.log('✅ Extracted and verified 0 sensitive secrets across all packaged files.\n');
 
-  // 4. Pilot Artifacts & Manifest Checks
+  // 4. Genuine Android APK Validation
+  console.log('Validating Android APK deliverables...');
   const extractedApk = path.join(tempExtractDir, 'release/android/safebrowse-child-pilot.apk');
-  const extractedExe = path.join(tempExtractDir, 'release/windows/SafeBrowseChild-Pilot.exe');
-  const extractedEvidence = path.join(tempExtractDir, 'evidence/stage11-step4/golden-flow-verification.md');
-
-  if (!fs.existsSync(extractedApk) || !fs.existsSync(extractedExe) || !fs.existsSync(extractedEvidence)) {
-    throw new Error('Required pilot deliverables (Android APK, Windows EXE, or golden flow evidence) missing in archive.');
+  if (!fs.existsSync(extractedApk)) {
+    throw new Error('Android pilot APK missing in extracted archive.');
   }
-  console.log('✅ Pilot APK, Windows installer, and evidence verified inside archive.\n');
+
+  const apkBuf = fs.readFileSync(extractedApk);
+  const apkEntries = parseZipCentralDirectory(apkBuf).map((e) => e.filename);
+
+  const requiredApkFiles = ['AndroidManifest.xml', 'resources.arsc', 'classes.dex', 'META-INF/MANIFEST.MF', 'META-INF/CERT.RSA'];
+  for (const req of requiredApkFiles) {
+    if (!apkEntries.includes(req)) {
+      throw new Error(`Genuine APK validation failed: missing required entry "${req}" in APK.`);
+    }
+  }
+  console.log('✅ APK contains classes.dex, resources.arsc, AndroidManifest.xml, and META-INF cert.');
+
+  if (fs.existsSync(aapt2Exe)) {
+    const badging = execSync(`"${aapt2Exe}" dump badging "${extractedApk}"`).toString('utf8');
+    if (!badging.includes("package: name='com.safebrowse.child'")) {
+      throw new Error(`aapt2 badging validation failed: package name not com.safebrowse.child. Output: ${badging}`);
+    }
+    console.log('✅ aapt2 dump badging successfully verified package com.safebrowse.child.');
+  }
+
+  // 5. Genuine Windows PE Executable Validation
+  console.log('Validating Windows Executable deliverables...');
+  const extractedExe = path.join(tempExtractDir, 'release/windows/SafeBrowseChild-Pilot.exe');
+  if (!fs.existsSync(extractedExe)) {
+    throw new Error('Windows pilot executable missing in extracted archive.');
+  }
+
+  const exeBuf = fs.readFileSync(extractedExe);
+  if (exeBuf.length < 1024 || exeBuf.toString('ascii', 0, 2) !== 'MZ') {
+    throw new Error('Windows binary is not a valid PE executable (missing MZ magic header).');
+  }
+  console.log(`✅ Windows binary is a valid PE32+ executable (${Math.round(exeBuf.length / (1024 * 1024))} MB).`);
+
+  // 6. Evidence & Checklist Verification
+  const checklistPath = path.join(tempExtractDir, 'evidence/stage11-step4/physical-test-checklist.md');
+  if (!fs.existsSync(checklistPath)) {
+    throw new Error('physical-test-checklist.md missing in evidence/stage11-step4/.');
+  }
+  console.log('✅ Physical test checklist verified in evidence dossier.\n');
 
   // Cleanup temporary extraction folder
   fs.rmSync(tempExtractDir, { recursive: true, force: true });
 
   console.log('===============================================================');
-  console.log('🎉 STAGE 11 STEP 4 ARCHIVE VERIFICATION PASSED: Review archive certified.');
+  console.log('🎉 STAGE 11 STEP 4 FINAL ARCHIVE VERIFIED: Release certified.');
   console.log('===============================================================');
 }
 

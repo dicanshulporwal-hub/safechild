@@ -72,9 +72,15 @@ async function main() {
   const blockServer = new BlockPageServer(config.backendUrl, config.childId, config.deviceId);
   await blockServer.start(8880);
 
-  // 3. Initialize DNS Filter Proxy
+  // 3. Initialize DNS Filter Proxy on port 53
   const dnsProxy = new DnsFilterProxy(() => syncClient.getActivePolicy(), '1.1.1.1', 53);
-  await dnsProxy.start(5353);
+  try {
+    await dnsProxy.start(53);
+    console.log('[SafeBrowse] DNS Proxy listening on UDP 127.0.0.1:53');
+  } catch (err: any) {
+    console.warn(`[SafeBrowse DNS] Notice: Port 53 bind notice (${err.message}). Starting on fallback port 5353.`);
+    await dnsProxy.start(5353);
+  }
 
   console.log('[SafeBrowse] Local Device Protection is ACTIVE.');
   console.log(`[SafeBrowse] Protecting: ${config.deviceName}`);

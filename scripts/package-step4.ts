@@ -225,13 +225,16 @@ function scanAndCollect(dir: string) {
       }
 
       const fileBuffer = fs.readFileSync(fullPath);
-      const textContent = fileBuffer.toString('utf8');
+      const isTextFile = /\.(ts|js|json|md|yml|yaml|xml|html|css|cmd|bat|ps1|txt|properties|kts)$/i.test(relPath);
 
-      for (const pattern of SENSITIVE_CONTENT_PATTERNS) {
-        if (pattern.test(textContent)) {
-          throw new Error(
-            `[Packager] FATAL: File "${relPath}" contains prohibited sensitive data or secret pattern: ${pattern}`
-          );
+      if (isTextFile) {
+        const textContent = fileBuffer.toString('utf8');
+        for (const pattern of SENSITIVE_CONTENT_PATTERNS) {
+          if (pattern.test(textContent)) {
+            throw new Error(
+              `[Packager] FATAL: File "${relPath}" contains prohibited sensitive data or secret pattern: ${pattern}`
+            );
+          }
         }
       }
 

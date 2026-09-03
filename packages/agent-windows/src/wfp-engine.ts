@@ -3,22 +3,22 @@ import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 
-export interface WfpEngineOptions {
+export interface FirewallEngineOptions {
   enableDoTBlocking?: boolean;
   enableDoHBlocking?: boolean;
   blockKnownDoHResolvers?: boolean;
 }
 
 /**
- * SafeBrowse Windows Filtering Platform (WFP) Enforcement Engine
+ * SafeBrowse Windows Firewall Enforcement Engine
  * 
- * Implements Layer 2 kernel/firewall packet filters:
+ * Accurately implements Layer 3/4 Windows Advanced Firewall rules (netsh advfirewall):
  * 1. Blocks outbound Port 853 (DNS-over-TLS) system-wide.
  * 2. Blocks direct IP connections to known DoH bootstrap endpoints on Port 443 to force
- *    browsers (Chrome, Edge, Firefox) to fall back to the local system DNS resolver.
- * 3. Restores all Windows network rules cleanly on shutdown.
+ *    browsers (Chrome, Edge, Firefox) to fall back to the local system DNS resolver on 127.0.0.1.
+ * 3. Restores all Windows network rules cleanly on shutdown/uninstall.
  */
-export class WfpEnforcementEngine {
+export class WindowsFirewallEngine {
   private activeRules: string[] = [];
   private isRunning: boolean = false;
 
@@ -34,44 +34,45 @@ export class WfpEnforcementEngine {
     '94.140.15.15',
   ];
 
-  constructor(private options: WfpEngineOptions = { enableDoTBlocking: true, enableDoHBlocking: true }) {}
+  constructor(private options: FirewallEngineOptions = { enableDoTBlocking: true, enableDoHBlocking: true }) {}
 
   /**
-   * Initialize and install WFP / Firewall callout rules
+   * Initialize and install Windows Firewall rules
    */
   public async initialize(): Promise<{ success: boolean; ruleCount: number; warning?: string }> {
     if (process.platform !== 'win32') {
-      return { success: true, ruleCount: 0, warning: 'Non-Windows platform detected; WFP simulation active.' };
+      return { success: true, ruleCount: 0, warning: 'Non-Windows platform detected; Firewall simulation active.' };
     }
 
     try {
       // 1. Install Rule: Block Outbound TCP/UDP Port 853 (DoT - DNS over TLS)
       if (this.options.enableDoTBlocking !== false) {
-        const dotRuleName = 'SafeBrowse_WFP_Block_DoT_853';
+        const dotRuleName = 'SafeBrowse_Block_DoT_853_TCP';
+        const dotUdpRuleName = 'SafeBrowse_Block_DoT_853_UDP';
         await execAsync(`netsh advfirewall firewall add rule name="${dotRuleName}" dir=out action=block protocol=TCP remoteport=853`);
-        await execAsync(`netsh advfirewall firewall add rule name="${dotRuleName}_UDP" dir=out action=block protocol=UDP remoteport=853`);
-        this.activeRules.push(dotRuleName, `${dotRuleName}_UDP`);
+        await execAsync(`netsh advfirewall firewall add rule name="${dotUdpRuleName}" dir=out action=block protocol=UDP remoteport=853`);
+        this.activeRules.push(dotRuleName, dotUdpRuleName);
       }
 
       // 2. Install Rule: Block direct HTTPS to known DoH Resolvers to force standard DNS fallback
       if (this.options.enableDoHBlocking !== false) {
-        const dohRuleName = 'SafeBrowse_WFP_Block_DoH_Bootstrap';
+        const dohRuleName = 'SafeBrowse_Block_DoH_Bootstrap';
         const remoteIpList = this.KNOWN_DOH_IPS.join(',');
         await execAsync(`netsh advfirewall firewall add rule name="${dohRuleName}" dir=out action=block protocol=TCP remoteip="${remoteIpList}" remoteport=443`);
         this.activeRules.push(dohRuleName);
       }
 
       this.isRunning = true;
-      console.log(`[WFP Engine] 🛡️ Successfully installed ${this.activeRules.length} WFP kernel callout rules.`);
+      console.log(`[Firewall Engine] 🛡️ Successfully installed ${this.activeRules.length} Windows Firewall rules.`);
       return { success: true, ruleCount: this.activeRules.length };
     } catch (e: any) {
-      console.warn(`[WFP Engine] Note: WFP elevated rule installation requires Administrator privileges (${e.message}). Proceeding with Layer 1 DNS filtering.`);
+      console.warn(`[Firewall Engine] Note: Elevated rule installation requires Administrator privileges (${e.message}). Proceeding with Local DNS filtering.`);
       return { success: false, ruleCount: 0, warning: e.message };
     }
   }
 
   /**
-   * Cleanly teardown and remove all WFP firewall callouts
+   * Cleanly teardown and remove all installed firewall rules
    */
   public async teardown(): Promise<void> {
     if (process.platform !== 'win32') return;
@@ -83,7 +84,7 @@ export class WfpEnforcementEngine {
     }
     this.activeRules = [];
     this.isRunning = false;
-    console.log('[WFP Engine] 🔄 WFP firewall callout rules cleanly removed.');
+    console.log('[Firewall Engine] 🔄 Windows Firewall rules cleanly removed.');
   }
 
   public getStatus() {
@@ -95,4 +96,5 @@ export class WfpEnforcementEngine {
   }
 }
 
-export const wfpEngine = new WfpEnforcementEngine();
+export const firewallEngine = new WindowsFirewallEngine();
+export const wfpEngine = firewallEngine; // Backward compatibility alias

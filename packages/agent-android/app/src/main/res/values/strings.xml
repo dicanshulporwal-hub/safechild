@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SafeBrowse Child</string>
+    <string name="pairing_title">Device Enrollment</string>
+    <string name="enter_code_hint">Enter 6-character pairing code</string>
+    <string name="pair_button">Enroll Device</string>
+    <string name="block_screen_title">Access Blocked</string>
+    <string name="block_screen_message">This website is restricted according to family protection rules.</string>
+    <string name="ask_parent_button">Ask Parent for Access</string>
+    <string name="vpn_notification_title">SafeBrowse Protection Active</string>
+    <string name="vpn_notification_text">Your device is protected with SafeBrowse DNS filtering.</string>
+</resources>

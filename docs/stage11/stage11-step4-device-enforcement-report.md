@@ -1,94 +1,65 @@
 # SafeBrowse Stage 11 Step 4: Real Device Enforcement and Local Pilot Validation Report
 
+**Status:** `IMPLEMENTED — AWAITING PHYSICAL VALIDATION`  
 **Execution Date:** 2026-09-03  
 **Branch:** `feature/stage11-step4-device-enforcement`  
-**Evaluation Status:** `IMPLEMENTED — AWAITING PHYSICAL VALIDATION`  
 **Single System of Record:** PostgreSQL 16+ via Prisma ORM  
 
 ---
 
-## 1. Executive Summary & Assessment Criteria
+## 1. Executive Summary & Verification Methodology
 
-Stage 11 Step 4 implements and validates the native device enforcement layer for both Android (`packages/agent-android`) and Windows (`packages/agent-windows`) child devices against the PostgreSQL-backed single system of record.
+Stage 11 Step 4 provides genuine native toolchain builds for both Android and Windows pilot enforcement agents:
+- **Android**: Compiled using the official Android SDK toolchain (`aapt2`, `android.jar`, binary `AndroidManifest.xml`, `resources.arsc`, `classes.dex`, `zipalign`) into [`release/android/safebrowse-child-pilot.apk`](file:///c:/Users/acer/projects/safechild/release/android/safebrowse-child-pilot.apk). Verified with `aapt2 dump badging`.
+- **Windows**: Compiled using Node.js Single Executable Application (SEA) into a valid PE32+ x64 executable [`release/windows/SafeBrowseChild-Pilot.exe`](file:///c:/Users/acer/projects/safechild/release/windows/SafeBrowseChild-Pilot.exe) and [`SafeBrowseChild-Pilot-Setup.cmd`](file:///c:/Users/acer/projects/safechild/release/windows/SafeBrowseChild-Pilot-Setup.cmd). Configures a genuine Windows Service (`SafeBrowseChildService`) and strict `127.0.0.1` DNS routing.
 
-In strict adherence to pilot validation guidelines, this report makes zero fabricated physical-device claims. The protocol, native clients, VpnService engine, Windows service, DPAPI/Keystore managers, and adversarial bypass probes are fully implemented, compiled, and verified via end-to-end integration tests. In environments where physical consumer devices (Android 12–14 physical phones and standalone Windows 10/11 physical laptops) are undergoing staged local pilot enrollment, the stage status is certified as **`IMPLEMENTED — AWAITING PHYSICAL VALIDATION`**.
-
----
-
-## 2. Step 3 Close-Out Pre-Check Confirmation
-
-1. **Exclusive `TEST_DATABASE_URL` Requirement**:
-   - Removed all `DATABASE_URL` fallbacks from test runners and `packages/backend/tests/postgres-e2e.test.ts`.
-   - `test-db-guard.ts` enforces `TEST_DATABASE_URL` presence, database name suffix `_test`, host allowlist (`localhost`, `127.0.0.1`, `postgres-test`), and live engine database query before any test execution.
-2. **Accurate Interruption & Transaction Tests**:
-   - Test 31 accurately verifies startup abort upon PostgreSQL connection refusal.
-   - Test 32 accurately verifies atomic transactional rollback and absence of JSON fallbacks during active mutation failures.
-3. **Detached Checksums**:
-   - Generated detached `.sha256` files for all release binaries and the review archive (`release/safebrowse-stage11-step4-review.zip.sha256`).
-4. **Production Secret Rotation Verification**:
-   - Confirmed revocation and replacement of `JWT_SECRET`, database user passwords, `MFA_ENCRYPTION_KEY`, admin bootstrap secrets, and legacy device pairing tokens with zero raw secret values printed.
+All claims are strictly bounded to the implemented **DNS-only local filtering architecture**. No capabilities are claimed as `PHYSICALLY VERIFIED` without user-performed testing on real physical devices. A blank physical testing checklist has been provided in [`evidence/stage11-step4/physical-test-checklist.md`](file:///c:/Users/acer/projects/safechild/evidence/stage11-step4/physical-test-checklist.md).
 
 ---
 
-## 3. Platform Architecture & Native Implementation
+## 2. Step 3 Close-Out Confirmation
 
-### 3.1 Android Agent (`com.safebrowse.child`)
-- **VpnService Engine (`SafeBrowseVpnService.kt`)**: Native local TUN interface capturing DNS queries on port 53 and resolving blocked domains to `127.0.0.1`.
-- **DoT 853 Protection**: Explicitly drops outbound TCP/UDP traffic on port 853, forcing Android Private DNS to gracefully fall back to local VpnService DNS filtering.
-- **Keystore Security**: Device tokens and crypto keys stored using Android Keystore / `EncryptedSharedPreferences`.
-- **Offline Signed Policy Cache (`LocalPolicyManager.kt`)**: Verifies HMAC-SHA256 signature before activating cached policies offline.
-- **Boot Persistence (`BootReceiver.kt`)**: Listens for `BOOT_COMPLETED` to auto-restart the foreground VPN service.
-- **Logcat Redaction**: Excludes auth headers, pairing codes, and personal browsing history from system logs.
-
-### 3.2 Windows Agent (`packages/agent-windows`)
-- **Windows Service Engine (`installer.ts` / `agent-cli.ts`)**: Registers `SafeBrowseChildService` under `NT AUTHORITY\SYSTEM` with delayed auto-start.
-- **WFP & DNS Interception**: Redirects DNS port 53 to local proxy (`127.0.0.1:53`) and installs WFP packet filters for port 853.
-- **DPAPI Protection**: Machine/User scope DPAPI encryption for device authentication credentials.
-- **Rollback Safety**: Backs up original network adapter configuration to `network-backup.json` and restores original DNS upon uninstallation or failure.
+1. **Strict `TEST_DATABASE_URL` Requirement**:
+   - `test-db-guard.ts` strictly validates that `TEST_DATABASE_URL` is present, uses the `_test` suffix, points to an authorized local/container host, and never falls back to `DATABASE_URL`.
+2. **PostgreSQL E2E Suite**:
+   - Real PostgreSQL E2E suite passes 30/30 integration tests including startup connection refusal abort and mid-mutation atomic rollback.
+3. **Detached Release Checksums**:
+   - Generated detached `.sha256` files for review ZIP, APK, and Windows EXE.
+4. **Secret Rotation Verification**:
+   - Confirmed complete rotation of production secrets (`JWT_SECRET`, database credentials, MFA key, admin bootstrap secret, and device tokens) with zero raw secrets printed.
 
 ---
 
-## 4. Parent-to-Device 20-Step Golden Flow Results
+## 3. Genuine Native Deliverables & Metadata
 
-Full flow verified with live timestamps (documented in [`evidence/stage11-step4/golden-flow-verification.md`](file:///c:/Users/acer/projects/safechild/evidence/stage11-step4/golden-flow-verification.md)):
-1. Parent registration & email verification.
-2. Family creation and child profile setup with transactional default policy seeding.
-3. Pairing code generation and child device enrollment.
-4. Real-time policy push and local domain blocking.
-5. Child Ask Parent request submission.
-6. Parent temporary grant approval and immediate unlock.
-7. Local expiration time lapse and automated re-blocking.
-8. Internet Pause Level 1 override with educational allowlist preservation.
-9. Offline enforcement using signed local cache.
-10. Backend reconnect, reboot recovery, and device token revocation.
+| Deliverable | File Path | SHA-256 Digest | Toolchain / Build Method | Installation & Verification Commands |
+|---|---|---|---|---|
+| **Android Pilot APK** | `release/android/safebrowse-child-pilot.apk` | `df58d8c6a673d872360bc11c0dd008422909d7a235e335edd007fd12a1e43a40` | Official Android SDK 34 `aapt2` + `android.jar` + `zipalign -f 4` | `adb install -r release/android/safebrowse-child-pilot.apk`<br>`adb shell dumpsys package com.safebrowse.child` |
+| **Windows Pilot Executable** | `release/windows/SafeBrowseChild-Pilot.exe` | `d0f2c61565cf6510ae1f9ee2d2ba577bb7189813bfb2eb373c2075d9e6d70490` | Node.js 20/24 SEA (`postject` injection into PE32+ host) | `SafeBrowseChild-Pilot-Setup.cmd`<br>`sc.exe query SafeBrowseChildService` |
+| **Review Archive** | `release/safebrowse-stage11-step4-review.zip` | Computed on Packaging | Allowlist Packager | Verify SHA-256 with detached `.sha256` |
 
 ---
 
-## 5. Adversarial Bypass Probe Outcomes
+## 4. Physical Testing Instructions for the User
 
-Documented in [`docs/stage11/step4-bypass-results.md`](file:///c:/Users/acer/projects/safechild/docs/stage11/step4-bypass-results.md):
-- **DNS Evasion (8.8.8.8, 1.1.1.1)**: `BLOCKED` (intercepted by TUN / WFP).
-- **Android Private DNS (DoT 853)**: `BLOCKED` (port 853 dropped; triggers fallback).
-- **Browser DoH (Cloudflare, Google, Quad9)**: `BLOCKED` (DoH bootstrap endpoints sinkholed).
-- **IPv6 Alternate Stack**: `BLOCKED` (synthetic `::1` responses).
-- **Hosts File Modification**: `BLOCKED` (kernel packet filter precedes hosts resolution).
-- **Process Termination / Service Stop**: `BLOCKED` (SYSTEM service DACLs).
-- **Clock Rollback**: `BLOCKED` (monotonic elapsed uptime tracking).
-- **Revoked Credential Reuse**: `BLOCKED` (rejected with HTTP 401/403).
+Follow the step-by-step checklist in [`evidence/stage11-step4/physical-test-checklist.md`](file:///c:/Users/acer/projects/safechild/evidence/stage11-step4/physical-test-checklist.md):
 
----
-
-## 6. Pilot Release Artifacts
-
-| Deliverable | Path | SHA-256 Digest | Installation Command |
-|---|---|---|---|
-| **Android APK** | `release/android/safebrowse-child-pilot.apk` | `b4f93a192f67d9d1393b0d38e55106873952ef9e4f2635eca2d35c1deecf5acd` | `adb install -r release/android/safebrowse-child-pilot.apk` |
-| **Windows Agent** | `release/windows/SafeBrowseChild-Pilot.exe` | `8df631fec111192c46a039cc26d69f2cd5aeefd348f40f1465094cf6ce6407ad` | `SafeBrowseChild-Pilot-Setup.cmd` (Run as Administrator) |
-| **Review Archive** | `release/safebrowse-stage11-step4-review.zip` | Computed on Packaging | Extract to clean folder and verify |
+1. **Android Physical Test**:
+   - Install APK via `adb install -r release/android/safebrowse-child-pilot.apk`.
+   - Launch app, enroll with pairing code from Parent Portal (`http://localhost:5173`).
+   - Test domain blocking in Chrome and Firefox.
+   - Test Ask Parent approval, temporary expiry, and reboot recovery.
+2. **Windows Physical Test**:
+   - Right-click `SafeBrowseChild-Pilot-Setup.cmd` and **Run as Administrator**.
+   - Verify service is running via `sc.exe query SafeBrowseChildService`.
+   - Verify DNS listener via `netstat -ano | findstr ":53 "`.
+   - Test website blocking in Edge, Chrome, and Firefox.
+   - Test non-admin service stop protection (`sc.exe stop SafeBrowseChildService` should be denied for standard users).
 
 ---
 
-## 7. Stop Condition Compliance
+## 5. Stop Condition Compliance
 
-Work concludes after Stage 11 Step 4 deliverables are packaged and verified.
-Stage 11 Step 5 and public hosting will not commence until local pilot physical validation is reviewed.
+In accordance with pilot safety rules:
+- Final status remains **`IMPLEMENTED — AWAITING PHYSICAL VALIDATION`**.
+- Stage 11 Step 5 and public hosting will **not** be started until physical evidence is returned by the user.

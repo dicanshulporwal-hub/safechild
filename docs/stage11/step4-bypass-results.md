@@ -1,37 +1,37 @@
-# SafeBrowse Stage 11 Step 4: Adversarial Bypass Testing Results
+# SafeBrowse Stage 11 Step 4: Adversarial Bypass Probe Results
 
-**Test Date:** 2026-09-03  
-**Evaluator:** SafeBrowse Security Engineering  
-**Branch:** `feature/stage11-step4-device-enforcement`  
-**Report Standard:** Truthful & Unembellished Vulnerability Assessment  
-
----
-
-## 1. Bypass Test Results Summary
-
-| Bypass Technique | Category | Android Status | Windows Status | Technical Finding & Defense Mechanism |
-|---|---|---|---|---|
-| **1. Direct IP-Address Browsing** | Network Bypass | `PARTIALLY BLOCKED` | `PARTIALLY BLOCKED` | DNS-level blocking is bypassed if a user directly enters a raw IPv4/IPv6 address. However, during **Internet Pause** and **Study Mode**, non-whitelisted raw IPs are completely dropped by VpnService/WFP packet filters. |
-| **2. Alternate DNS Configuration** | DNS Evasion | `BLOCKED` | `BLOCKED` | **Android**: `VpnService` routes all UDP/TCP 53 traffic to local TUN.<br>**Windows**: Local DNS proxy + WFP rules redirect outbound 53 traffic to `127.0.0.1`. |
-| **3. Browser DNS-over-HTTPS (DoH)** | Encrypted DNS | `BLOCKED` | `BLOCKED` | Bootstrap domains for all major DoH providers (`cloudflare-dns.com`, `dns.google`, `dns.quad9.net`) are sinkholed to `127.0.0.1`, preventing TLS establishment and forcing fallback. |
-| **4. Android Private DNS (DoT Port 853)** | Encrypted DNS | `BLOCKED` | `NOT APPLICABLE` | Android VpnService explicitly drops all TCP/UDP traffic on port 853. Android OS detects DoT failure and automatically falls back to system DNS provided by VpnService. |
-| **5. DNS-over-TLS (DoT) on Windows** | Encrypted DNS | `NOT APPLICABLE` | `BLOCKED` | WFP outbound rule drops port 853 traffic to unauthorized external endpoints. |
-| **6. Third-Party VPN Application** | Network Tunnel | `PARTIALLY BLOCKED` | `BLOCKED` | **Android**: Starting a 3rd-party VPN disconnects SafeBrowse VpnService. Parent receives heartbeat alert within 60s. Always-On VPN lockdown via Device Owner prevents 3rd-party VPNs.<br>**Windows**: Coexists via WFP sublayering. |
-| **7. HTTP / SOCKS Proxy Configuration** | Network Tunnel | `BLOCKED` | `BLOCKED` | Standard proxy domains and known proxy ports are blocked in default policy. |
-| **8. Browser Extensions / Unapproved Browsers** | Application Bypass | `BLOCKED` | `BLOCKED` | Policy enforcement operates at the kernel network stack (TUN/WFP); unapproved browsers and browser extensions cannot bypass OS-level DNS routing. |
-| **9. Incognito / Private Browsing** | Local State | `BLOCKED` | `BLOCKED` | Incognito mode uses the system network stack; DNS and IP filtering apply identically to private browsing sessions. |
-| **10. QUIC / HTTP3 Protocol** | Protocol Evasion | `BLOCKED` | `BLOCKED` | Initial DNS resolution for QUIC domains is intercepted; fallback to HTTP/2 over TCP is enforced. |
-| **11. IPv6 Alternate Stack** | Dual-Stack Evasion | `BLOCKED` | `BLOCKED` | Synthetic `::1` responses are generated for AAAA queries on blocked domains. |
-| **12. Hosts File Modification (Windows)** | Local Tampering | `NOT APPLICABLE` | `BLOCKED` | WFP and DNS proxy intercept DNS lookups before the Windows hosts file resolver completes. |
-| **13. Service Stop by Standard User** | Process Killing | `NOT APPLICABLE` | `BLOCKED` | Windows Service is registered under `NT AUTHORITY\SYSTEM` with DACL preventing `net stop` or `taskkill` by non-admin users. |
-| **14. Process Termination on Android** | Process Killing | `PARTIALLY BLOCKED` | `NOT APPLICABLE` | Android foreground service with persistent notification prevents OS memory killing; child can force stop in Settings unless Device Admin / Device Owner is enabled. |
-| **15. Clock Rollback for Expiry Bypass** | Temporal Tampering | `BLOCKED` | `BLOCKED` | Monotonic uptime counter (`SystemClock.elapsedRealtime()`) and backend timestamp validation prevent local clock manipulation from extending access. |
-| **16. Reboot During Policy Update** | Crash Consistency | `BLOCKED` | `BLOCKED` | Policies are written to temporary atomic swap files (`policy.json.tmp` -> `policy.json`) before committing. Incomplete writes roll back to previous valid signed policy. |
-| **17. Reuse of Revoked Device Credentials** | Token Replay | `BLOCKED` | `BLOCKED` | Revoked tokens are immediately marked inactive in PostgreSQL (`Device.isRevoked = true`), returning HTTP 401/403 on subsequent sync calls. |
+**Status:** `IMPLEMENTED — AWAITING PHYSICAL VALIDATION`  
+**Test Suite:** Automated Network Stack & Service Integrity Probes (`scripts/device-enforcement-probe/`)  
+**Scope:** DNS-only Local Enforcement Architecture  
 
 ---
 
-## 2. Documented Edge Cases & Deployment Recommendations
+## 1. Adversarial Bypass Probe Findings
 
-1. **Android Device Owner Mode**: For commercial pilot deployment requiring full tamper-proofing against manual VPN disabling or app force-stopping, provisioning the child device via QR code into **Android Device Owner (Android Enterprise Work Profile)** mode is recommended.
-2. **Windows Standard User Accounts**: The child should always be assigned a standard Windows account (non-Administrator) so Windows DPAPI and service ACLs remain fully enforced.
+| Bypass Vector | Target Layer | Automated Probe Status | Technical Mechanism & Defense Explanation |
+|---|---|---|---|
+| **1. Direct Alternate DNS (e.g. 8.8.8.8:53)** | DNS Port 53 | `BLOCKED` | **Android**: TUN virtual interface intercepts all UDP/TCP 53 traffic system-wide.<br>**Windows**: Outbound DNS queries redirected to `127.0.0.1:53`. |
+| **2. Android Private DNS (DoT Port 853)** | Encrypted DNS | `BLOCKED` | Android `SafeBrowseVpnService` drops TCP/UDP 853 packets, triggering Android OS to fall back to the VPN local DNS server. |
+| **3. Windows DNS-over-TLS (DoT 853)** | Encrypted DNS | `BLOCKED` | Windows Firewall outbound rule drops remote port 853 connections. |
+| **4. Known Browser DoH Resolvers** | Encrypted DNS | `PARTIALLY BLOCKED` | Hostnames (`cloudflare-dns.com`, `dns.google`, `dns.quad9.net`) and bootstrap IPs are sinkholed to force browsers back to standard DNS. Custom unlisted DoH endpoints are not blocked without comprehensive IP reputation lists. |
+| **5. Direct Raw IP Browsing** | Network Transport | `NOT IMPLEMENTED` | DNS-only architecture does not block raw IP connections (e.g. `http://93.184.216.34`) in normal mode. |
+| **6. Native Application Blocking** | Process Execution | `NOT IMPLEMENTED` | Native app blocking (e.g., launching TikTok app directly) requires Device Owner / AppLocker policies and is excluded from DNS-only pilot scope. |
+| **7. Multi-Browser (Chrome/Edge/Firefox)** | Application Layer | `BLOCKED` | Standard OS DNS routing applies to all desktop and mobile browsers. |
+| **8. Incognito / Private Browsing** | Local State | `BLOCKED` | Browser private browsing uses the operating system network stack; DNS policies apply identically. |
+| **9. IPv6 Alternate Stack Queries** | Dual Stack | `BLOCKED` | DNS proxy returns synthetic `::1` or `NXDOMAIN` for AAAA records on blocked domains. |
+| **10. Local Hosts File Modification (Windows)** | Host Resolver | `BLOCKED` | Local DNS proxy and network adapter settings resolve before Windows hosts file fallback. |
+| **11. Service Termination by Standard User** | Process Control | `BLOCKED` | `SafeBrowseChildService` runs under `NT AUTHORITY\SYSTEM`; standard non-admin users cannot stop the service (`sc.exe stop` denied). |
+| **12. VPN Disconnect by Child (Android)** | Android OS | `PARTIALLY BLOCKED` | Android OS permits users to disconnect VPN in system settings unless device is enrolled in Android Enterprise Device Owner (Always-On VPN lockdown) mode. |
+| **13. Local Clock Rollback** | Temporal State | `BLOCKED` | Monotonic uptime counters (`elapsedRealtime()`) prevent local clock manipulation from extending access grants. |
+| **14. Crash / Reboot During Policy Push** | Atomic Persistence | `BLOCKED` | Policy writes use atomic file replace (`policy.json.tmp` -> `policy.json`); invalid writes roll back to signed cache. |
+| **15. Replay of Revoked Device Token** | Token Validation | `BLOCKED` | Revoked device tokens are marked in PostgreSQL (`Device.isRevoked = true`) and return HTTP 401 on synchronization. |
+
+---
+
+## 2. Testing Instructions for Reviewers
+Run the automated probe suite via:
+```bash
+npx ts-node scripts/device-enforcement-probe/dns-bypass-probe.ts
+npx ts-node scripts/device-enforcement-probe/tamper-probe.ts
+```
+Physical confirmation on target hardware should be recorded using [`evidence/stage11-step4/physical-test-checklist.md`](file:///c:/Users/acer/projects/safechild/evidence/stage11-step4/physical-test-checklist.md).
