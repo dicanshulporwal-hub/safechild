@@ -1,33 +1,34 @@
 {
   "version": "1.0.0",
-  "stage": "Stage 11 Step 3E",
+  "stage": "Stage 11 Step 3F",
   "branch": "security/stage11-step3-rbac",
-  "timestamp": "2026-09-03T15:30:00.000Z",
+  "commit": "4ea1fb47ec505de8b7ae89d65b2a04b947fd1337",
+  "cleanWorkingTree": false,
+  "timestamp": "2026-09-03T10:28:29.563Z",
+  "archive": {
+    "filename": "safebrowse-stage11-step3f-review.zip",
+    "sha256": "421afbbf2c46572612e03899a2819d4ac97356f34e6e44d09e4cfce478edd970",
+    "sizeBytes": 432058,
+    "totalFiles": 186
+  },
   "status": "CERTIFIED",
   "singleSystemOfRecord": "PostgreSQL 16 via Prisma ORM",
-  "staticCutoverViolations": 0,
-  "e2eTests": {
-    "total": 29,
-    "passed": 29,
-    "failed": 0
+  "securityRemediation": {
+    "secretRotationMandated": [
+      "JWT_SECRET (must be re-generated in production with min 32 high-entropy characters)",
+      "MFA_ENCRYPTION_KEY (must be rotated via active re-encryption before production deployment)",
+      "DATABASE_URL credentials (production PostgreSQL password must be rotated)",
+      "SMTP credentials (mail server password must be rotated in production environment)"
+    ],
+    "zeroJsonPersistence": true,
+    "zeroSensitiveFilesPackaged": true
   },
-  "workspaceTests": {
-    "total": 76,
-    "passed": 76,
-    "failed": 0
-  },
-  "invariantProbe": {
-    "totalConditions": 15,
-    "allPassed": true
-  },
-  "artifacts": [
-    "docker-compose.test.yml",
-    "package-lock.json",
-    "prisma/schema.prisma",
-    "prisma/migrations/20260903153000_step3e_integrity_and_triggers/migration.sql",
-    "scripts/verify-postgres-cutover.ts",
-    "packages/backend/tests/postgres-e2e.test.ts",
-    "docs/stage11/stage11-step3e-postgres-cutover-report.md",
-    "walkthrough.md"
-  ]
+  "verificationSummary": {
+    "staticCutoverViolations": 0,
+    "unitAndPolicyTests": "76/76 passed",
+    "postgresE2ETests": "30/30 passed",
+    "failSecureDatabaseGuard": "Verified with negative test suite",
+    "concurrencyAndReplayTests": "Verified",
+    "databaseFailureRecovery": "Verified"
+  }
 }

@@ -26,7 +26,9 @@
     "db:migrate:deploy": "prisma migrate deploy",
     "db:test:reset": "prisma migrate reset --force",
     "db:import:dry": "ts-node scripts/import-json-to-postgres.ts",
-    "db:import:apply": "ts-node scripts/import-json-to-postgres.ts --apply"
+    "db:import:apply": "ts-node scripts/import-json-to-postgres.ts --apply",
+    "package:step3f": "ts-node scripts/package-step3f.ts",
+    "verify:release-archive": "ts-node scripts/verify-release-archive.ts"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",

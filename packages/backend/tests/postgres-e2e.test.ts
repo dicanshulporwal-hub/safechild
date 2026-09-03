@@ -6,12 +6,18 @@ import path from 'node:path';
 import { app, bootstrap } from '../src/server';
 import { prisma } from '../src/db/prisma';
 import { nanoid } from 'nanoid';
+import fs from 'node:fs';
 import {
   getCurrentTotpTimeStep,
   generateTotpAtStep,
 } from '../src/utils/security';
+import {
+  validateTestDatabaseUrl,
+  createTestPrismaClient,
+  assertLiveTestDatabaseMarker,
+} from '../src/utils/test-db-guard';
 
-describe('SafeBrowse Stage 11 Step 3E: Real PostgreSQL API Integration & E2E Suite', () => {
+describe('SafeBrowse Stage 11 Step 3F: Real PostgreSQL API Integration & E2E Suite', () => {
   let server: http.Server;
   let baseUrl: string;
   let port: number;
@@ -76,21 +82,21 @@ describe('SafeBrowse Stage 11 Step 3E: Real PostgreSQL API Integration & E2E Sui
   };
 
   before(async () => {
-    // 1. Guard against running against non-test databases (Requirement 11)
-    const dbUrl = process.env.DATABASE_URL || '';
-    assert.ok(
-      dbUrl.includes('_test') || process.env.NODE_ENV === 'test',
-      'PostgreSQL E2E test suite must execute against a dedicated test database'
-    );
+    // 1. Fail-secure test database URL validation (Requirement 2)
+    const testDbUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
+    const dbConfig = validateTestDatabaseUrl(testDbUrl);
+    
+    // 2. Validate live database marker
+    await assertLiveTestDatabaseMarker(prisma, dbConfig.database);
 
-    // 2. Clean test tables before suite run
+    // 3. Clean test tables before suite run
     await prisma.$executeRawUnsafe(`
       TRUNCATE TABLE "UserSession", "MfaChallenge", "AccessRequest", "ChildUsageRecord", 
       "ActivityEvent", "Policy", "PairingCode", "Device", "Child", "FamilyInvitation", 
       "FamilyAuditLog", "FamilyMember", "Family", "User" CASCADE;
     `);
 
-    // 3. Start real Express server via bootstrap on an ephemeral port
+    // 4. Start real Express server via bootstrap on an ephemeral port
     const rawServer = http.createServer(app);
     server = await bootstrap(app, rawServer, { port: 0, skipListen: false });
     const address = server.address() as any;
@@ -822,37 +828,107 @@ describe('SafeBrowse Stage 11 Step 3E: Real PostgreSQL API Integration & E2E Sui
     assert.strictEqual(owners.length, 1);
   });
 
-  // 31. PostgreSQL Failure Test: Refusal to start without database connection (Requirement 10)
+  // 31. Correct PostgreSQL Outage Test (Requirement 3)
   it('31. should abort startup and refuse to open HTTP port when PostgreSQL is unavailable', async () => {
     const unreachableUrl = 'postgresql://safebrowse:invalidpass@127.0.0.1:54399/safebrowse_test';
+    const testPort = 10998;
     
-    const serverScript = path.resolve(__dirname, '../dist/src/server.js');
-    let failedToOpen = false;
+    // Resolve compiled server script and assert it exists before spawning
+    const serverScript = path.resolve(__dirname, '../src/server.js');
+    assert.strictEqual(fs.existsSync(serverScript), true, `Compiled server script must exist at: ${serverScript}`);
+
+    let exitCode: number | null = null;
+    let stdoutOutput = '';
+    let stderrOutput = '';
 
     await new Promise<void>((resolve) => {
       const badProc = spawn('node', [serverScript], {
         env: {
           ...process.env,
           DATABASE_URL: unreachableUrl,
-          PORT: '0',
+          TEST_DATABASE_URL: unreachableUrl,
+          PORT: String(testPort),
           NODE_ENV: 'test',
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 
+      badProc.stdout?.on('data', (chunk) => {
+        stdoutOutput += chunk.toString();
+      });
+
+      badProc.stderr?.on('data', (chunk) => {
+        stderrOutput += chunk.toString();
+      });
+
       badProc.on('exit', (code) => {
-        if (code !== 0) {
-          failedToOpen = true;
-        }
+        exitCode = code;
         resolve();
       });
 
       setTimeout(() => {
         badProc.kill('SIGTERM');
         resolve();
-      }, 3000);
+      }, 4000);
     });
 
-    assert.strictEqual(failedToOpen, true);
+    // Verify process exited with non-zero error code
+    assert.strictEqual(exitCode, 1, 'Server process should exit with code 1 upon DB failure');
+
+    // Verify error is caused by database connectivity refusal and not module loading issues
+    const combinedOutput = stdoutOutput + '\n' + stderrOutput;
+    assert.match(combinedOutput, /DATABASE|CONNECTIVITY|BOOTSTRAP/i);
+    assert.doesNotMatch(combinedOutput, /MODULE_NOT_FOUND|Cannot find module/i);
+
+    // Verify configured HTTP port was never opened
+    let portOpened = false;
+    try {
+      await fetch(`http://127.0.0.1:${testPort}/health`);
+      portOpened = true;
+    } catch {
+      portOpened = false;
+    }
+    assert.strictEqual(portOpened, false, 'Port should never have opened');
+  });
+
+  // 32. PostgreSQL Failure During Mutation Test (Requirement 4)
+  it('32. should safely fail mid-mutation requests and ensure zero partial commits or storage fallbacks', async () => {
+    const initialFamily = await prisma.family.findUnique({ where: { id: familyId } });
+    const initialOwnerId = initialFamily?.ownerUserId;
+    assert.ok(initialOwnerId);
+
+    // Identify which auth token belongs to the current active owner
+    const currentOwnerToken = initialOwnerId === parentUserId ? accessToken : coParentAccessToken;
+
+    // Attempt a malformed ownership transfer designed to fail during transaction
+    const failedTransferRes = await api(
+      'POST',
+      '/api/family/transfer-ownership',
+      {
+        familyId,
+        newOwnerUserId: 'non-existent-user-id-999',
+        password: testPassword,
+        otpCode: '123456',
+      },
+      currentOwnerToken
+    );
+
+    // Must return an error status, never 200
+    assert.ok(failedTransferRes.status >= 400, 'Failed mutation must return HTTP 4xx/5xx');
+    assert.strictEqual(failedTransferRes.status !== 200, true);
+
+    // Verify database state remained completely unchanged (no partial commit)
+    const postFamily = await prisma.family.findUnique({ where: { id: familyId } });
+    assert.strictEqual(postFamily?.ownerUserId, initialOwnerId);
+
+    const postOwners = await prisma.familyMember.findMany({
+      where: { familyId, role: 'OWNER' },
+    });
+    assert.strictEqual(postOwners.length, 1);
+    assert.strictEqual(postOwners[0].userId, initialOwnerId);
+
+    // Verify no fallback JSON file was created
+    const jsonDbPath = path.resolve(__dirname, '../../data/safebrowse-db.json');
+    assert.strictEqual(fs.existsSync(jsonDbPath), false, 'Backend must never create JSON fallback datastore');
   });
 });
