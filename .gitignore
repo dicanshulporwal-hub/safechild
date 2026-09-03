@@ -11,6 +11,7 @@ node_modules/
 !.env*.example
 
 # Local databases and data stores
+.pgdata/
 data/
 packages/backend/data/
 *.sqlite
