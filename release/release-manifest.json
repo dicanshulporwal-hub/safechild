@@ -1,34 +1,38 @@
 {
   "version": "1.0.0",
-  "stage": "Stage 11 Step 3F",
-  "branch": "security/stage11-step3-rbac",
-  "commit": "c355a210807c4a9e7e8fb170723663d09313ca4f",
+  "stage": "Stage 11 Step 4",
+  "branch": "feature/stage11-step4-device-enforcement",
+  "commit": "056c610bbd8595aebd00b64a79bd58098d44e1e9",
   "cleanWorkingTree": false,
-  "timestamp": "2026-09-03T16:00:00.000Z",
-  "archive": {
-    "filename": "safebrowse-stage11-step3f-review.zip",
-    "sha256": "dc8030add78659d333ef6c8d2a1162f45919cfe45c4464ddeebb60d0684ba1a5",
-    "sizeBytes": 433263,
-    "totalFiles": 187
-  },
-  "status": "CERTIFIED",
+  "timestamp": "2026-09-03T16:25:00.000Z",
+  "status": "IMPLEMENTED — AWAITING PHYSICAL VALIDATION",
   "singleSystemOfRecord": "PostgreSQL 16 via Prisma ORM",
-  "securityRemediation": {
-    "secretRotationMandated": [
-      "JWT_SECRET (must be re-generated in production with min 32 high-entropy characters)",
-      "MFA_ENCRYPTION_KEY (must be rotated via active re-encryption before production deployment)",
-      "DATABASE_URL credentials (production PostgreSQL password must be rotated)",
-      "SMTP credentials (mail server password must be rotated in production environment)"
-    ],
-    "zeroJsonPersistence": true,
-    "zeroSensitiveFilesPackaged": true
+  "archive": {
+    "filename": "safebrowse-stage11-step4-review.zip",
+    "sha256": "5765e1deb0103cd22a109b9db5cb1fb8e4dac7539c59b67b9724c473259a2f05",
+    "sizeBytes": 464782,
+    "totalFiles": 204
+  },
+  "artifacts": {
+    "androidApk": {
+      "file": "release/android/safebrowse-child-pilot.apk",
+      "version": "1.0.0",
+      "minSdk": 26,
+      "targetSdk": 34,
+      "signingMode": "Debug Keystore (Local Pilot)"
+    },
+    "windowsInstaller": {
+      "file": "release/windows/SafeBrowseChild-Pilot.exe",
+      "version": "1.0.0",
+      "platform": "Windows 10/11 x64",
+      "signingMode": "Unsigned (Local Pilot Testing)"
+    }
   },
   "verificationSummary": {
-    "staticCutoverViolations": 0,
-    "unitAndPolicyTests": "85/85 passed",
+    "capabilitiesEvaluated": 21,
+    "adversarialBypassTests": 17,
     "postgresE2ETests": "30/30 passed",
-    "failSecureDatabaseGuard": "Verified with negative test suite",
-    "concurrencyAndReplayTests": "Verified",
-    "databaseFailureRecovery": "Verified"
+    "unitAndGuardTests": "86/86 passed",
+    "goldenFlowStatus": "20/20 steps verified"
   }
 }

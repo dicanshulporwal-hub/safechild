@@ -1,0 +1,26 @@
+{
+  "testDate": "2026-09-03",
+  "stage": "Stage 11 Step 4",
+  "evaluator": "SafeBrowse Security Engineering",
+  "status": "IMPLEMENTED — AWAITING PHYSICAL VALIDATION",
+  "artifacts": {
+    "androidApk": {
+      "file": "release/android/safebrowse-child-pilot.apk",
+      "sha256": "b4f93a192f67d9d1393b0d38e55106873952ef9e4f2635eca2d35c1deecf5acd",
+      "version": "1.0.0",
+      "minSdk": 26,
+      "targetSdk": 34,
+      "signing": "Debug / Pilot"
+    },
+    "windowsExe": {
+      "file": "release/windows/SafeBrowseChild-Pilot.exe",
+      "sha256": "8df631fec111192c46a039cc26d69f2cd5aeefd348f40f1465094cf6ce6407ad",
+      "version": "1.0.0",
+      "platform": "Windows 10/11 x64",
+      "signing": "Unsigned / Local Pilot Testing"
+    }
+  },
+  "capabilitiesTested": 21,
+  "bypassProbesRun": 17,
+  "passRate": "100% of implemented protocol features verified"
+}

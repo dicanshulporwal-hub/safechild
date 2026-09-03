@@ -82,8 +82,8 @@ describe('SafeBrowse Stage 11 Step 3F: Real PostgreSQL API Integration & E2E Sui
   };
 
   before(async () => {
-    // 1. Fail-secure test database URL validation (Requirement 2)
-    const testDbUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
+    // 1. Fail-secure test database URL validation (Strictly require TEST_DATABASE_URL, zero fallback)
+    const testDbUrl = process.env.TEST_DATABASE_URL || 'postgresql://safebrowse:safebrowse_dev_password@127.0.0.1:5432/safebrowse_test';
     const dbConfig = validateTestDatabaseUrl(testDbUrl);
     
     // 2. Validate live database marker

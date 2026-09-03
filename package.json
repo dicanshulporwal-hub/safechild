@@ -28,7 +28,10 @@
     "db:import:dry": "ts-node scripts/import-json-to-postgres.ts",
     "db:import:apply": "ts-node scripts/import-json-to-postgres.ts --apply",
     "package:step3f": "ts-node scripts/package-step3f.ts",
-    "verify:release-archive": "ts-node scripts/verify-release-archive.ts"
+    "verify:release-archive": "ts-node scripts/verify-release-archive.ts",
+    "build:pilot": "ts-node scripts/build-pilot-artifacts.ts",
+    "package:step4": "ts-node scripts/build-pilot-artifacts.ts && ts-node scripts/package-step4.ts",
+    "verify:step4-archive": "ts-node scripts/verify-step4-archive.ts"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
