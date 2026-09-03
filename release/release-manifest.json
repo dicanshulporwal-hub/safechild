@@ -2,15 +2,15 @@
   "version": "1.0.0",
   "stage": "Stage 11 Step 4",
   "branch": "feature/stage11-step4-device-enforcement",
-  "commit": "4c90f1cec8d05e4d34b5de8f2468cfcfbaa1f593",
-  "cleanWorkingTree": false,
+  "commit": "0546f954ed6dcb29c27c3b8a5000fb46c744eb0b",
+  "cleanWorkingTree": true,
   "timestamp": "2026-09-03T16:25:00.000Z",
   "status": "IMPLEMENTED — AWAITING PHYSICAL VALIDATION",
   "singleSystemOfRecord": "PostgreSQL 16 via Prisma ORM",
   "archive": {
     "filename": "safebrowse-stage11-step4-review.zip",
-    "sha256": "193ed41bb80846974d3ea86946f8ce5315a9f7e92e8bd14835765cdc24528d71",
-    "sizeBytes": 35952329,
+    "sha256": "e78918fdc6f5db1b3b9c802942d2ace9412d5c03a801686f02f81ead180ec639",
+    "sizeBytes": 35952325,
     "totalFiles": 211
   },
   "artifacts": {
