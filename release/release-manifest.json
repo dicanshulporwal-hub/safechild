@@ -2,13 +2,13 @@
   "version": "1.0.0",
   "stage": "Stage 11 Step 3F",
   "branch": "security/stage11-step3-rbac",
-  "commit": "2e7c31613b24a1b4a8e9a9933c677f2d6765e341",
+  "commit": "cdbbe029c4f1d0ac4579bf33c858346972446194",
   "cleanWorkingTree": true,
-  "timestamp": "2026-09-03T10:28:51.763Z",
+  "timestamp": "2026-09-03T10:29:00.110Z",
   "archive": {
     "filename": "safebrowse-stage11-step3f-review.zip",
-    "sha256": "3f01254e3ad3a791425a64c443a70c53d9362106a84fed8bd32cac85626f1fb1",
-    "sizeBytes": 432940,
+    "sha256": "e536d19ebed5384f588234131f785ee63efcd106a50501c92b1d11b320fa1323",
+    "sizeBytes": 432936,
     "totalFiles": 187
   },
   "status": "CERTIFIED",
