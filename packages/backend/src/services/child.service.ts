@@ -82,10 +82,22 @@ export class ChildService {
         throw new Error('Mandatory tenancy error: Referenced family does not exist.');
       }
 
+      const membership = await tx.familyMember.findUnique({
+        where: {
+          familyId_userId: {
+            familyId: family.id,
+            userId: parentId,
+          },
+        },
+      });
+      if (!membership) {
+        throw new Error('Forbidden: You do not belong to this family.');
+      }
+
       const childRecord = await tx.child.create({
         data: {
           id: childId,
-          parentId: family.ownerUserId,
+          parentId: parentId,
           familyId: family.id,
           name: name.trim(),
           age: age || null,

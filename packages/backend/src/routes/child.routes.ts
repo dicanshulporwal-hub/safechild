@@ -38,33 +38,47 @@ childRouter.get('/', async (req: AuthenticatedRequest, res: Response) => {
 childRouter.post('/', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { name, age, avatar, familyId } = req.body;
-    if (!familyId || typeof familyId !== 'string' || !familyId.trim()) {
-      return res.status(400).json({ error: 'Mandatory tenancy error: Valid familyId is required to create a child profile.' });
-    }
-
-    const targetFamily = await prisma.family.findUnique({
-      where: { id: familyId.trim() },
-    });
-    if (!targetFamily) {
-      return res.status(400).json({ error: 'Mandatory tenancy error: Referenced family does not exist.' });
-    }
-
-    if (!(await rbacService.getFamilyMembership(req.userId!, targetFamily.id))) {
-      return res.status(403).json({ error: 'Forbidden: You do not belong to this family.' });
-    }
-
-    if (!(await rbacService.hasFamilyPermission(req.userId!, targetFamily.id, FamilyPermission.CHILD_MANAGE))) {
-      return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to create child profiles.' });
-    }
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'Child name is required.' });
     }
 
-    const result = await childService.createChild(req.userId!, name, age, avatar, targetFamily.id);
+    let parsedAge: number | undefined = undefined;
+    if (age !== undefined && age !== null && age !== '') {
+      parsedAge = typeof age === 'number' ? age : parseInt(age, 10);
+      if (isNaN(parsedAge) || parsedAge < 1 || parsedAge > 18 || !Number.isInteger(parsedAge)) {
+        return res.status(400).json({ error: 'Invalid age: Must be a positive integer between 1 and 18.' });
+      }
+    }
+
+    let targetFamilyId: string;
+    if (familyId && typeof familyId === 'string' && familyId.trim()) {
+      const trimmedFamilyId = familyId.trim();
+      const targetFamily = await prisma.family.findUnique({
+        where: { id: trimmedFamilyId },
+      });
+      if (!targetFamily) {
+        return res.status(404).json({ error: 'Referenced family does not exist.' });
+      }
+
+      const membership = await rbacService.getFamilyMembership(req.userId!, targetFamily.id);
+      if (!membership) {
+        return res.status(403).json({ error: 'Forbidden: You do not belong to this family.' });
+      }
+      targetFamilyId = targetFamily.id;
+    } else {
+      const userFamily = await familyService.getOrCreateUserFamily(req.userId!);
+      targetFamilyId = userFamily.id;
+    }
+
+    if (!(await rbacService.hasFamilyPermission(req.userId!, targetFamilyId, FamilyPermission.CHILD_MANAGE))) {
+      return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to create child profiles.' });
+    }
+
+    const result = await childService.createChild(req.userId!, name.trim(), parsedAge, avatar, targetFamilyId);
     res.json(result);
   } catch (e: any) {
-    const status = e.message.includes('Forbidden') ? 403 : 400;
+    const status = e.message.includes('Forbidden') ? 403 : e.message.includes('not exist') ? 404 : 400;
     res.status(status).json({ error: e.message });
   }
 });

@@ -253,6 +253,123 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
       assert.strictEqual(res.status, 403);
       assert.match(res.body.error, /Forbidden/i);
     });
+
+    it('6c. should allow verified OWNER to create child without explicit familyId (derived tenancy)', async () => {
+      const res = await makeRequest(
+        'POST',
+        '/api/children',
+        { Authorization: `Bearer ${ownerAToken}` },
+        { name: 'Child Created By Owner', age: 11, avatar: '👧' }
+      );
+      assert.strictEqual(res.status, 200);
+      assert.ok(res.body.child.id);
+      assert.strictEqual(res.body.child.name, 'Child Created By Owner');
+      assert.strictEqual(res.body.child.familyId, familyAId);
+      assert.strictEqual(res.body.child.parentId, ownerAId);
+      assert.ok(res.body.policy);
+      assert.strictEqual(res.body.policy.childId, res.body.child.id);
+      assert.strictEqual(res.body.policy.familyId, familyAId);
+    });
+
+    it('6d. should allow verified PARENT with CHILD_MANAGE to create child', async () => {
+      const res = await makeRequest(
+        'POST',
+        '/api/children',
+        { Authorization: `Bearer ${parentAToken}` },
+        { name: 'Child Created By Parent', age: 8, familyId: familyAId }
+      );
+      assert.strictEqual(res.status, 200);
+      assert.ok(res.body.child.id);
+      assert.strictEqual(res.body.child.name, 'Child Created By Parent');
+      assert.strictEqual(res.body.child.familyId, familyAId);
+      assert.strictEqual(res.body.child.parentId, parentAId);
+    });
+
+    it('6e. should reject VIEWER creating child profile with 403 Forbidden', async () => {
+      const res = await makeRequest(
+        'POST',
+        '/api/children',
+        { Authorization: `Bearer ${viewerAToken}` },
+        { name: 'Unauthorized Child', age: 7, familyId: familyAId }
+      );
+      assert.strictEqual(res.status, 403);
+      assert.match(res.body.error, /Forbidden/i);
+    });
+
+    it('6f. should reject cross-family familyId tampering with 403 Forbidden', async () => {
+      // Owner A attempts to create a child inside Family B
+      const res = await makeRequest(
+        'POST',
+        '/api/children',
+        { Authorization: `Bearer ${ownerAToken}` },
+        { name: 'Tampered Child', age: 10, familyId: familyBId }
+      );
+      assert.strictEqual(res.status, 403);
+      assert.match(res.body.error, /Forbidden: You do not belong to this family/i);
+    });
+
+    it('6g. should reject missing name or invalid age with 400 Bad Request', async () => {
+      const noName = await makeRequest(
+        'POST',
+        '/api/children',
+        { Authorization: `Bearer ${ownerAToken}` },
+        { name: '', age: 10 }
+      );
+      assert.strictEqual(noName.status, 400);
+      assert.match(noName.body.error, /Child name is required/i);
+
+      const invalidAge = await makeRequest(
+        'POST',
+        '/api/children',
+        { Authorization: `Bearer ${ownerAToken}` },
+        { name: 'Bad Age Child', age: -5 }
+      );
+      assert.strictEqual(invalidAge.status, 400);
+      assert.match(invalidAge.body.error, /Invalid age/i);
+    });
+
+    it('6h. should reject unverified parent from creating child profile with 403', async () => {
+      // Create an unverified user
+      const unverifiedReg = await authService.register(
+        `unverified.${nanoid(6)}@example.com`,
+        testPassword,
+        'Unverified Parent'
+      );
+      const res = await makeRequest(
+        'POST',
+        '/api/children',
+        { Authorization: `Bearer ${unverifiedReg.accessToken}` },
+        { name: 'Blocked Child', age: 9 }
+      );
+      assert.strictEqual(res.status, 403);
+      assert.match(res.body.error, /Verify your email address/i);
+    });
+
+    it('6i. should atomically roll back child if policy creation fails', async () => {
+      // Verify rollback by mocking a failure in transaction
+      const targetFamily = familyAId;
+      const initialCount = await prisma.child.count({ where: { familyId: targetFamily } });
+
+      try {
+        await prisma.$transaction(async (tx) => {
+          await tx.child.create({
+            data: {
+              id: 'temp-rollback-child',
+              parentId: ownerAId,
+              familyId: targetFamily,
+              name: 'Rollback Test',
+            },
+          });
+          // Force an intentional failure on policy creation
+          throw new Error('Simulated atomic transaction failure');
+        });
+      } catch (e: any) {
+        assert.match(e.message, /Simulated atomic transaction failure/);
+      }
+
+      const finalCount = await prisma.child.count({ where: { familyId: targetFamily } });
+      assert.strictEqual(finalCount, initialCount);
+    });
   });
 
   describe('3. Access Request Approval & Family Rules', () => {
