@@ -15,8 +15,8 @@ async function main() {
 
   let config: DeviceConfig | null = null;
 
-  // Check if --pair flag was provided
-  const pairIdx = args.indexOf('--pair');
+  // Check if --pair or --pairing-code flag was provided
+  const pairIdx = args.indexOf('--pair') !== -1 ? args.indexOf('--pair') : args.indexOf('--pairing-code');
   if (pairIdx !== -1 && args[pairIdx + 1]) {
     const code = args[pairIdx + 1];
     const name = args.includes('--name') ? args[args.indexOf('--name') + 1] : "Rahul's Windows Laptop";
@@ -34,7 +34,7 @@ async function main() {
     });
 
     if (!res.ok) {
-      const err = await res.json();
+      const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
       console.error(`[Setup Error] Failed to pair device: ${err.error || 'Unknown error'}`);
       process.exit(1);
     }
@@ -52,10 +52,15 @@ async function main() {
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
     console.log(`[Setup] Successfully paired device! Config saved to device-config.json`);
   } else if (fs.existsSync(configPath)) {
-    config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    try {
+      config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    } catch (e: any) {
+      console.error(`[Error] Failed to read ${configPath}: ${e.message}`);
+      process.exit(1);
+    }
   } else {
     console.error('[Error] No device configuration found. Please pair this device using a pairing code from the SafeBrowse parent portal:');
-    console.error('  Usage: safebrowse-agent --pairing-code SB-XXXX-XXXX');
+    console.error('  Usage: SafeBrowseChild-Pilot.exe --pair SB-XXXXXX (or --pairing-code SB-XXXXXX)');
     process.exit(1);
   }
 

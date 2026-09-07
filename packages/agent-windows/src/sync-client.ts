@@ -58,15 +58,36 @@ export class PolicySyncClient {
   }
 
   public async fetchLatestPolicy(): Promise<Policy | null> {
+    if (!this.config?.deviceId || !this.config?.deviceToken || !this.config.deviceId.trim() || !this.config.deviceToken.trim()) {
+      console.warn('[Agent] Cannot fetch policy: deviceId or deviceToken is missing or blank.');
+      return this.currentPolicy;
+    }
+
     try {
-      const res = await fetch(`${this.config.backendUrl}/api/policies/device/${this.config.deviceId}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await fetch(`${this.config.backendUrl}/api/policies/device/${encodeURIComponent(this.config.deviceId)}`, {
+        method: 'GET',
+        headers: {
+          'x-device-id': this.config.deviceId,
+          'x-device-token': this.config.deviceToken,
+        },
+      });
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+
       const data: any = await res.json();
-      const policy: Policy = data.policy;
-      this.saveCachedPolicy(policy);
-      return policy;
-    } catch (e) {
-      console.warn('[Agent] Failed to fetch latest policy from cloud. Running on local cache.', e);
+      const policy: Policy = data?.policy || data;
+
+      if (policy && typeof policy === 'object' && typeof policy.version === 'number') {
+        this.saveCachedPolicy(policy);
+        return policy;
+      } else {
+        console.warn('[Agent] Received invalid policy payload from cloud. Retaining local cache.');
+        return this.currentPolicy;
+      }
+    } catch (e: any) {
+      console.warn(`[Agent] Failed to fetch latest policy from cloud. Running on local cache. Error: ${e.message}`);
       return this.currentPolicy;
     }
   }
