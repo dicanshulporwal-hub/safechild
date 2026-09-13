@@ -17,7 +17,14 @@ import { ReferralPage } from './pages/ReferralPage';
 import { FeedbackPage } from './pages/FeedbackPage';
 import { ShieldCheck } from 'lucide-react';
 
+import { AdminLayout } from './components/AdminLayout';
+import { AdminRollbackPage } from './pages/AdminRollbackPage';
+import { AdminAuditPage } from './pages/AdminAuditPage';
+import { AdminSupportPage } from './pages/AdminSupportPage';
+
 function AuthenticatedApp() {
+  const [userProfile, setUserProfile] = useState<any>(null);
+  const [isAdminMode, setIsAdminMode] = useState<boolean>(true);
   const [childrenList, setChildrenList] = useState<Child[]>([]);
   const [selectedChild, setSelectedChild] = useState<Child | null>(null);
   const [stats, setStats] = useState<Stats>({ todayBlockedCount: 0, pendingRequestsCount: 0, totalEventsToday: 0 });
@@ -26,41 +33,52 @@ function AuthenticatedApp() {
   const navigate = useNavigate();
   const location = useLocation();
 
+  const isSystemAdmin = userProfile?.systemRole === 'SYSTEM_ADMIN';
+
   const refreshAllData = useCallback(async (currentChildId?: string) => {
     try {
-      const kids = await api.getChildren();
-      setChildrenList(kids);
+      const profile = await api.getProfile().catch(() => null);
+      if (profile) {
+        setUserProfile(profile);
+      }
 
-      const targetChild = currentChildId
-        ? kids.find((k) => k.id === currentChildId) || kids[0]
-        : selectedChild
-        ? kids.find((k) => k.id === selectedChild.id) || kids[0]
-        : kids[0];
+      // If standard parent or parent mode, fetch children
+      if (profile?.systemRole !== 'SYSTEM_ADMIN' || !isAdminMode) {
+        const kids = await api.getChildren().catch(() => []);
+        setChildrenList(kids);
 
-      if (targetChild) {
-        setSelectedChild(targetChild);
-        const [s, reqs] = await Promise.all([
-          api.getStats(targetChild.id),
-          api.getPendingRequests(),
-        ]);
-        setStats({
-          ...s,
-          pendingRequestsCount: reqs.length,
-        });
+        const targetChild = currentChildId
+          ? kids.find((k) => k.id === currentChildId) || kids[0]
+          : selectedChild
+          ? kids.find((k) => k.id === selectedChild.id) || kids[0]
+          : kids[0];
+
+        if (targetChild) {
+          setSelectedChild(targetChild);
+          const [s, reqs] = await Promise.all([
+            api.getStats(targetChild.id).catch(() => ({ todayBlockedCount: 0, pendingRequestsCount: 0, totalEventsToday: 0 })),
+            api.getPendingRequests().catch(() => []),
+          ]);
+          setStats({
+            ...s,
+            pendingRequestsCount: reqs.length,
+          });
+        }
       }
     } catch (e) {
       console.error('Error refreshing data:', e);
     } finally {
       setLoading(false);
     }
-  }, [selectedChild]);
+  }, [selectedChild, isAdminMode]);
 
   useEffect(() => {
     refreshAllData();
-  }, []);
+  }, [isAdminMode]);
 
-  // WebSocket Live Push Sync
+  // WebSocket Live Push Sync (Parent mode)
   useEffect(() => {
+    if (isSystemAdmin && isAdminMode) return;
     const token = api.getToken();
     if (!token) return;
 
@@ -97,7 +115,7 @@ function AuthenticatedApp() {
     return () => {
       ws?.close();
     };
-  }, [selectedChild]);
+  }, [selectedChild, isSystemAdmin, isAdminMode]);
 
   const handleAddChild = async (name: string, age?: number) => {
     try {
@@ -115,19 +133,47 @@ function AuthenticatedApp() {
     window.location.reload();
   };
 
-  if (loading && childrenList.length === 0) {
+  if (loading && !userProfile) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center">
         <div className="text-center space-y-3">
           <div className="w-12 h-12 rounded-2xl bg-emerald-500 flex items-center justify-center text-slate-950 mx-auto animate-bounce font-bold shadow-lg shadow-emerald-500/20">
             <ShieldCheck className="w-6 h-6" />
           </div>
-          <h2 className="text-sm font-bold text-slate-300">Loading SafeBrowse Workspace...</h2>
+          <h2 className="text-sm font-bold text-slate-300">Loading SafeBrowse Platform...</h2>
         </div>
       </div>
     );
   }
 
+  // DEDICATED SYSTEM ADMIN CONSOLE EXPERIENCE
+  if (isSystemAdmin && isAdminMode) {
+    return (
+      <AdminLayout
+        adminEmail={userProfile?.email || api.getUserEmail()}
+        onLogout={handleLogout}
+        onSwitchToParentMode={() => {
+          setIsAdminMode(false);
+          navigate('/');
+        }}
+      >
+        <Routes>
+          <Route path="/" element={<Navigate to="/admin/parents" replace />} />
+          <Route path="/admin" element={<Navigate to="/admin/parents" replace />} />
+          <Route path="/admin/parents" element={<AdminParentsPage />} />
+          <Route path="/admin/operations" element={<OperationsDashboardPage />} />
+          <Route path="/admin/rollback" element={<AdminRollbackPage />} />
+          <Route path="/admin/audit" element={<AdminAuditPage />} />
+          <Route path="/admin/support" element={<AdminSupportPage />} />
+          <Route path="/settings/security" element={<SecuritySettingsPage />} />
+          <Route path="/status" element={<StatusPage />} />
+          <Route path="*" element={<Navigate to="/admin/parents" replace />} />
+        </Routes>
+      </AdminLayout>
+    );
+  }
+
+  // STANDARD PARENT WORKSPACE EXPERIENCE
   return (
     <AppLayout
       childrenList={childrenList}
@@ -135,7 +181,7 @@ function AuthenticatedApp() {
       onSelectChild={setSelectedChild}
       onAddChild={handleAddChild}
       stats={stats}
-      parentEmail={api.getUserEmail()}
+      parentEmail={userProfile?.email || api.getUserEmail()}
       onLogout={handleLogout}
     >
       <Routes>

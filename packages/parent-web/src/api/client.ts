@@ -636,8 +636,18 @@ class ApiClient {
       headers: this.getHeaders(),
       body: JSON.stringify({ newPassword }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to reset password');
+    return data;
+  }
+
+  async adminDisableParentMfa(id: string) {
+    const res = await fetch(`${API_BASE}/admin/parents/${id}/disable-mfa`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+    });
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to disable MFA');
     return data;
   }
 

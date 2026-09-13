@@ -17,6 +17,7 @@ import {
   Lock,
   Smartphone,
   Laptop,
+  ShieldOff,
 } from 'lucide-react';
 
 export const AdminParentsPage: React.FC = () => {
@@ -109,6 +110,21 @@ export const AdminParentsPage: React.FC = () => {
     try {
       await api.adminChangeUserRole(parent.id, newRole);
       showToast(`Role updated to ${newRole} for ${parent.email}`, 'success');
+      fetchAdminData();
+    } catch (e: any) {
+      showToast(e.message, 'error');
+    }
+  };
+
+  const handleDisableMfa = async (parent: any) => {
+    const confirm = window.confirm(
+      `⚠️ EMERGENCY: Are you sure you want to disable Multi-Factor Authentication for ${parent.email}? All active sessions for this user will be revoked.`
+    );
+    if (!confirm) return;
+
+    try {
+      await api.adminDisableParentMfa(parent.id);
+      showToast(`MFA disabled for ${parent.email}`, 'success');
       fetchAdminData();
     } catch (e: any) {
       showToast(e.message, 'error');
@@ -378,10 +394,20 @@ export const AdminParentsPage: React.FC = () => {
                           <button
                             onClick={() => handleToggleRole(parent)}
                             title="Promote / Demote Role"
-                            className="p-1.5 rounded-lg bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 border border-purple-500/30 transition"
+                            className="p-1.5 rounded-lg bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 border border-purple-500/30 transition cursor-pointer"
                           >
                             <UserCheck className="w-3.5 h-3.5" />
                           </button>
+
+                          {parent.mfaEnabled && (
+                            <button
+                              onClick={() => handleDisableMfa(parent)}
+                              title="Emergency Disable MFA"
+                              className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 transition cursor-pointer"
+                            >
+                              <ShieldOff className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                         </td>
                       </tr>
                     ))

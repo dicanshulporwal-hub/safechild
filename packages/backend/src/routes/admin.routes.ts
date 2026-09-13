@@ -371,6 +371,44 @@ adminRouter.post(
   }
 );
 
+// POST /api/admin/parents/:id/disable-mfa - Emergency reset/disable MFA for a locked-out parent
+adminRouter.post(
+  '/parents/:id/disable-mfa',
+  authMiddleware,
+  requireVerifiedEmail,
+  requireSystemAdmin(SystemPermission.SYSTEM_PARENTS_MANAGE),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const user = await prisma.user.findUnique({ where: { id: req.params.id } });
+      if (!user) {
+        return res.status(404).json({ error: 'Parent user not found.' });
+      }
+
+      await prisma.user.update({
+        where: { id: req.params.id },
+        data: {
+          mfaEnabled: false,
+          mfaSecret: null,
+          pendingMfaSecret: null,
+          mfaRecoveryCodes: [],
+          tokenVersion: { increment: 1 },
+        },
+      });
+
+      await rbacService.logSystemAudit(
+        req.userId!,
+        'ADMIN_DISABLE_PARENT_MFA',
+        `Admin performed emergency MFA disable for parent ${user.email} (${user.id})`,
+        req.ip
+      );
+
+      res.json({ success: true, message: `MFA disabled and sessions reset for ${user.email}` });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
 // POST /api/admin/bootstrap-dev - Development-only admin promotion (Rejected unconditionally in production)
 adminRouter.post(
   '/bootstrap-dev',
