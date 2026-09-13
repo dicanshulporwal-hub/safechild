@@ -203,7 +203,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess }) => {
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-3 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-sm shadow-md shadow-slate-900/20 flex items-center justify-center space-x-2 transition-all mt-2"
+            className="w-full py-3 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-sm shadow-md shadow-slate-900/20 flex items-center justify-center space-x-2 transition-all mt-2 cursor-pointer"
           >
             {mode === 'register' && <UserPlus className="w-4 h-4 text-emerald-400" />}
             {mode === 'login' && <LogIn className="w-4 h-4 text-emerald-400" />}
@@ -221,6 +221,55 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess }) => {
             </span>
           </button>
         </form>
+
+        {mode === 'login' && (
+          <div className="mt-5 pt-5 border-t border-slate-100">
+            <div className="flex items-center justify-between mb-2.5">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                Demo Accounts
+              </span>
+              <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-medium">
+                Click to Auto-Fill
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setEmail('parent@safebrowse.io');
+                  setPassword('Password123!');
+                  setError(null);
+                }}
+                className="text-left p-3 rounded-2xl border border-emerald-200/80 bg-emerald-50/60 hover:bg-emerald-50 hover:border-emerald-400 transition-all group cursor-pointer shadow-xs"
+              >
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-xs font-black text-emerald-900">Parent</span>
+                  <span className="text-[9px] font-bold text-emerald-700 bg-emerald-200/60 px-1.5 py-0.5 rounded-md">USER</span>
+                </div>
+                <div className="text-[11px] text-slate-700 font-mono font-medium truncate">parent@safebrowse.io</div>
+                <div className="text-[10px] text-slate-500 font-mono mt-0.5">Password123!</div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setEmail('admin@safebrowse.io');
+                  setPassword('Password123!');
+                  setError(null);
+                }}
+                className="text-left p-3 rounded-2xl border border-purple-200/80 bg-purple-50/60 hover:bg-purple-50 hover:border-purple-400 transition-all group cursor-pointer shadow-xs"
+              >
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-xs font-black text-purple-900">Admin</span>
+                  <span className="text-[9px] font-bold text-purple-700 bg-purple-200/60 px-1.5 py-0.5 rounded-md">ADMIN</span>
+                </div>
+                <div className="text-[11px] text-slate-700 font-mono font-medium truncate">admin@safebrowse.io</div>
+                <div className="text-[10px] text-slate-500 font-mono mt-0.5">Password123!</div>
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="mt-4 text-center">
           {mode === 'mfa_challenge' || mode === 'forgot_password' ? (
