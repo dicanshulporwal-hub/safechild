@@ -206,6 +206,57 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
       const hasRollbackLog = auditRes.body.logs.some((l: any) => l.action === 'EMERGENCY_ROLLBACK_TRIGGERED');
       assert.strictEqual(hasRollbackLog, true);
     });
+
+    it('3c. should allow SYSTEM_ADMIN to list all parents and reject standard parents (403)', async () => {
+      // Normal parent should get 403
+      const forbiddenRes = await makeRequest('GET', '/api/admin/parents', {
+        Authorization: `Bearer ${parentAToken}`,
+      });
+      assert.strictEqual(forbiddenRes.status, 403);
+
+      // System Admin should get 200 with list of parents
+      const adminRes = await makeRequest('GET', '/api/admin/parents', {
+        Authorization: `Bearer ${adminToken}`,
+      });
+      assert.strictEqual(adminRes.status, 200);
+      assert.ok(Array.isArray(adminRes.body.parents));
+      assert.ok(adminRes.body.total >= 2);
+    });
+
+    it('3d. should allow SYSTEM_ADMIN to view parent details, verify email, and reset password', async () => {
+      // 1. Create a dedicated parent to test admin inspection and password reset
+      const tempParent = await authService.register(`temp-parent-${nanoid(6)}@safebrowse.io`, testPassword, 'Temp Parent');
+      const tempParentId = tempParent.user.id;
+
+      // 2. Get specific parent details
+      const detailRes = await makeRequest('GET', `/api/admin/parents/${tempParentId}`, {
+        Authorization: `Bearer ${adminToken}`,
+      });
+      assert.strictEqual(detailRes.status, 200);
+      assert.strictEqual(detailRes.body.id, tempParentId);
+      assert.ok(Array.isArray(detailRes.body.families));
+
+      // 3. Manually verify parent email
+      const verifyRes = await makeRequest('POST', `/api/admin/parents/${tempParentId}/verify-email`, {
+        Authorization: `Bearer ${adminToken}`,
+      });
+      assert.strictEqual(verifyRes.status, 200);
+      assert.strictEqual(verifyRes.body.success, true);
+
+      // 4. Admin reset parent password
+      const resetRes = await makeRequest(
+        'POST',
+        `/api/admin/parents/${tempParentId}/reset-password`,
+        { Authorization: `Bearer ${adminToken}` },
+        { newPassword: 'NewAdminAssignedPass2026!' }
+      );
+      assert.strictEqual(resetRes.status, 200);
+      assert.strictEqual(resetRes.body.success, true);
+
+      // 5. Verify parent can login with new password
+      const loginRes = await authService.login(detailRes.body.email, 'NewAdminAssignedPass2026!');
+      assert.ok(loginRes.token);
+    });
   });
 
   describe('2. Family Role Permissions & Co-Parent Access', () => {

@@ -16,6 +16,7 @@ export enum SystemPermission {
   SYSTEM_ROLLBACK_EXECUTE = 'SYSTEM_ROLLBACK_EXECUTE',
   SYSTEM_SUPPORT_MANAGE = 'SYSTEM_SUPPORT_MANAGE',
   SYSTEM_AUDIT_READ = 'SYSTEM_AUDIT_READ',
+  SYSTEM_PARENTS_MANAGE = 'SYSTEM_PARENTS_MANAGE',
 }
 
 // Typed Family Permissions
@@ -47,6 +48,7 @@ export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRole, Set<SystemPermission>> 
     SystemPermission.SYSTEM_ROLLBACK_EXECUTE,
     SystemPermission.SYSTEM_SUPPORT_MANAGE,
     SystemPermission.SYSTEM_AUDIT_READ,
+    SystemPermission.SYSTEM_PARENTS_MANAGE,
   ]),
   USER: new Set([]),
 };

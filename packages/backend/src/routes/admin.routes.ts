@@ -139,6 +139,238 @@ adminRouter.get(
   }
 );
 
+import bcrypt from 'bcryptjs';
+
+// GET /api/admin/parents - List all parents and their family accounts
+adminRouter.get(
+  '/parents',
+  authMiddleware,
+  requireVerifiedEmail,
+  requireSystemAdmin(SystemPermission.SYSTEM_PARENTS_MANAGE),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const users = await prisma.user.findMany({
+        orderBy: { createdAt: 'desc' },
+        include: {
+          memberships: {
+            include: {
+              family: {
+                include: {
+                  children: {
+                    include: {
+                      devices: true,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      const sanitizedUsers = users.map((u) => ({
+        id: u.id,
+        email: u.email,
+        name: u.name,
+        systemRole: u.systemRole,
+        emailVerified: u.emailVerified,
+        mfaEnabled: u.mfaEnabled,
+        createdAt: u.createdAt,
+        lastLoginAt: u.lastLoginAt,
+        families: u.memberships.map((m) => ({
+          familyId: m.family.id,
+          familyName: m.family.name,
+          role: m.role,
+          isOwner: m.role === 'OWNER',
+          children: m.family.children.map((c) => ({
+            id: c.id,
+            name: c.name,
+            age: c.age,
+            deviceCount: c.devices.length,
+          })),
+        })),
+      }));
+
+      res.json({ parents: sanitizedUsers, total: sanitizedUsers.length });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+// GET /api/admin/parents/:id - Get specific parent details
+adminRouter.get(
+  '/parents/:id',
+  authMiddleware,
+  requireVerifiedEmail,
+  requireSystemAdmin(SystemPermission.SYSTEM_PARENTS_MANAGE),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: req.params.id },
+        include: {
+          memberships: {
+            include: {
+              family: {
+                include: {
+                  children: {
+                    include: {
+                      devices: true,
+                      policy: true,
+                    },
+                  },
+                  auditLogs: {
+                    take: 20,
+                    orderBy: { timestamp: 'desc' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      if (!user) {
+        return res.status(404).json({ error: 'Parent user not found.' });
+      }
+
+      const sanitized = {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        systemRole: user.systemRole,
+        emailVerified: user.emailVerified,
+        mfaEnabled: user.mfaEnabled,
+        createdAt: user.createdAt,
+        lastLoginAt: user.lastLoginAt,
+        families: user.memberships.map((m) => ({
+          familyId: m.family.id,
+          familyName: m.family.name,
+          role: m.role,
+          children: m.family.children,
+          recentAuditLogs: m.family.auditLogs,
+        })),
+      };
+
+      res.json(sanitized);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+// POST /api/admin/parents/:id/verify-email - Manually verify a parent email
+adminRouter.post(
+  '/parents/:id/verify-email',
+  authMiddleware,
+  requireVerifiedEmail,
+  requireSystemAdmin(SystemPermission.SYSTEM_PARENTS_MANAGE),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const user = await prisma.user.findUnique({ where: { id: req.params.id } });
+      if (!user) {
+        return res.status(404).json({ error: 'Parent user not found.' });
+      }
+
+      const updated = await prisma.user.update({
+        where: { id: req.params.id },
+        data: { emailVerified: true },
+      });
+
+      await rbacService.logSystemAudit(
+        req.userId!,
+        'ADMIN_VERIFY_PARENT_EMAIL',
+        `Admin manually verified email for parent ${user.email} (${user.id})`,
+        req.ip
+      );
+
+      res.json({ success: true, message: `Email verified for ${updated.email}` });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+// POST /api/admin/parents/:id/reset-password - Admin reset password for a parent
+adminRouter.post(
+  '/parents/:id/reset-password',
+  authMiddleware,
+  requireVerifiedEmail,
+  requireSystemAdmin(SystemPermission.SYSTEM_PARENTS_MANAGE),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { newPassword } = req.body;
+      if (!newPassword || newPassword.length < 8) {
+        return res.status(400).json({ error: 'newPassword is required and must be at least 8 characters long.' });
+      }
+
+      const user = await prisma.user.findUnique({ where: { id: req.params.id } });
+      if (!user) {
+        return res.status(404).json({ error: 'Parent user not found.' });
+      }
+
+      const salt = bcrypt.genSaltSync(12);
+      const passwordHash = bcrypt.hashSync(newPassword, salt);
+
+      await prisma.user.update({
+        where: { id: req.params.id },
+        data: {
+          passwordHash,
+          tokenVersion: { increment: 1 }, // Invalidate existing sessions
+        },
+      });
+
+      await rbacService.logSystemAudit(
+        req.userId!,
+        'ADMIN_RESET_PARENT_PASSWORD',
+        `Admin reset password for parent ${user.email} (${user.id})`,
+        req.ip
+      );
+
+      res.json({ success: true, message: `Password successfully reset for ${user.email}` });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+// POST /api/admin/parents/:id/role - Update user system role (USER <-> SYSTEM_ADMIN)
+adminRouter.post(
+  '/parents/:id/role',
+  authMiddleware,
+  requireVerifiedEmail,
+  requireSystemAdmin(SystemPermission.SYSTEM_PARENTS_MANAGE),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { systemRole } = req.body;
+      if (systemRole !== 'USER' && systemRole !== 'SYSTEM_ADMIN') {
+        return res.status(400).json({ error: 'systemRole must be USER or SYSTEM_ADMIN.' });
+      }
+
+      const user = await prisma.user.findUnique({ where: { id: req.params.id } });
+      if (!user) {
+        return res.status(404).json({ error: 'Parent user not found.' });
+      }
+
+      const updated = await prisma.user.update({
+        where: { id: req.params.id },
+        data: { systemRole },
+      });
+
+      await rbacService.logSystemAudit(
+        req.userId!,
+        'ADMIN_CHANGE_USER_ROLE',
+        `Admin changed role for user ${user.email} to ${systemRole}`,
+        req.ip
+      );
+
+      res.json({ success: true, user: { id: updated.id, email: updated.email, systemRole: updated.systemRole } });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
 // POST /api/admin/bootstrap-dev - Development-only admin promotion (Rejected unconditionally in production)
 adminRouter.post(
   '/bootstrap-dev',
