@@ -96,14 +96,16 @@ class ApiClient {
   private token: string | null = null;
   private refreshToken: string | null = null;
   private userEmail: string = '';
+  private userRole: string = '';
 
   constructor() {
     this.token = localStorage.getItem('sb_auth_token') || null;
     this.refreshToken = localStorage.getItem('sb_refresh_token') || null;
     this.userEmail = localStorage.getItem('sb_user_email') || '';
+    this.userRole = localStorage.getItem('sb_user_role') || '';
   }
 
-  public setToken(token: string, refreshToken?: string, email?: string) {
+  public setToken(token: string, refreshToken?: string, email?: string, role?: string) {
     this.token = token;
     localStorage.setItem('sb_auth_token', token);
     if (refreshToken) {
@@ -113,6 +115,10 @@ class ApiClient {
     if (email) {
       this.userEmail = email;
       localStorage.setItem('sb_user_email', email);
+    }
+    if (role) {
+      this.userRole = role;
+      localStorage.setItem('sb_user_role', role);
     }
   }
 
@@ -128,6 +134,10 @@ class ApiClient {
     return this.userEmail;
   }
 
+  public getUserRole() {
+    return this.userRole;
+  }
+
   public logout() {
     if (this.token) {
       fetch(`${API_BASE}/auth/logout`, {
@@ -137,9 +147,11 @@ class ApiClient {
     }
     this.token = null;
     this.refreshToken = null;
+    this.userRole = '';
     localStorage.removeItem('sb_auth_token');
     localStorage.removeItem('sb_refresh_token');
     localStorage.removeItem('sb_user_email');
+    localStorage.removeItem('sb_user_role');
   }
 
   public getHeaders(): HeadersInit {
@@ -175,7 +187,7 @@ class ApiClient {
     const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Login failed');
     if (data.token) {
-      this.setToken(data.token, data.refreshToken, data.user?.email || email);
+      this.setToken(data.token, data.refreshToken, data.user?.email || email, data.user?.systemRole || 'USER');
     }
     return data;
   }

@@ -32,7 +32,7 @@ function AuthenticatedApp() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  const isSystemAdmin = userProfile?.systemRole === 'SYSTEM_ADMIN';
+  const isSystemAdmin = userProfile?.systemRole === 'SYSTEM_ADMIN' || api.getUserRole() === 'SYSTEM_ADMIN';
 
   const refreshAllData = useCallback(async (currentChildId?: string) => {
     try {

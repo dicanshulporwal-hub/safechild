@@ -19,6 +19,7 @@ export interface UserProfileResponse {
   id: string;
   email: string;
   name: string;
+  systemRole: string;
   mobileNumber?: string;
   profilePhoto?: string;
   timezone: string;
@@ -61,6 +62,7 @@ export class ProfileService {
       id: user.id,
       email: user.email,
       name: user.name,
+      systemRole: user.systemRole || 'USER',
       mobileNumber: user.mobileNumber || '',
       profilePhoto: user.profilePhoto || '',
       timezone: user.timezone || 'UTC',
