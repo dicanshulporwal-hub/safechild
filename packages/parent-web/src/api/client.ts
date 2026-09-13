@@ -594,6 +594,50 @@ class ApiClient {
     return res.json();
   }
 
+  async getAdminParents() {
+    const res = await fetch(`${API_BASE}/admin/parents`, { headers: this.getHeaders() });
+    if (!res.ok) throw new Error('Forbidden. System administrator privilege required.');
+    return res.json();
+  }
+
+  async getAdminParentDetails(id: string) {
+    const res = await fetch(`${API_BASE}/admin/parents/${id}`, { headers: this.getHeaders() });
+    if (!res.ok) throw new Error('Forbidden. System administrator privilege required.');
+    return res.json();
+  }
+
+  async adminVerifyParentEmail(id: string) {
+    const res = await fetch(`${API_BASE}/admin/parents/${id}/verify-email`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to verify email');
+    return data;
+  }
+
+  async adminResetParentPassword(id: string, newPassword: string) {
+    const res = await fetch(`${API_BASE}/admin/parents/${id}/reset-password`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ newPassword }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to reset password');
+    return data;
+  }
+
+  async adminChangeUserRole(id: string, systemRole: 'USER' | 'SYSTEM_ADMIN') {
+    const res = await fetch(`${API_BASE}/admin/parents/${id}/role`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ systemRole }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to update role');
+    return data;
+  }
+
   async dispatchAdminRollback(targetVersion: string, reason?: string) {
     const res = await fetch(`${API_BASE}/admin/rollback`, {
       method: 'POST',

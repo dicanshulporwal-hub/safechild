@@ -104,8 +104,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
     ...(isSystemAdmin
       ? [
           {
-            to: '/admin/operations',
-            label: 'System Admin',
+            to: '/admin',
+            label: 'Admin Console',
             icon: Activity,
             badge: undefined,
           },

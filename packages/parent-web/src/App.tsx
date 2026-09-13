@@ -11,6 +11,7 @@ import { SecuritySettingsPage } from './pages/SecuritySettingsPage';
 import { FamilyManagementPage } from './pages/FamilyManagementPage';
 import { DeviceDiagnosticsPage } from './pages/DeviceDiagnosticsPage';
 import { OperationsDashboardPage } from './pages/OperationsDashboardPage';
+import { AdminParentsPage } from './pages/AdminParentsPage';
 import { StatusPage } from './pages/StatusPage';
 import { ReferralPage } from './pages/ReferralPage';
 import { FeedbackPage } from './pages/FeedbackPage';
@@ -166,6 +167,8 @@ function AuthenticatedApp() {
         <Route path="/settings/security" element={<SecuritySettingsPage />} />
         <Route path="/family" element={<FamilyManagementPage />} />
         <Route path="/settings/family" element={<FamilyManagementPage />} />
+        <Route path="/admin" element={<AdminParentsPage />} />
+        <Route path="/admin/parents" element={<AdminParentsPage />} />
         <Route path="/admin/operations" element={<OperationsDashboardPage />} />
         <Route path="/status" element={<StatusPage />} />
         <Route path="/referrals" element={<ReferralPage />} />
