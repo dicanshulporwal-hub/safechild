@@ -24,7 +24,6 @@ import { AdminSupportPage } from './pages/AdminSupportPage';
 
 function AuthenticatedApp() {
   const [userProfile, setUserProfile] = useState<any>(null);
-  const [isAdminMode, setIsAdminMode] = useState<boolean>(true);
   const [childrenList, setChildrenList] = useState<Child[]>([]);
   const [selectedChild, setSelectedChild] = useState<Child | null>(null);
   const [stats, setStats] = useState<Stats>({ todayBlockedCount: 0, pendingRequestsCount: 0, totalEventsToday: 0 });
@@ -42,8 +41,8 @@ function AuthenticatedApp() {
         setUserProfile(profile);
       }
 
-      // If standard parent or parent mode, fetch children
-      if (profile?.systemRole !== 'SYSTEM_ADMIN' || !isAdminMode) {
+      // If standard parent, fetch children
+      if (profile?.systemRole !== 'SYSTEM_ADMIN') {
         const kids = await api.getChildren().catch(() => []);
         setChildrenList(kids);
 
@@ -70,15 +69,15 @@ function AuthenticatedApp() {
     } finally {
       setLoading(false);
     }
-  }, [selectedChild, isAdminMode]);
+  }, [selectedChild]);
 
   useEffect(() => {
     refreshAllData();
-  }, [isAdminMode]);
+  }, []);
 
-  // WebSocket Live Push Sync (Parent mode)
+  // WebSocket Live Push Sync (Parent mode only)
   useEffect(() => {
-    if (isSystemAdmin && isAdminMode) return;
+    if (isSystemAdmin) return;
     const token = api.getToken();
     if (!token) return;
 
@@ -115,7 +114,7 @@ function AuthenticatedApp() {
     return () => {
       ws?.close();
     };
-  }, [selectedChild, isSystemAdmin, isAdminMode]);
+  }, [selectedChild, isSystemAdmin]);
 
   const handleAddChild = async (name: string, age?: number) => {
     try {
@@ -147,15 +146,11 @@ function AuthenticatedApp() {
   }
 
   // DEDICATED SYSTEM ADMIN CONSOLE EXPERIENCE
-  if (isSystemAdmin && isAdminMode) {
+  if (isSystemAdmin) {
     return (
       <AdminLayout
         adminEmail={userProfile?.email || api.getUserEmail()}
         onLogout={handleLogout}
-        onSwitchToParentMode={() => {
-          setIsAdminMode(false);
-          navigate('/');
-        }}
       >
         <Routes>
           <Route path="/" element={<Navigate to="/admin/parents" replace />} />

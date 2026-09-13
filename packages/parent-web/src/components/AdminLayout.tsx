@@ -17,14 +17,12 @@ import {
 interface AdminLayoutProps {
   adminEmail: string;
   onLogout: () => void;
-  onSwitchToParentMode?: () => void;
   children: React.ReactNode;
 }
 
 export const AdminLayout: React.FC<AdminLayoutProps> = ({
   adminEmail,
   onLogout,
-  onSwitchToParentMode,
   children,
 }) => {
   const navigate = useNavigate();
@@ -98,21 +96,9 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
             </div>
           </div>
 
-          {/* Quick Switch to Parent View & Controls */}
+          {/* Admin User Badge & Controls */}
           <div className="flex items-center gap-3">
-            {onSwitchToParentMode && (
-              <button
-                type="button"
-                onClick={onSwitchToParentMode}
-                className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-800 text-xs font-semibold text-slate-300 hover:text-white border border-slate-700 transition shadow-xs cursor-pointer"
-                title="Switch to Family / Parent Workspace"
-              >
-                <ArrowRightLeft className="w-3.5 h-3.5 text-purple-400" />
-                <span>Parent Workspace</span>
-              </button>
-            )}
-
-            <div className="flex items-center gap-2 pl-3 border-l border-slate-800">
+            <div className="flex items-center gap-2">
               <div className="flex items-center gap-2 text-xs font-medium text-slate-300">
                 <div className="w-7 h-7 rounded-full bg-purple-950/80 border border-purple-600/40 flex items-center justify-center text-xs font-bold text-purple-300">
                   {adminEmail ? adminEmail.charAt(0).toUpperCase() : 'A'}

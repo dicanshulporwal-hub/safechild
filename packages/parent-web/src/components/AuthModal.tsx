@@ -52,6 +52,28 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess }) => {
     }
   };
 
+  const handleDemoLogin = async (demoEmail: string, demoPass: string) => {
+    setEmail(demoEmail);
+    setPassword(demoPass);
+    setError(null);
+    setStatusMessage(null);
+    setLoading(true);
+
+    try {
+      const res = await api.login(demoEmail, demoPass);
+      if (res.mfaRequired && res.mfaTicket) {
+        setMfaTicket(res.mfaTicket);
+        setMode('mfa_challenge');
+      } else {
+        onSuccess();
+      }
+    } catch (err: any) {
+      setError(err.message || 'Login failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
       <div className="bg-white rounded-3xl max-w-md w-full p-8 shadow-2xl border border-slate-100 animate-fadeIn">
@@ -229,23 +251,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess }) => {
                 Demo Accounts
               </span>
               <span className="text-[10px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full font-medium">
-                Click to Auto-Fill
+                1-Click Instant Login
               </span>
             </div>
 
             <div className="grid grid-cols-2 gap-2.5">
               <button
                 type="button"
-                onClick={() => {
-                  setEmail('parent@safebrowse.io');
-                  setPassword('Password123!');
-                  setError(null);
-                }}
-                className="text-left p-3 rounded-2xl border border-emerald-200/80 bg-emerald-50/60 hover:bg-emerald-50 hover:border-emerald-400 transition-all group cursor-pointer shadow-xs"
+                disabled={loading}
+                onClick={() => handleDemoLogin('parent@safebrowse.io', 'Password123!')}
+                className="text-left p-3 rounded-2xl border border-emerald-200/80 bg-emerald-50/60 hover:bg-emerald-100/70 hover:border-emerald-400 transition-all group cursor-pointer shadow-xs disabled:opacity-50"
               >
                 <div className="flex items-center justify-between mb-1.5">
                   <span className="text-xs font-black text-emerald-900">Parent</span>
-                  <span className="text-[9px] font-bold text-emerald-700 bg-emerald-200/60 px-1.5 py-0.5 rounded-md">USER</span>
+                  <span className="text-[9px] font-bold text-emerald-700 bg-emerald-200/60 px-1.5 py-0.5 rounded-md">LOGIN ➜</span>
                 </div>
                 <div className="text-[11px] text-slate-700 font-mono font-medium truncate">parent@safebrowse.io</div>
                 <div className="text-[10px] text-slate-500 font-mono mt-0.5">Password123!</div>
@@ -253,16 +272,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess }) => {
 
               <button
                 type="button"
-                onClick={() => {
-                  setEmail('admin@safebrowse.io');
-                  setPassword('Password123!');
-                  setError(null);
-                }}
-                className="text-left p-3 rounded-2xl border border-purple-200/80 bg-purple-50/60 hover:bg-purple-50 hover:border-purple-400 transition-all group cursor-pointer shadow-xs"
+                disabled={loading}
+                onClick={() => handleDemoLogin('admin@safebrowse.io', 'Password123!')}
+                className="text-left p-3 rounded-2xl border border-purple-200/80 bg-purple-50/60 hover:bg-purple-100/70 hover:border-purple-400 transition-all group cursor-pointer shadow-xs disabled:opacity-50"
               >
                 <div className="flex items-center justify-between mb-1.5">
                   <span className="text-xs font-black text-purple-900">Admin</span>
-                  <span className="text-[9px] font-bold text-purple-700 bg-purple-200/60 px-1.5 py-0.5 rounded-md">ADMIN</span>
+                  <span className="text-[9px] font-bold text-purple-700 bg-purple-200/60 px-1.5 py-0.5 rounded-md">LOGIN ➜</span>
                 </div>
                 <div className="text-[11px] text-slate-700 font-mono font-medium truncate">admin@safebrowse.io</div>
                 <div className="text-[10px] text-slate-500 font-mono mt-0.5">Password123!</div>
