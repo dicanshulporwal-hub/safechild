@@ -152,13 +152,27 @@ class ApiClient {
     return headers;
   }
 
+  private async parseResponse(res: Response): Promise<any> {
+    const text = await res.text();
+    if (!text || text.trim().length === 0) {
+      if (!res.ok) throw new Error(`Server returned status ${res.status} (${res.statusText || 'Error'})`);
+      return {};
+    }
+    try {
+      return JSON.parse(text);
+    } catch {
+      if (!res.ok) throw new Error(`Server returned status ${res.status}: ${text.slice(0, 100)}`);
+      return { message: text };
+    }
+  }
+
   async login(email: string, password: string) {
     const res = await fetch(`${API_BASE}/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Login failed');
     if (data.token) {
       this.setToken(data.token, data.refreshToken, data.user?.email || email);
@@ -172,7 +186,7 @@ class ApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ mfaTicket, code }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'MFA Login failed');
     if (data.token) {
       this.setToken(data.token, data.refreshToken, data.user?.email);
@@ -187,7 +201,7 @@ class ApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refreshToken: this.refreshToken }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) {
       this.logout();
       throw new Error(data.error || 'Failed to refresh session');
@@ -202,7 +216,7 @@ class ApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password, name }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Registration failed');
     this.setToken(data.token, data.refreshToken, data.user?.email || email);
     return data;
@@ -214,7 +228,7 @@ class ApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email }),
     });
-    return res.json();
+    return this.parseResponse(res);
   }
 
   async resetPassword(token: string, newPassword: string) {
@@ -223,7 +237,7 @@ class ApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token, newPassword }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Password reset failed');
     return data;
   }
@@ -234,7 +248,7 @@ class ApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Email verification failed');
     return data;
   }

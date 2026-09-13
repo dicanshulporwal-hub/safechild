@@ -83,7 +83,7 @@ export const ParentProfileModal: React.FC<ParentProfileModalProps> = ({ isOpen, 
   const fetchProfile = async () => {
     setLoading(true);
     try {
-      const res = await fetch('http://localhost:1002/api/me', {
+      const res = await fetch('/api/me', {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
@@ -101,7 +101,7 @@ export const ParentProfileModal: React.FC<ParentProfileModalProps> = ({ isOpen, 
 
   const fetchSessions = async () => {
     try {
-      const res = await fetch('http://localhost:1002/api/me/sessions', {
+      const res = await fetch('/api/me/sessions', {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
@@ -116,7 +116,7 @@ export const ParentProfileModal: React.FC<ParentProfileModalProps> = ({ isOpen, 
     setSaving(true);
     setStatusMsg(null);
     try {
-      const res = await fetch('http://localhost:1002/api/me', {
+      const res = await fetch('/api/me', {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -152,7 +152,7 @@ export const ParentProfileModal: React.FC<ParentProfileModalProps> = ({ isOpen, 
     setSaving(true);
     setStatusMsg(null);
     try {
-      const res = await fetch('http://localhost:1002/api/me/change-password', {
+      const res = await fetch('/api/me/change-password', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -179,7 +179,7 @@ export const ParentProfileModal: React.FC<ParentProfileModalProps> = ({ isOpen, 
   const startMfaSetup = async () => {
     setStatusMsg(null);
     try {
-      const res = await fetch('http://localhost:1002/api/me/mfa/setup', {
+      const res = await fetch('/api/me/mfa/setup', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -195,7 +195,7 @@ export const ParentProfileModal: React.FC<ParentProfileModalProps> = ({ isOpen, 
     setStatusMsg(null);
     setSaving(true);
     try {
-      const res = await fetch('http://localhost:1002/api/me/mfa/verify', {
+      const res = await fetch('/api/me/mfa/verify', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -224,7 +224,7 @@ export const ParentProfileModal: React.FC<ParentProfileModalProps> = ({ isOpen, 
     setStatusMsg(null);
     setSaving(true);
     try {
-      const res = await fetch('http://localhost:1002/api/me/mfa/disable', {
+      const res = await fetch('/api/me/mfa/disable', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -249,7 +249,7 @@ export const ParentProfileModal: React.FC<ParentProfileModalProps> = ({ isOpen, 
 
   const revokeSession = async (sessionId: string) => {
     try {
-      const res = await fetch(`http://localhost:1002/api/me/sessions/${sessionId}`, {
+      const res = await fetch(`/api/me/sessions/${sessionId}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -262,7 +262,7 @@ export const ParentProfileModal: React.FC<ParentProfileModalProps> = ({ isOpen, 
 
   const revokeOtherSessions = async () => {
     try {
-      const res = await fetch('http://localhost:1002/api/me/sessions/revoke-others', {
+      const res = await fetch('/api/me/sessions/revoke-others', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });

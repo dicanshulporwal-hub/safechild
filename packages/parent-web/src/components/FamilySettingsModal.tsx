@@ -72,7 +72,7 @@ export const FamilySettingsModal: React.FC<FamilySettingsModalProps> = ({ isOpen
   const fetchFamilyOverview = async () => {
     setLoading(true);
     try {
-      const res = await fetch('http://localhost:1002/api/family', {
+      const res = await fetch('/api/family', {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
@@ -90,7 +90,7 @@ export const FamilySettingsModal: React.FC<FamilySettingsModalProps> = ({ isOpen
 
   const fetchAuditLogs = async () => {
     try {
-      const res = await fetch('http://localhost:1002/api/family/audit', {
+      const res = await fetch('/api/family/audit', {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
@@ -104,7 +104,7 @@ export const FamilySettingsModal: React.FC<FamilySettingsModalProps> = ({ isOpen
     e.preventDefault();
     setStatusMsg(null);
     try {
-      const res = await fetch('http://localhost:1002/api/family/invitations', {
+      const res = await fetch('/api/family/invitations', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -132,7 +132,7 @@ export const FamilySettingsModal: React.FC<FamilySettingsModalProps> = ({ isOpen
 
   const handleRevokeInvite = async (inviteId: string) => {
     try {
-      const res = await fetch(`http://localhost:1002/api/family/invitations/${inviteId}`, {
+      const res = await fetch(`/api/family/invitations/${inviteId}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -146,7 +146,7 @@ export const FamilySettingsModal: React.FC<FamilySettingsModalProps> = ({ isOpen
   const handleRemoveMember = async (memberId: string) => {
     if (!confirm('Are you sure you want to remove this parent from the family?')) return;
     try {
-      const res = await fetch(`http://localhost:1002/api/family/members/${memberId}?familyId=${familyData?.id}`, {
+      const res = await fetch(`/api/family/members/${memberId}?familyId=${familyData?.id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -160,7 +160,7 @@ export const FamilySettingsModal: React.FC<FamilySettingsModalProps> = ({ isOpen
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch('http://localhost:1002/api/family', {
+      const res = await fetch('/api/family', {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -185,7 +185,7 @@ export const FamilySettingsModal: React.FC<FamilySettingsModalProps> = ({ isOpen
     if (!transferUserId) return;
     if (!confirm('Are you sure you want to transfer Family Ownership? You will become a standard PARENT.')) return;
     try {
-      const res = await fetch('http://localhost:1002/api/family/transfer-ownership', {
+      const res = await fetch('/api/family/transfer-ownership', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

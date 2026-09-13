@@ -12,7 +12,7 @@ export const ReferralModal: React.FC<ReferralModalProps> = ({ isOpen, onClose })
 
   useEffect(() => {
     if (isOpen) {
-      fetch('http://localhost:1002/api/referrals', {
+      fetch('/api/referrals', {
         headers: { Authorization: `Bearer ${token}` },
       })
         .then((r) => r.json())
