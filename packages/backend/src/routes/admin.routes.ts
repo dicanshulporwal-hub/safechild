@@ -201,9 +201,8 @@ adminRouter.post(
       const result = await authService.adminCreateParent(req.userId!, name, email, req.ip);
       res.status(201).json({
         success: true,
-        message: `Parent account created for ${result.user.email}. Activation email sent.`,
+        message: result.message,
         user: result.user,
-        activationToken: result.activationToken,
       });
     } catch (e: any) {
       const status = e.message?.includes('already exists') ? 409 : 400;
@@ -296,13 +295,17 @@ adminRouter.post(
       const user = await prisma.user.findUnique({ where: { id: req.params.id } });
       if (!user) return res.status(404).json({ error: 'Parent user not found.' });
 
-      const now = new Date();
+      if (user.status === 'PENDING_ACTIVATION') {
+        return res.status(400).json({
+          error: 'Cannot manually verify email for an account pending activation. The user must complete the secure activation flow.',
+          code: 'ACCOUNT_ACTIVATION_REQUIRED',
+        });
+      }
+
       const updated = await prisma.user.update({
         where: { id: req.params.id },
         data: {
           emailVerified: true,
-          status: user.status === 'PENDING_ACTIVATION' ? 'ACTIVE' : user.status,
-          activatedAt: user.activatedAt || (user.status === 'PENDING_ACTIVATION' ? now : undefined),
         },
       });
       await rbacService.logSystemAudit(

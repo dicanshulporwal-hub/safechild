@@ -7,6 +7,7 @@ import {
   Policy,
 } from '@safebrowse/shared';
 import { authService } from '../src/services/auth.service';
+import { mailService } from '../src/services/mail.service';
 import { childService } from '../src/services/child.service';
 import { deviceService } from '../src/services/device.service';
 import { requestService } from '../src/services/request.service';
@@ -15,6 +16,12 @@ import { prisma } from '../src/db/prisma';
 import { nanoid } from 'nanoid';
 
 describe('SafeBrowse Security, Edge Cases & Threat Model Test Suite', () => {
+  function getActivationToken(email: string): string {
+    const mail = mailService.getOutbox().filter((m) => m.to.toLowerCase() === email.toLowerCase().trim()).pop();
+    if (!mail || !mail.token) throw new Error(`Activation token not found for ${email}`);
+    return mail.token;
+  }
+
   describe('1. Domain Normalization & Internationalized Domain Names (IDN/Punycode)', () => {
     it('should strip scheme, path, ports, and whitespace from raw URLs', () => {
       assert.strictEqual(normalizeDomain('https://example.com/some/path?arg=val#hash'), 'example.com');
@@ -47,7 +54,7 @@ describe('SafeBrowse Security, Edge Cases & Threat Model Test Suite', () => {
       const testEmail = `user-${nanoid(6)}@safebrowse.io`;
       const plainPassword = 'MySecretPassword123!';
       const reg = await authService.register(testEmail, plainPassword, 'Test Parent');
-      await authService.activateAccount(reg.activationToken!);
+      await authService.activateAccount(getActivationToken(testEmail));
 
       assert.notStrictEqual(reg.user.passwordHash, plainPassword);
       assert.ok(reg.user.passwordHash.startsWith('$2a$') || reg.user.passwordHash.startsWith('$2b$'));
@@ -59,7 +66,7 @@ describe('SafeBrowse Security, Edge Cases & Threat Model Test Suite', () => {
     it('should reject invalid passwords during login', async () => {
       const testEmail = `user-${nanoid(6)}@safebrowse.io`;
       const reg = await authService.register(testEmail, 'CorrectPassphrase2026!', 'Parent');
-      await authService.activateAccount(reg.activationToken!);
+      await authService.activateAccount(getActivationToken(testEmail));
 
       await assert.rejects(async () => {
         await authService.login(testEmail, 'WrongPassword2026!');
@@ -67,12 +74,13 @@ describe('SafeBrowse Security, Edge Cases & Threat Model Test Suite', () => {
     });
 
     it('should fail token verification on tampered or forged JWT tokens', async () => {
+      const testEmail = `sec-token-${nanoid(6)}@safebrowse.io`;
       const reg = await authService.register(
-        `sec-token-${nanoid(6)}@safebrowse.io`,
+        testEmail,
         'SecTestPassphrase2026!',
         'Sec Parent'
       );
-      await authService.activateAccount(reg.activationToken!);
+      await authService.activateAccount(getActivationToken(testEmail));
       const { token } = await authService.login(reg.user.email, 'SecTestPassphrase2026!');
       const tamperedToken = token!.slice(0, -5) + 'xxxxx';
 
@@ -129,12 +137,13 @@ describe('SafeBrowse Security, Edge Cases & Threat Model Test Suite', () => {
 
   describe('4. Cryptographic Pairing Code Entropy & Replay Protection', () => {
     it('should generate high-entropy pairing codes and issue distinct device credentials', async () => {
+      const pairEmail = `sec-pair-${nanoid(6)}@safebrowse.io`;
       const reg = await authService.register(
-        `sec-pair-${nanoid(6)}@safebrowse.io`,
+        pairEmail,
         'SecTestPassphrase2026!',
         'Pair Parent'
       );
-      await authService.activateAccount(reg.activationToken!);
+      await authService.activateAccount(getActivationToken(pairEmail));
       const familyReg = await familyService.getOrCreateUserFamily(reg.user.id);
       const { child } = await childService.createChild(reg.user.id, 'Pair Child', 10, undefined, familyReg.id);
       const pairing = await deviceService.generatePairingCode(reg.user.id, child.id);
@@ -152,12 +161,13 @@ describe('SafeBrowse Security, Edge Cases & Threat Model Test Suite', () => {
     });
 
     it('should reject expired pairing codes', async () => {
+      const expEmail = `sec-exp-${nanoid(6)}@safebrowse.io`;
       const reg = await authService.register(
-        `sec-exp-${nanoid(6)}@safebrowse.io`,
+        expEmail,
         'SecTestPassphrase2026!',
         'Exp Parent'
       );
-      await authService.activateAccount(reg.activationToken!);
+      await authService.activateAccount(getActivationToken(expEmail));
       const familyReg = await familyService.getOrCreateUserFamily(reg.user.id);
       const { child } = await childService.createChild(reg.user.id, 'Exp Child', 10, undefined, familyReg.id);
       const pairing = await deviceService.generatePairingCode(reg.user.id, child.id);

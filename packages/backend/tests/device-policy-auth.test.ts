@@ -11,6 +11,7 @@ import {
   assertLiveTestDatabaseMarker,
 } from '../src/utils/test-db-guard';
 import { authService } from '../src/services/auth.service';
+import { mailService } from '../src/services/mail.service';
 import { familyService } from '../src/services/family.service';
 import { childService } from '../src/services/child.service';
 import { deviceService } from '../src/services/device.service';
@@ -25,7 +26,15 @@ describe('SafeBrowse Stage 11 Step 4: Windows Device Policy Authentication & Syn
   let baseUrl: string;
   let port: number;
 
-  const testPassword = 'StrongDeviceAuth2026!';
+  function getActivationToken(email: string): string {
+    const mail = mailService.getOutbox().filter((m) => m.to.toLowerCase() === email.toLowerCase().trim()).pop();
+    if (!mail || !mail.token) {
+      throw new Error(`No activation token found in outbox for ${email}`);
+    }
+    return mail.token;
+  }
+
+  const testPassword = 'StrongPassword123!WindowsSync';
   let parentEmail: string;
   let parentUserId: string;
   let parentToken: string;
@@ -38,7 +47,7 @@ describe('SafeBrowse Stage 11 Step 4: Windows Device Policy Authentication & Syn
   let otherDeviceId: string;
   let otherDeviceToken: string;
 
-  const tempCacheDir = path.join(process.cwd(), 'temp-test-cache-' + nanoid(6));
+  const tempCacheDir = path.resolve(__dirname, '../temp-sync-cache');
 
   const api = async (
     method: string,
@@ -93,7 +102,7 @@ describe('SafeBrowse Stage 11 Step 4: Windows Device Policy Authentication & Syn
     parentEmail = `parent-devauth-${nanoid(6).toLowerCase()}@safebrowse.io`;
     const reg = await authService.register(parentEmail, testPassword, 'Device Auth Parent');
     parentUserId = reg.user.id;
-    await authService.activateAccount(reg.activationToken!);
+    await authService.activateAccount(getActivationToken(parentEmail));
     const login = await authService.login(parentEmail, testPassword);
     parentToken = login.token!;
 
@@ -111,7 +120,7 @@ describe('SafeBrowse Stage 11 Step 4: Windows Device Policy Authentication & Syn
     // Create a second child and device in another family for tenancy/cross-fetch isolation testing
     const otherParentEmail = `other-parent-${nanoid(6).toLowerCase()}@safebrowse.io`;
     const otherReg = await authService.register(otherParentEmail, testPassword, 'Other Parent');
-    await authService.activateAccount(otherReg.activationToken!);
+    await authService.activateAccount(getActivationToken(otherParentEmail));
     const otherFamily = await familyService.getOrCreateUserFamily(otherReg.user.id);
     const otherChildRes = await childService.createChild(otherReg.user.id, 'Other Child', 14, undefined, otherFamily.id);
     otherChildId = otherChildRes.child.id;

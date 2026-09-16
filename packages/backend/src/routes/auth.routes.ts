@@ -42,14 +42,11 @@ authRouter.post('/register', authRateLimiter, async (req, res) => {
       });
     }
 
-    const responsePayload: any = {
+    const responsePayload = {
       user: result.user,
-      message: 'Registration successful. Please check your email to activate your account.',
-      activationRequired: true,
+      message: result.message,
+      activationRequired: true as const,
     };
-    if (process.env.NODE_ENV !== 'production') {
-      responsePayload.activationToken = result.activationToken;
-    }
 
     res.json(responsePayload);
   } catch (e: any) {
@@ -103,7 +100,7 @@ authRouter.post('/activate/resend', authRateLimiter, async (req, res) => {
     const result = await authService.resendActivationEmail(email, ipAddress);
     res.json({
       success: true,
-      ...result,
+      message: result.message,
     });
   } catch (e: any) {
     res.status(400).json({ error: e.message });

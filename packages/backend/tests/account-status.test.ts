@@ -4,6 +4,7 @@ import http from 'node:http';
 import { app } from '../src/server';
 import { prisma } from '../src/db/prisma';
 import { authService } from '../src/services/auth.service';
+import { mailService } from '../src/services/mail.service';
 import { profileService } from '../src/services/profile.service';
 import { familyService } from '../src/services/family.service';
 import { childService } from '../src/services/child.service';
@@ -36,6 +37,14 @@ describe('SafeBrowse Stage 11 Step 4: User Account Enable/Disable Test Suite', (
   let mfaSecret: string;
 
   const testPassword = 'SafeBrowse-Password-15Chars!';
+
+  function getLatestActivationToken(email: string): string {
+    const mail = mailService.getOutbox().filter((m) => m.to.toLowerCase() === email.toLowerCase().trim()).pop();
+    if (!mail || !mail.token) {
+      throw new Error(`No activation token found in outbox for ${email}`);
+    }
+    return mail.token;
+  }
 
   const makeRequest = async (
     method: string,
@@ -70,11 +79,15 @@ describe('SafeBrowse Stage 11 Step 4: User Account Enable/Disable Test Suite', (
           res.on('end', () => {
             let parsedBody: any;
             try {
-              parsedBody = JSON.parse(data);
+              parsedBody = data ? JSON.parse(data) : {};
             } catch {
               parsedBody = data;
             }
-            resolve({ status: res.statusCode || 500, body: parsedBody, headers: res.headers });
+            resolve({
+              status: res.statusCode || 500,
+              body: parsedBody,
+              headers: res.headers,
+            });
           });
         }
       );
@@ -100,7 +113,7 @@ describe('SafeBrowse Stage 11 Step 4: User Account Enable/Disable Test Suite', (
     // 1. Setup primary System Admin
     const adminEmail = `sysadmin-${nanoid(6)}@safebrowse.io`;
     const uAdmin = await authService.register(adminEmail, testPassword, 'Primary Admin');
-    await authService.activateAccount(uAdmin.activationToken!);
+    await authService.activateAccount(getLatestActivationToken(adminEmail));
     adminId = uAdmin.user.id;
     process.env.ENABLE_DEV_ADMIN_BOOTSTRAP = 'true';
     process.env.DEV_ADMIN_BOOTSTRAP_SECRET = 'test-secret-at-least-16-chars-long';
@@ -111,7 +124,7 @@ describe('SafeBrowse Stage 11 Step 4: User Account Enable/Disable Test Suite', (
     // 2. Setup secondary System Admin
     const admin2Email = `sysadmin-2-${nanoid(6)}@safebrowse.io`;
     const uAdmin2 = await authService.register(admin2Email, testPassword, 'Secondary Admin');
-    await authService.activateAccount(uAdmin2.activationToken!);
+    await authService.activateAccount(getLatestActivationToken(admin2Email));
     secondAdminId = uAdmin2.user.id;
     await rbacService.bootstrapDevAdmin(secondAdminId, 'test-secret-at-least-16-chars-long');
     const admin2Log = await authService.login(admin2Email, testPassword);
@@ -120,7 +133,7 @@ describe('SafeBrowse Stage 11 Step 4: User Account Enable/Disable Test Suite', (
     // 3. Setup Standard Parent with Family, Child, Policy, and Paired Device
     parentEmail = `parent-${nanoid(6)}@safebrowse.io`;
     const uParent = await authService.register(parentEmail, testPassword, 'Test Parent');
-    await authService.activateAccount(uParent.activationToken!);
+    await authService.activateAccount(getLatestActivationToken(parentEmail));
     parentId = uParent.user.id;
     const parentLog = await authService.login(parentEmail, testPassword);
     parentToken = parentLog.accessToken!;
@@ -140,7 +153,7 @@ describe('SafeBrowse Stage 11 Step 4: User Account Enable/Disable Test Suite', (
     // 4. Setup MFA-enabled Parent
     mfaParentEmail = `mfa-parent-${nanoid(6)}@safebrowse.io`;
     const uMfa = await authService.register(mfaParentEmail, testPassword, 'MFA Parent');
-    await authService.activateAccount(uMfa.activationToken!);
+    await authService.activateAccount(getLatestActivationToken(mfaParentEmail));
     mfaParentId = uMfa.user.id;
 
     const setupMfa = await profileService.setupMfa(mfaParentId);
@@ -156,13 +169,14 @@ describe('SafeBrowse Stage 11 Step 4: User Account Enable/Disable Test Suite', (
   });
 
   it('1. should set PENDING_ACTIVATION status by default for newly registered users and ACTIVE upon activation', async () => {
-    const newUser = await authService.register(`new-reg-${nanoid(6)}@safebrowse.io`, testPassword, 'New Reg');
+    const regEmail = `new-reg-${nanoid(6)}@safebrowse.io`;
+    const newUser = await authService.register(regEmail, testPassword, 'New Reg');
     assert.strictEqual(newUser.user.status, 'PENDING_ACTIVATION');
 
     let dbUser = await prisma.user.findUnique({ where: { id: newUser.user.id } });
     assert.strictEqual(dbUser?.status, 'PENDING_ACTIVATION');
 
-    await authService.activateAccount(newUser.activationToken!);
+    await authService.activateAccount(getLatestActivationToken(regEmail));
     dbUser = await prisma.user.findUnique({ where: { id: newUser.user.id } });
     assert.strictEqual(dbUser?.status, 'ACTIVE');
   });
@@ -358,7 +372,7 @@ describe('SafeBrowse Stage 11 Step 4: User Account Enable/Disable Test Suite', (
   it('26. should reject non-admin attempting to enable a disabled user (403)', async () => {
     const tempEmail = `temp-u-${nanoid(6)}@safebrowse.io`;
     const tempUser = await authService.register(tempEmail, testPassword, 'Temp U');
-    await authService.activateAccount(tempUser.activationToken!);
+    await authService.activateAccount(getLatestActivationToken(tempEmail));
     const tempLogin = await authService.login(tempEmail, testPassword);
 
     const res = await makeRequest(

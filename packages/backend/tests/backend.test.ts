@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { authService } from '../src/services/auth.service';
+import { mailService } from '../src/services/mail.service';
 import { childService } from '../src/services/child.service';
 import { familyService } from '../src/services/family.service';
 import { deviceService } from '../src/services/device.service';
@@ -13,10 +14,16 @@ describe('SafeBrowse Backend Service Integration Tests', () => {
   let childId: string;
   let deviceId: string;
 
+  function getActivationToken(email: string): string {
+    const mail = mailService.getOutbox().filter((m) => m.to.toLowerCase() === email.toLowerCase().trim()).pop();
+    if (!mail || !mail.token) throw new Error(`Activation token not found for ${email}`);
+    return mail.token;
+  }
+
   it('should register and authenticate test parent user', async () => {
     const email = `test_parent_main_${Date.now()}@porwal.io`;
     const reg = await authService.register(email, 'StrongTestPassphrase2026!', 'Test Parent');
-    await authService.activateAccount(reg.activationToken!);
+    await authService.activateAccount(getActivationToken(email));
     const { user, token } = await authService.login(email, 'StrongTestPassphrase2026!');
     assert.ok(user);
     assert.ok(token);

@@ -5,6 +5,7 @@ import { spawn, ChildProcess } from 'node:child_process';
 import path from 'node:path';
 import { app, bootstrap } from '../src/server';
 import { prisma } from '../src/db/prisma';
+import { mailService } from '../src/services/mail.service';
 import { nanoid } from 'nanoid';
 import fs from 'node:fs';
 import {
@@ -21,6 +22,14 @@ describe('SafeBrowse Stage 11 Step 3F: Real PostgreSQL API Integration & E2E Sui
   let server: http.Server;
   let baseUrl: string;
   let port: number;
+
+  function getActivationToken(email: string): string {
+    const mail = mailService.getOutbox().filter((m) => m.to.toLowerCase() === email.toLowerCase().trim()).pop();
+    if (!mail || !mail.token) {
+      throw new Error(`No activation token found in outbox for ${email}`);
+    }
+    return mail.token;
+  }
 
   const testPassword = 'StrongPassphrase2026!PostgresE2E';
   let parentEmail: string;
@@ -41,6 +50,10 @@ describe('SafeBrowse Stage 11 Step 3F: Real PostgreSQL API Integration & E2E Sui
   let coParentUserId: string;
   let coParentAccessToken: string;
   let inviteToken: string;
+
+  let child2Id: string;
+  let device2Id: string;
+  let device2Token: string;
 
   let mfaSecret: string;
   let recoveryCodes: string[];
@@ -105,16 +118,16 @@ describe('SafeBrowse Stage 11 Step 3F: Real PostgreSQL API Integration & E2E Sui
   });
 
   after(async () => {
+    if (spawnedBackend) {
+      spawnedBackend.kill();
+    }
     if (server) {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
-    if (spawnedBackend) {
-      spawnedBackend.kill('SIGTERM');
-    }
   });
 
-  // 1. Complete parent registration
-  it('1. should register a new parent account via real HTTP API', async () => {
+  // 1. Registration
+  it('1. should register a new parent account and require email activation', async () => {
     parentEmail = `parent-${nanoid(8).toLowerCase()}@safebrowse.io`;
     const res = await api('POST', '/api/auth/register', {
       email: parentEmail,
@@ -126,10 +139,10 @@ describe('SafeBrowse Stage 11 Step 3F: Real PostgreSQL API Integration & E2E Sui
     assert.strictEqual(res.status, 200);
     assert.strictEqual(res.data.activationRequired, true);
     assert.strictEqual(res.data.user.email, parentEmail);
-    assert.ok(res.data.activationToken);
+    assert.strictEqual(res.data.activationToken, undefined, 'activationToken must not leak via HTTP');
 
     parentUserId = res.data.user.id;
-    verificationToken = res.data.activationToken;
+    verificationToken = getActivationToken(parentEmail);
   });
 
   // 2. Login rejected before activation
@@ -456,8 +469,8 @@ describe('SafeBrowse Stage 11 Step 3F: Real PostgreSQL API Integration & E2E Sui
       name: 'Co Parent',
     });
     assert.strictEqual(coReg.status, 200);
-    assert.ok(coReg.data.activationToken);
-    await api('POST', '/api/auth/activate', { token: coReg.data.activationToken });
+    assert.strictEqual(coReg.data.activationToken, undefined);
+    await api('POST', '/api/auth/activate', { token: getActivationToken(coParentEmail) });
 
     const coLogin = await api('POST', '/api/auth/login', {
       email: coParentEmail,
@@ -664,7 +677,14 @@ describe('SafeBrowse Stage 11 Step 3F: Real PostgreSQL API Integration & E2E Sui
       name: 'Parent B',
     });
     assert.strictEqual(regB.status, 200);
-    await api('POST', '/api/auth/activate', { token: regB.data.activationToken });
+    assert.strictEqual(regB.data.activationToken, undefined);
+    
+    // Activate parentB in database (backend running as spawned process)
+    await prisma.user.update({
+      where: { id: regB.data.user.id },
+      data: { status: 'ACTIVE', emailVerified: true, activatedAt: new Date() },
+    });
+
     const loginB = await api('POST', '/api/auth/login', {
       email: familyBEmail,
       password: testPassword,

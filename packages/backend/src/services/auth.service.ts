@@ -46,6 +46,26 @@ export interface LoginResult {
   emailVerificationPending?: boolean;
 }
 
+export interface RegisterResult {
+  user: ParentUser;
+  message: string;
+  activationRequired: true;
+}
+
+export interface ResendActivationResult {
+  message: string;
+}
+
+export interface AdminResendActivationResult {
+  success: boolean;
+  message: string;
+}
+
+export interface AdminCreateParentResult {
+  user: ParentUser;
+  message: string;
+}
+
 // In-memory rate limiting for authentication attempts
 interface RateLimitRecord {
   attempts: number;
@@ -364,14 +384,7 @@ export class AuthService {
     name: string,
     userAgent: string = 'Web Browser',
     ipAddress?: string
-  ): Promise<{
-    user: ParentUser;
-    accessToken: string;
-    refreshToken: string;
-    token: string;
-    emailVerificationToken: string;
-    activationToken?: string;
-  }> {
+  ): Promise<RegisterResult> {
     const normalizedEmail = email.toLowerCase().trim();
     validatePasswordPolicy(password, false);
 
@@ -485,12 +498,9 @@ export class AuthService {
 
     return {
       user: domainUser,
-      accessToken: '',
-      refreshToken: '',
-      token: '',
-      emailVerificationToken: '',
-      activationToken: process.env.NODE_ENV !== 'production' ? rawActivationToken : undefined,
-    } as any;
+      message: 'Registration successful. Please check your email to activate your account.',
+      activationRequired: true,
+    };
   }
 
   public async login(
@@ -1230,7 +1240,7 @@ export class AuthService {
   public async resendActivationEmail(
     email: string,
     ipAddress?: string
-  ): Promise<{ message: string; activationToken?: string }> {
+  ): Promise<ResendActivationResult> {
     const normalizedEmail = (email || '').toLowerCase().trim();
     const rateLimitKey = `resend-act:${normalizedEmail}:${ipAddress || 'unknown'}`;
     this.checkRateLimit(rateLimitKey, 3, 5 * 60 * 1000);
@@ -1282,7 +1292,6 @@ export class AuthService {
 
     return {
       message: genericMsg,
-      activationToken: process.env.NODE_ENV !== 'production' ? rawActivationToken : undefined,
     };
   }
 
@@ -1290,7 +1299,7 @@ export class AuthService {
     actorUserId: string,
     targetUserId: string,
     ipAddress?: string
-  ): Promise<{ success: boolean; message: string; activationToken?: string }> {
+  ): Promise<AdminResendActivationResult> {
     const actor = await prisma.user.findUnique({ where: { id: actorUserId } });
     if (!actor || actor.systemRole !== 'SYSTEM_ADMIN') {
       throw new Error('Unauthorized: only SYSTEM_ADMIN can resend activation emails.');
@@ -1342,7 +1351,6 @@ export class AuthService {
     return {
       success: true,
       message: `Activation email resent successfully to ${targetUser.email}.`,
-      activationToken: process.env.NODE_ENV !== 'production' ? rawActivationToken : undefined,
     };
   }
 
@@ -1351,7 +1359,7 @@ export class AuthService {
     name: string,
     email: string,
     ipAddress?: string
-  ): Promise<{ user: ParentUser; activationToken?: string }> {
+  ): Promise<AdminCreateParentResult> {
     const actor = await prisma.user.findUnique({ where: { id: actorUserId } });
     if (!actor || actor.systemRole !== 'SYSTEM_ADMIN') {
       throw new Error('Unauthorized: only SYSTEM_ADMIN can create parent accounts.');
@@ -1473,7 +1481,7 @@ export class AuthService {
 
     return {
       user: domainUser,
-      activationToken: process.env.NODE_ENV !== 'production' ? rawActivationToken : undefined,
+      message: 'Parent account created successfully. Activation email sent.',
     };
   }
 
