@@ -1,10 +1,12 @@
 import { Router, Response } from 'express';
+import bcrypt from 'bcryptjs';
 import { prisma } from '../db/prisma';
 import { authMiddleware, AuthenticatedRequest } from '../middleware/auth';
 import { requireVerifiedEmail } from '../middleware/requireVerifiedEmail';
 import { requireSystemAdmin } from '../middleware/rbac';
 import { rbacService, SystemPermission } from '../services/rbac.service';
 import { supportConsoleService } from '../services/support.service';
+import { accountStatusService } from '../services/account-status.service';
 
 export const adminRouter = Router();
 
@@ -65,10 +67,7 @@ adminRouter.get(
   requireSystemAdmin(SystemPermission.SYSTEM_FLEET_READ),
   async (req: AuthenticatedRequest, res: Response) => {
     const fleet = await supportConsoleService.getFleetOverview();
-    res.json({
-      totalDevices: fleet.length,
-      devices: fleet,
-    });
+    res.json({ totalDevices: fleet.length, devices: fleet });
   }
 );
 
@@ -80,20 +79,15 @@ adminRouter.post(
   requireSystemAdmin(SystemPermission.SYSTEM_ROLLBACK_EXECUTE),
   async (req: AuthenticatedRequest, res: Response) => {
     const { targetVersion, affectedDevices, reason } = req.body;
-    if (!targetVersion) {
-      return res.status(400).json({ error: 'targetVersion is required.' });
-    }
+    if (!targetVersion) return res.status(400).json({ error: 'targetVersion is required.' });
 
     const result = supportConsoleService.triggerRemoteRollback(targetVersion, affectedDevices);
-
-    // Append-only system audit log
     await rbacService.logSystemAudit(
       req.userId!,
       'EMERGENCY_ROLLBACK_TRIGGERED',
       `Triggered rollback to version ${targetVersion}. Reason: ${reason || 'N/A'}. Result: ${JSON.stringify(result)}`,
       req.ip
     );
-
     res.json({ success: true, result });
   }
 );
@@ -106,20 +100,13 @@ adminRouter.get(
   requireSystemAdmin(SystemPermission.SYSTEM_SUPPORT_MANAGE),
   async (req: AuthenticatedRequest, res: Response) => {
     const devicesCount = await prisma.device.count();
-    const openRequestsCount = await prisma.accessRequest.count({
-      where: { status: 'PENDING' },
-    });
+    const openRequestsCount = await prisma.accessRequest.count({ where: { status: 'PENDING' } });
     const recentErrors = await prisma.activityEvent.findMany({
       where: { action: 'BLOCKED' },
       orderBy: { timestamp: 'desc' },
       take: 20,
     });
-
-    res.json({
-      totalDevices: devicesCount,
-      pendingAccessRequests: openRequestsCount,
-      recentFilterEvents: recentErrors,
-    });
+    res.json({ totalDevices: devicesCount, pendingAccessRequests: openRequestsCount, recentFilterEvents: recentErrors });
   }
 );
 
@@ -139,8 +126,6 @@ adminRouter.get(
   }
 );
 
-import bcrypt from 'bcryptjs';
-
 // GET /api/admin/parents - List all parents and their family accounts
 adminRouter.get(
   '/parents',
@@ -156,11 +141,7 @@ adminRouter.get(
             include: {
               family: {
                 include: {
-                  children: {
-                    include: {
-                      devices: true,
-                    },
-                  },
+                  children: { include: { devices: true } },
                 },
               },
             },
@@ -173,6 +154,10 @@ adminRouter.get(
         email: u.email,
         name: u.name,
         systemRole: u.systemRole,
+        status: u.status,
+        disabledAt: u.disabledAt,
+        disabledReason: u.disabledReason,
+        disabledByUserId: u.disabledByUserId,
         emailVerified: u.emailVerified,
         mfaEnabled: u.mfaEnabled,
         createdAt: u.createdAt,
@@ -213,16 +198,8 @@ adminRouter.get(
             include: {
               family: {
                 include: {
-                  children: {
-                    include: {
-                      devices: true,
-                      policy: true,
-                    },
-                  },
-                  auditLogs: {
-                    take: 20,
-                    orderBy: { timestamp: 'desc' },
-                  },
+                  children: { include: { devices: true, policy: true } },
+                  auditLogs: { take: 20, orderBy: { timestamp: 'desc' } },
                 },
               },
             },
@@ -230,15 +207,17 @@ adminRouter.get(
         },
       });
 
-      if (!user) {
-        return res.status(404).json({ error: 'Parent user not found.' });
-      }
+      if (!user) return res.status(404).json({ error: 'Parent user not found.' });
 
       const sanitized = {
         id: user.id,
         email: user.email,
         name: user.name,
         systemRole: user.systemRole,
+        status: user.status,
+        disabledAt: user.disabledAt,
+        disabledReason: user.disabledReason,
+        disabledByUserId: user.disabledByUserId,
         emailVerified: user.emailVerified,
         mfaEnabled: user.mfaEnabled,
         createdAt: user.createdAt,
@@ -268,22 +247,15 @@ adminRouter.post(
   async (req: AuthenticatedRequest, res: Response) => {
     try {
       const user = await prisma.user.findUnique({ where: { id: req.params.id } });
-      if (!user) {
-        return res.status(404).json({ error: 'Parent user not found.' });
-      }
+      if (!user) return res.status(404).json({ error: 'Parent user not found.' });
 
-      const updated = await prisma.user.update({
-        where: { id: req.params.id },
-        data: { emailVerified: true },
-      });
-
+      const updated = await prisma.user.update({ where: { id: req.params.id }, data: { emailVerified: true } });
       await rbacService.logSystemAudit(
         req.userId!,
         'ADMIN_VERIFY_PARENT_EMAIL',
         `Admin manually verified email for parent ${user.email} (${user.id})`,
         req.ip
       );
-
       res.json({ success: true, message: `Email verified for ${updated.email}` });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -305,20 +277,15 @@ adminRouter.post(
       }
 
       const user = await prisma.user.findUnique({ where: { id: req.params.id } });
-      if (!user) {
-        return res.status(404).json({ error: 'Parent user not found.' });
-      }
+      if (!user) return res.status(404).json({ error: 'Parent user not found.' });
 
       const salt = bcrypt.genSaltSync(12);
       const passwordHash = bcrypt.hashSync(newPassword, salt);
-
       await prisma.user.update({
         where: { id: req.params.id },
-        data: {
-          passwordHash,
-          tokenVersion: { increment: 1 }, // Invalidate existing sessions
-        },
+        data: { passwordHash, tokenVersion: { increment: 1 } },
       });
+      await prisma.userSession.updateMany({ where: { userId: req.params.id }, data: { isRevoked: true } });
 
       await rbacService.logSystemAudit(
         req.userId!,
@@ -326,7 +293,6 @@ adminRouter.post(
         `Admin reset password for parent ${user.email} (${user.id})`,
         req.ip
       );
-
       res.json({ success: true, message: `Password successfully reset for ${user.email}` });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -348,25 +314,69 @@ adminRouter.post(
       }
 
       const user = await prisma.user.findUnique({ where: { id: req.params.id } });
-      if (!user) {
-        return res.status(404).json({ error: 'Parent user not found.' });
-      }
+      if (!user) return res.status(404).json({ error: 'Parent user not found.' });
 
-      const updated = await prisma.user.update({
-        where: { id: req.params.id },
-        data: { systemRole },
-      });
+      await accountStatusService.assertRoleChangeAllowed(user.id, systemRole);
 
+      const updated = await prisma.user.update({ where: { id: req.params.id }, data: { systemRole } });
       await rbacService.logSystemAudit(
         req.userId!,
         'ADMIN_CHANGE_USER_ROLE',
         `Admin changed role for user ${user.email} to ${systemRole}`,
         req.ip
       );
-
       res.json({ success: true, user: { id: updated.id, email: updated.email, systemRole: updated.systemRole } });
     } catch (e: any) {
-      res.status(500).json({ error: e.message });
+      const status = e.message?.includes('last active SYSTEM_ADMIN') ? 409 : 500;
+      res.status(status).json({ error: e.message });
+    }
+  }
+);
+
+// POST /api/admin/parents/:id/disable - Disable a user account and revoke all web sessions
+adminRouter.post(
+  '/parents/:id/disable',
+  authMiddleware,
+  requireVerifiedEmail,
+  requireSystemAdmin(SystemPermission.SYSTEM_PARENTS_MANAGE),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const updated = await accountStatusService.disableUser(
+        req.userId!,
+        req.params.id,
+        req.body?.reason,
+        req.ip
+      );
+      res.json({
+        success: true,
+        message: `Account disabled for ${updated.email}`,
+        user: { id: updated.id, email: updated.email, status: updated.status },
+      });
+    } catch (e: any) {
+      const message = e.message || 'Failed to disable user.';
+      const status = message.includes('not found') ? 404 : message.includes('required') ? 400 : message.includes('cannot disable') || message.includes('last active') ? 409 : 500;
+      res.status(status).json({ error: message });
+    }
+  }
+);
+
+// POST /api/admin/parents/:id/enable - Re-enable a disabled user account
+adminRouter.post(
+  '/parents/:id/enable',
+  authMiddleware,
+  requireVerifiedEmail,
+  requireSystemAdmin(SystemPermission.SYSTEM_PARENTS_MANAGE),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const updated = await accountStatusService.enableUser(req.userId!, req.params.id, req.ip);
+      res.json({
+        success: true,
+        message: `Account enabled for ${updated.email}. User must sign in again.`,
+        user: { id: updated.id, email: updated.email, status: updated.status },
+      });
+    } catch (e: any) {
+      const message = e.message || 'Failed to enable user.';
+      res.status(message.includes('not found') ? 404 : 500).json({ error: message });
     }
   }
 );
@@ -380,9 +390,7 @@ adminRouter.post(
   async (req: AuthenticatedRequest, res: Response) => {
     try {
       const user = await prisma.user.findUnique({ where: { id: req.params.id } });
-      if (!user) {
-        return res.status(404).json({ error: 'Parent user not found.' });
-      }
+      if (!user) return res.status(404).json({ error: 'Parent user not found.' });
 
       await prisma.user.update({
         where: { id: req.params.id },
@@ -394,6 +402,7 @@ adminRouter.post(
           tokenVersion: { increment: 1 },
         },
       });
+      await prisma.userSession.updateMany({ where: { userId: req.params.id }, data: { isRevoked: true } });
 
       await rbacService.logSystemAudit(
         req.userId!,
@@ -401,7 +410,6 @@ adminRouter.post(
         `Admin performed emergency MFA disable for parent ${user.email} (${user.id})`,
         req.ip
       );
-
       res.json({ success: true, message: `MFA disabled and sessions reset for ${user.email}` });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
