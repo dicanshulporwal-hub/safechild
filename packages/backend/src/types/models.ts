@@ -9,6 +9,7 @@ import {
 } from '@safebrowse/shared';
 
 export type SystemRole = 'SYSTEM_ADMIN' | 'USER';
+export type UserStatus = 'ACTIVE' | 'DISABLED';
 export type FamilyRole = 'OWNER' | 'PARENT' | 'VIEWER';
 export type FamilyApprovalRule = 'OWNER_ONLY' | 'OWNER_OR_PARENT';
 export type InvitationStatus = 'PENDING' | 'ACCEPTED' | 'EXPIRED' | 'REVOKED';
@@ -57,6 +58,10 @@ export interface ParentUser {
   passwordHash: string;
   name: string;
   systemRole?: SystemRole;
+  status?: UserStatus;
+  disabledAt?: string | null;
+  disabledReason?: string | null;
+  disabledByUserId?: string | null;
   mobileNumber?: string;
   profilePhoto?: string;
   timezone?: string;
