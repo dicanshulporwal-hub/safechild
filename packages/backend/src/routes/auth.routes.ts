@@ -7,6 +7,11 @@ import { prisma } from '../db/prisma';
 
 export const authRouter = Router();
 
+const disabledAccountPayload = {
+  error: 'This account has been disabled. Contact the administrator.',
+  code: 'ACCOUNT_DISABLED',
+};
+
 // Register new parent account
 authRouter.post('/register', authRateLimiter, async (req, res) => {
   try {
@@ -56,6 +61,16 @@ authRouter.post('/login', authRateLimiter, async (req, res) => {
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required.' });
     }
+
+    const normalizedEmail = String(email).toLowerCase().trim();
+    const account = await prisma.user.findUnique({
+      where: { email: normalizedEmail },
+      select: { status: true },
+    });
+    if (account?.status === 'DISABLED') {
+      return res.status(403).json(disabledAccountPayload);
+    }
+
     const userAgent = (req.headers['user-agent'] as string) || 'Web Browser';
     const ipAddress = (req.ip || req.socket.remoteAddress) as string;
     const result = await authService.login(email, password, userAgent, ipAddress);
@@ -75,6 +90,21 @@ authRouter.post('/mfa-login', authRateLimiter, async (req, res) => {
     const userAgent = (req.headers['user-agent'] as string) || 'Web Browser';
     const ipAddress = (req.ip || req.socket.remoteAddress) as string;
     const result = await authService.verifyMfaLogin(mfaTicket, code, userAgent, ipAddress);
+
+    if (result.user) {
+      const account = await prisma.user.findUnique({
+        where: { id: result.user.id },
+        select: { status: true },
+      });
+      if (account?.status === 'DISABLED') {
+        await prisma.userSession.updateMany({
+          where: { userId: result.user.id },
+          data: { isRevoked: true },
+        });
+        return res.status(403).json(disabledAccountPayload);
+      }
+    }
+
     res.json(result);
   } catch (e: any) {
     res.status(400).json({ error: e.message });
@@ -91,6 +121,20 @@ authRouter.post('/refresh', authRateLimiter, async (req, res) => {
     const userAgent = (req.headers['user-agent'] as string) || 'Web Browser';
     const ipAddress = (req.ip || req.socket.remoteAddress) as string;
     const result = await authService.refreshSession(rawRefreshToken, userAgent, ipAddress);
+
+    const decoded = await authService.verifyToken(result.accessToken);
+    const account = await prisma.user.findUnique({
+      where: { id: decoded.userId },
+      select: { status: true },
+    });
+    if (account?.status === 'DISABLED') {
+      await prisma.userSession.updateMany({
+        where: { userId: decoded.userId },
+        data: { isRevoked: true },
+      });
+      return res.status(403).json(disabledAccountPayload);
+    }
+
     res.json({
       accessToken: result.accessToken,
       refreshToken: result.refreshToken,
