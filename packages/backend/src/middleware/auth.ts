@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { authService } from '../services/auth.service';
+import { prisma } from '../db/prisma';
 
 export interface AuthenticatedRequest extends Request {
   userId?: string;
@@ -23,6 +24,22 @@ export async function authMiddleware(req: AuthenticatedRequest, res: Response, n
 
   try {
     const decoded = await authService.verifyToken(token);
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.userId },
+      select: { status: true },
+    });
+
+    if (!user) {
+      return res.status(401).json({ error: 'Unauthorized. User account not found.' });
+    }
+
+    if (user.status === 'DISABLED') {
+      return res.status(403).json({
+        error: 'This account has been disabled. Contact the administrator.',
+        code: 'ACCOUNT_DISABLED',
+      });
+    }
+
     req.userId = decoded.userId;
     req.sessionId = decoded.sessionId;
     req.tokenVersion = decoded.tokenVersion;
