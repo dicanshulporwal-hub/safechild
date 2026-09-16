@@ -98,28 +98,33 @@ describe('SafeBrowse Stage 11 Step 4: User Account Enable/Disable Test Suite', (
     });
 
     // 1. Setup primary System Admin
-    const uAdmin = await authService.register(`sysadmin-${nanoid(6)}@safebrowse.io`, testPassword, 'Primary Admin');
-    await authService.verifyEmail(uAdmin.emailVerificationToken);
+    const adminEmail = `sysadmin-${nanoid(6)}@safebrowse.io`;
+    const uAdmin = await authService.register(adminEmail, testPassword, 'Primary Admin');
+    await authService.activateAccount(uAdmin.activationToken!);
     adminId = uAdmin.user.id;
-    adminToken = uAdmin.accessToken;
     process.env.ENABLE_DEV_ADMIN_BOOTSTRAP = 'true';
     process.env.DEV_ADMIN_BOOTSTRAP_SECRET = 'test-secret-at-least-16-chars-long';
     await rbacService.bootstrapDevAdmin(adminId, 'test-secret-at-least-16-chars-long');
+    const adminLog = await authService.login(adminEmail, testPassword);
+    adminToken = adminLog.accessToken!;
 
     // 2. Setup secondary System Admin
-    const uAdmin2 = await authService.register(`sysadmin-2-${nanoid(6)}@safebrowse.io`, testPassword, 'Secondary Admin');
-    await authService.verifyEmail(uAdmin2.emailVerificationToken);
+    const admin2Email = `sysadmin-2-${nanoid(6)}@safebrowse.io`;
+    const uAdmin2 = await authService.register(admin2Email, testPassword, 'Secondary Admin');
+    await authService.activateAccount(uAdmin2.activationToken!);
     secondAdminId = uAdmin2.user.id;
-    secondAdminToken = uAdmin2.accessToken;
     await rbacService.bootstrapDevAdmin(secondAdminId, 'test-secret-at-least-16-chars-long');
+    const admin2Log = await authService.login(admin2Email, testPassword);
+    secondAdminToken = admin2Log.accessToken!;
 
     // 3. Setup Standard Parent with Family, Child, Policy, and Paired Device
     parentEmail = `parent-${nanoid(6)}@safebrowse.io`;
     const uParent = await authService.register(parentEmail, testPassword, 'Test Parent');
-    await authService.verifyEmail(uParent.emailVerificationToken);
+    await authService.activateAccount(uParent.activationToken!);
     parentId = uParent.user.id;
-    parentToken = uParent.accessToken;
-    parentRefreshToken = uParent.refreshToken;
+    const parentLog = await authService.login(parentEmail, testPassword);
+    parentToken = parentLog.accessToken!;
+    parentRefreshToken = parentLog.refreshToken!;
 
     const fam = await familyService.getOrCreateUserFamily(parentId);
     familyId = fam.id;
@@ -135,7 +140,7 @@ describe('SafeBrowse Stage 11 Step 4: User Account Enable/Disable Test Suite', (
     // 4. Setup MFA-enabled Parent
     mfaParentEmail = `mfa-parent-${nanoid(6)}@safebrowse.io`;
     const uMfa = await authService.register(mfaParentEmail, testPassword, 'MFA Parent');
-    await authService.verifyEmail(uMfa.emailVerificationToken);
+    await authService.activateAccount(uMfa.activationToken!);
     mfaParentId = uMfa.user.id;
 
     const setupMfa = await profileService.setupMfa(mfaParentId);
@@ -150,11 +155,15 @@ describe('SafeBrowse Stage 11 Step 4: User Account Enable/Disable Test Suite', (
     }
   });
 
-  it('1. should set ACTIVE status by default for newly registered users', async () => {
+  it('1. should set PENDING_ACTIVATION status by default for newly registered users and ACTIVE upon activation', async () => {
     const newUser = await authService.register(`new-reg-${nanoid(6)}@safebrowse.io`, testPassword, 'New Reg');
-    assert.strictEqual(newUser.user.status, 'ACTIVE');
+    assert.strictEqual(newUser.user.status, 'PENDING_ACTIVATION');
 
-    const dbUser = await prisma.user.findUnique({ where: { id: newUser.user.id } });
+    let dbUser = await prisma.user.findUnique({ where: { id: newUser.user.id } });
+    assert.strictEqual(dbUser?.status, 'PENDING_ACTIVATION');
+
+    await authService.activateAccount(newUser.activationToken!);
+    dbUser = await prisma.user.findUnique({ where: { id: newUser.user.id } });
     assert.strictEqual(dbUser?.status, 'ACTIVE');
   });
 
@@ -347,13 +356,15 @@ describe('SafeBrowse Stage 11 Step 4: User Account Enable/Disable Test Suite', (
   });
 
   it('26. should reject non-admin attempting to enable a disabled user (403)', async () => {
-    const tempUser = await authService.register(`temp-u-${nanoid(6)}@safebrowse.io`, testPassword, 'Temp U');
-    await authService.verifyEmail(tempUser.emailVerificationToken);
+    const tempEmail = `temp-u-${nanoid(6)}@safebrowse.io`;
+    const tempUser = await authService.register(tempEmail, testPassword, 'Temp U');
+    await authService.activateAccount(tempUser.activationToken!);
+    const tempLogin = await authService.login(tempEmail, testPassword);
 
     const res = await makeRequest(
       'POST',
       `/api/admin/parents/${parentId}/enable`,
-      { Authorization: `Bearer ${tempUser.accessToken}` }
+      { Authorization: `Bearer ${tempLogin.accessToken}` }
     );
     assert.strictEqual(res.status, 403);
   });

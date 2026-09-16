@@ -9,7 +9,8 @@ import {
 } from '@safebrowse/shared';
 
 export type SystemRole = 'SYSTEM_ADMIN' | 'USER';
-export type UserStatus = 'ACTIVE' | 'DISABLED';
+export type UserStatus = 'PENDING_ACTIVATION' | 'ACTIVE' | 'DISABLED';
+export type ActivationTokenSource = 'SELF_REGISTRATION' | 'ADMIN_CREATED' | 'ADMIN_REGENERATED';
 export type FamilyRole = 'OWNER' | 'PARENT' | 'VIEWER';
 export type FamilyApprovalRule = 'OWNER_ONLY' | 'OWNER_OR_PARENT';
 export type InvitationStatus = 'PENDING' | 'ACCEPTED' | 'EXPIRED' | 'REVOKED';
@@ -59,6 +60,7 @@ export interface ParentUser {
   name: string;
   systemRole?: SystemRole;
   status?: UserStatus;
+  activatedAt?: string | null;
   disabledAt?: string | null;
   disabledReason?: string | null;
   disabledByUserId?: string | null;
@@ -93,6 +95,17 @@ export interface MfaChallenge {
   attemptCount: number;
   ipAddress?: string | null;
   userAgent?: string | null;
+}
+
+export interface AccountActivationToken {
+  id: string;
+  userId: string;
+  tokenHash: string;
+  source: ActivationTokenSource;
+  createdByUserId?: string | null;
+  expiresAt: string;
+  usedAt?: string | null;
+  createdAt: string;
 }
 
 export interface Family {

@@ -99,10 +99,12 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
     });
 
     // 1. Setup Family A: Owner, Parent, Viewer, Child, Device
-    const uOwnerA = await authService.register(`owner-a-${nanoid(6)}@safebrowse.io`, testPassword, 'Owner A');
-    await authService.verifyEmail(uOwnerA.emailVerificationToken);
+    const ownerAEmail = `owner-a-${nanoid(6)}@safebrowse.io`;
+    const uOwnerA = await authService.register(ownerAEmail, testPassword, 'Owner A');
+    await authService.activateAccount(uOwnerA.activationToken!);
     ownerAId = uOwnerA.user.id;
-    ownerAToken = uOwnerA.accessToken;
+    const lOwnerA = await authService.login(ownerAEmail, testPassword);
+    ownerAToken = lOwnerA.accessToken!;
 
     const famA = await familyService.getOrCreateUserFamily(ownerAId);
     familyAId = famA.id;
@@ -120,24 +122,28 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
     // Invite & register Parent A
     const invParentA = await familyService.inviteParent(familyAId, ownerAId, `parent-a-${nanoid(6)}@safebrowse.io`, 'PARENT');
     const uParentA = await authService.register(invParentA.email, testPassword, 'Parent A');
-    await authService.verifyEmail(uParentA.emailVerificationToken);
+    await authService.activateAccount(uParentA.activationToken!);
     parentAId = uParentA.user.id;
-    parentAToken = uParentA.accessToken;
+    const lParentA = await authService.login(invParentA.email, testPassword);
+    parentAToken = lParentA.accessToken!;
     await familyService.acceptInvitation(invParentA.token, parentAId);
 
     // Invite & register Viewer A
     const invViewerA = await familyService.inviteParent(familyAId, ownerAId, `viewer-a-${nanoid(6)}@safebrowse.io`, 'VIEWER');
     const uViewerA = await authService.register(invViewerA.email, testPassword, 'Viewer A');
-    await authService.verifyEmail(uViewerA.emailVerificationToken);
+    await authService.activateAccount(uViewerA.activationToken!);
     viewerAId = uViewerA.user.id;
-    viewerAToken = uViewerA.accessToken;
+    const lViewerA = await authService.login(invViewerA.email, testPassword);
+    viewerAToken = lViewerA.accessToken!;
     await familyService.acceptInvitation(invViewerA.token, viewerAId);
 
     // 2. Setup Family B: Owner, Child
-    const uOwnerB = await authService.register(`owner-b-${nanoid(6)}@safebrowse.io`, testPassword, 'Owner B');
-    await authService.verifyEmail(uOwnerB.emailVerificationToken);
+    const ownerBEmail = `owner-b-${nanoid(6)}@safebrowse.io`;
+    const uOwnerB = await authService.register(ownerBEmail, testPassword, 'Owner B');
+    await authService.activateAccount(uOwnerB.activationToken!);
     ownerBId = uOwnerB.user.id;
-    ownerBToken = uOwnerB.accessToken;
+    const lOwnerB = await authService.login(ownerBEmail, testPassword);
+    ownerBToken = lOwnerB.accessToken!;
 
     const famB = await familyService.getOrCreateUserFamily(ownerBId);
     familyBId = famB.id;
@@ -146,13 +152,15 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
     childBId = cB.id;
 
     // 3. Setup System Administrator
-    const uAdmin = await authService.register(`admin-${nanoid(6)}@safebrowse.io`, testPassword, 'System Administrator');
-    await authService.verifyEmail(uAdmin.emailVerificationToken);
+    const adminEmail = `admin-${nanoid(6)}@safebrowse.io`;
+    const uAdmin = await authService.register(adminEmail, testPassword, 'System Administrator');
+    await authService.activateAccount(uAdmin.activationToken!);
     adminId = uAdmin.user.id;
-    adminToken = uAdmin.accessToken;
     process.env.ENABLE_DEV_ADMIN_BOOTSTRAP = 'true';
     process.env.DEV_ADMIN_BOOTSTRAP_SECRET = 'test-secret-at-least-16-chars-long';
     await rbacService.bootstrapDevAdmin(adminId, 'test-secret-at-least-16-chars-long');
+    const lAdmin = await authService.login(adminEmail, testPassword);
+    adminToken = lAdmin.accessToken!;
   });
 
   after(() => {
@@ -380,16 +388,26 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
     });
 
     it('6h. should reject unverified parent from creating child profile with 403', async () => {
-      // Create an unverified user
+      // 1. Unactivated user receives no accessToken
       const unverifiedReg = await authService.register(
         `unverified.${nanoid(6)}@example.com`,
         testPassword,
         'Unverified Parent'
       );
+      assert.ok(unverifiedReg.activationToken);
+      assert.ok(!unverifiedReg.accessToken || unverifiedReg.accessToken === '');
+
+      // 2. Active user with emailVerified=false is rejected with 403
+      await prisma.user.update({
+        where: { id: unverifiedReg.user.id },
+        data: { status: 'ACTIVE', emailVerified: false },
+      });
+      const login = await authService.login(unverifiedReg.user.email, testPassword);
+
       const res = await makeRequest(
         'POST',
         '/api/children',
-        { Authorization: `Bearer ${unverifiedReg.accessToken}` },
+        { Authorization: `Bearer ${login.accessToken}` },
         { name: 'Blocked Child', age: 9 }
       );
       assert.strictEqual(res.status, 403);
@@ -605,12 +623,13 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
 
     it('14b. should allow recipient to accept invitation and atomically consume it', async () => {
       const uNew = await authService.register(inviteEmail, testPassword, 'New Viewer');
-      await authService.verifyEmail(uNew.emailVerificationToken);
+      await authService.activateAccount(uNew.activationToken!);
+      const login = await authService.login(inviteEmail, testPassword);
 
       const acceptRes = await makeRequest(
         'POST',
         '/api/family/invitations/accept',
-        { Authorization: `Bearer ${uNew.accessToken}` },
+        { Authorization: `Bearer ${login.accessToken}` },
         { token: invitationToken }
       );
       assert.strictEqual(acceptRes.status, 200);
@@ -621,7 +640,7 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
       const replayRes = await makeRequest(
         'POST',
         '/api/family/invitations/accept',
-        { Authorization: `Bearer ${uNew.accessToken}` },
+        { Authorization: `Bearer ${login.accessToken}` },
         { token: invitationToken }
       );
       assert.strictEqual(replayRes.status, 400);
@@ -646,12 +665,13 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
 
       // Attempt accept
       const uRev = await authService.register(revokeEmail, testPassword, 'Revoked User');
-      await authService.verifyEmail(uRev.emailVerificationToken);
+      await authService.activateAccount(uRev.activationToken!);
+      const revLogin = await authService.login(revokeEmail, testPassword);
 
       const acceptRes = await makeRequest(
         'POST',
         '/api/family/invitations/accept',
-        { Authorization: `Bearer ${uRev.accessToken}` },
+        { Authorization: `Bearer ${revLogin.accessToken}` },
         { token }
       );
       assert.strictEqual(acceptRes.status, 400);

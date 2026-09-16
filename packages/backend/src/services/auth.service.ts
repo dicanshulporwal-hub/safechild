@@ -119,6 +119,11 @@ export class AuthService {
       (err as any).code = 'ACCOUNT_DISABLED';
       throw err;
     }
+    if (user?.status === 'PENDING_ACTIVATION') {
+      const err = new Error('Please activate your account before signing in.');
+      (err as any).code = 'ACCOUNT_ACTIVATION_REQUIRED';
+      throw err;
+    }
     const tokenVersion = user?.tokenVersion || 1;
 
     const rawRefreshToken = generateCryptoToken('rt_');
@@ -219,6 +224,13 @@ export class AuthService {
               status: 403,
             };
           }
+          if (user && user.status === 'PENDING_ACTIVATION') {
+            return {
+              error: 'Please activate your account before signing in.',
+              code: 'ACCOUNT_ACTIVATION_REQUIRED',
+              status: 403,
+            };
+          }
 
           if (matchingSession.isRevoked || isReplayAttack) {
             // Revoke entire token family
@@ -287,6 +299,18 @@ export class AuthService {
         };
       }
 
+      if (user.status === 'PENDING_ACTIVATION') {
+        await tx.userSession.update({
+          where: { id: matchingSession.id },
+          data: { isRevoked: true },
+        });
+        return {
+          error: 'Please activate your account before signing in.',
+          code: 'ACCOUNT_ACTIVATION_REQUIRED',
+          status: 403,
+        };
+      }
+
       // Token version consistency
       if (matchingSession.tokenVersion !== (user.tokenVersion || 1)) {
         await tx.userSession.update({
@@ -346,6 +370,7 @@ export class AuthService {
     refreshToken: string;
     token: string;
     emailVerificationToken: string;
+    activationToken?: string;
   }> {
     const normalizedEmail = email.toLowerCase().trim();
     validatePasswordPolicy(password, false);
@@ -361,14 +386,9 @@ export class AuthService {
     const passwordHash = bcrypt.hashSync(password, salt);
     const userId = `user-${nanoid(10)}`;
     const familyId = `fam-${nanoid(10)}`;
-    const rawEvToken = generateCryptoToken('ev_');
-    const evTokenHash = hashToken(rawEvToken);
-    const rawRefreshToken = generateCryptoToken('rt_');
-    const refreshTokenHash = hashToken(rawRefreshToken);
-    const sessionId = `sess_${nanoid(16)}`;
-    const sessionFamilyId = `sfam_${nanoid(16)}`;
-    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-    const evExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const rawActivationToken = generateCryptoToken('act_');
+    const actTokenHash = hashToken(rawActivationToken);
+    const actExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
     const result = await prisma.$transaction(async (tx) => {
       // 1. Create User
@@ -378,6 +398,8 @@ export class AuthService {
           email: normalizedEmail,
           passwordHash,
           name: name.trim(),
+          systemRole: 'USER',
+          status: 'PENDING_ACTIVATION',
           emailVerified: false,
           mfaEnabled: false,
           tokenVersion: 1,
@@ -405,38 +427,44 @@ export class AuthService {
         },
       });
 
-      // 4. Create Email Verification Token
-      await tx.emailVerificationToken.create({
+      // 4. Create Account Activation Token
+      await tx.accountActivationToken.create({
         data: {
-          id: `evt-${nanoid(10)}`,
+          id: `act-${nanoid(10)}`,
           userId: user.id,
-          email: normalizedEmail,
-          tokenHash: evTokenHash,
-          expiresAt: evExpiresAt,
+          tokenHash: actTokenHash,
+          source: 'SELF_REGISTRATION',
+          expiresAt: actExpiresAt,
         },
       });
 
-      // 5. Create Session
-      await tx.userSession.create({
+      // 5. Audit Log
+      await tx.familyAuditLog.create({
         data: {
-          id: sessionId,
-          userId: user.id,
-          sessionFamilyId,
-          refreshTokenHash,
-          consumedTokenHashes: [],
-          deviceInfo: userAgent,
+          id: `log-${nanoid(10)}`,
+          familyId: family.id,
+          actorUserId: user.id,
+          actorName: user.name,
+          action: 'ACCOUNT_REGISTERED_PENDING_ACTIVATION',
+          details: 'Parent registered account; pending email activation.',
+        },
+      });
+
+      await tx.systemAuditLog.create({
+        data: {
+          id: `syslog-${nanoid(10)}`,
+          actorUserId: user.id,
+          actorEmail: user.email,
+          action: 'ACCOUNT_REGISTERED_PENDING_ACTIVATION',
+          details: `User ${user.email} (${user.id}) registered account; pending email activation.`,
           ipAddress: ipAddress || null,
-          expiresAt,
-          tokenVersion: 1,
         },
       });
 
       return user;
     });
 
-    mailService.sendVerificationEmail(result.email, rawEvToken);
-
-    const accessToken = this.signAccessToken(userId, sessionId, 1);
+    await mailService.sendAccountActivationEmail(result.email, result.name, rawActivationToken, true);
 
     const domainUser: ParentUser = {
       id: result.id,
@@ -445,9 +473,10 @@ export class AuthService {
       passwordHash: result.passwordHash,
       systemRole: result.systemRole as SystemRole,
       status: result.status as UserStatus,
-      disabledAt: result.disabledAt ? result.disabledAt.toISOString() : null,
-      disabledReason: result.disabledReason,
-      disabledByUserId: result.disabledByUserId,
+      activatedAt: null,
+      disabledAt: null,
+      disabledReason: null,
+      disabledByUserId: null,
       emailVerified: result.emailVerified,
       mfaEnabled: result.mfaEnabled,
       tokenVersion: result.tokenVersion,
@@ -456,11 +485,12 @@ export class AuthService {
 
     return {
       user: domainUser,
-      accessToken,
-      refreshToken: rawRefreshToken,
-      token: accessToken,
-      emailVerificationToken: rawEvToken,
-    };
+      accessToken: '',
+      refreshToken: '',
+      token: '',
+      emailVerificationToken: '',
+      activationToken: process.env.NODE_ENV !== 'production' ? rawActivationToken : undefined,
+    } as any;
   }
 
   public async login(
@@ -485,6 +515,12 @@ export class AuthService {
     if (user.status === 'DISABLED') {
       const err = new Error('This account has been disabled. Contact the administrator.');
       (err as any).code = 'ACCOUNT_DISABLED';
+      throw err;
+    }
+
+    if (user.status === 'PENDING_ACTIVATION') {
+      const err = new Error('Please activate your account before signing in.');
+      (err as any).code = 'ACCOUNT_ACTIVATION_REQUIRED';
       throw err;
     }
 
@@ -642,6 +678,11 @@ export class AuthService {
       if (user.status === 'DISABLED') {
         const err = new Error('This account has been disabled. Contact the administrator.');
         (err as any).code = 'ACCOUNT_DISABLED';
+        throw err;
+      }
+      if (user.status === 'PENDING_ACTIVATION') {
+        const err = new Error('Please activate your account before signing in.');
+        (err as any).code = 'ACCOUNT_ACTIVATION_REQUIRED';
         throw err;
       }
       if (!user.mfaSecret) {
@@ -882,6 +923,11 @@ export class AuthService {
       (err as any).code = 'ACCOUNT_DISABLED';
       throw err;
     }
+    if (user.status === 'PENDING_ACTIVATION') {
+      const err = new Error('Please activate your account before signing in.');
+      (err as any).code = 'ACCOUNT_ACTIVATION_REQUIRED';
+      throw err;
+    }
 
     // Session validation against PostgreSQL
     const session = await prisma.userSession.findUnique({
@@ -1007,6 +1053,427 @@ export class AuthService {
 
     return {
       token: process.env.NODE_ENV !== 'production' ? rawEvToken : undefined,
+    };
+  }
+
+  public async verifyActivationToken(rawToken: string): Promise<{
+    valid: boolean;
+    reason?: string;
+    email?: string;
+    name?: string;
+    source?: string;
+    requiresPassword?: boolean;
+  }> {
+    if (!rawToken || typeof rawToken !== 'string' || rawToken.trim() === '') {
+      return { valid: false, reason: 'Activation token is required.' };
+    }
+
+    const tokenHash = hashToken(rawToken);
+    const record = await prisma.accountActivationToken.findUnique({
+      where: { tokenHash },
+      include: { user: true },
+    });
+
+    if (!record || record.usedAt) {
+      return { valid: false, reason: 'Invalid or already used activation link.' };
+    }
+
+    if (record.expiresAt.getTime() <= Date.now()) {
+      return { valid: false, reason: 'Activation link has expired. Please request a new activation link.' };
+    }
+
+    if (!record.user) {
+      return { valid: false, reason: 'Associated user account was not found.' };
+    }
+
+    if (record.user.status === 'DISABLED') {
+      return { valid: false, reason: 'This account has been disabled. Contact the administrator.' };
+    }
+
+    if (record.user.status === 'ACTIVE') {
+      return { valid: false, reason: 'This account has already been activated. Please sign in.' };
+    }
+
+    return {
+      valid: true,
+      email: record.user.email,
+      name: record.user.name,
+      source: record.source,
+      requiresPassword: record.source !== 'SELF_REGISTRATION',
+    };
+  }
+
+  public async activateAccount(
+    rawToken: string,
+    password?: string,
+    ipAddress?: string
+  ): Promise<{ success: boolean; message: string; email: string }> {
+    if (!rawToken || typeof rawToken !== 'string' || rawToken.trim() === '') {
+      throw new Error('Activation token is required.');
+    }
+
+    const tokenHash = hashToken(rawToken);
+
+    return prisma.$transaction(async (tx) => {
+      const record = await tx.accountActivationToken.findUnique({
+        where: { tokenHash },
+        include: { user: true },
+      });
+
+      if (!record || record.usedAt) {
+        throw new Error('Invalid or already used activation link.');
+      }
+
+      if (record.expiresAt.getTime() <= Date.now()) {
+        throw new Error('Activation link has expired. Please request a new activation link.');
+      }
+
+      const user = record.user;
+      if (!user) {
+        throw new Error('Associated user account was not found.');
+      }
+
+      if (user.status === 'DISABLED') {
+        const err = new Error('This account has been disabled. Contact the administrator.');
+        (err as any).code = 'ACCOUNT_DISABLED';
+        throw err;
+      }
+
+      if (user.status === 'ACTIVE') {
+        throw new Error('This account has already been activated. Please sign in.');
+      }
+
+      const requiresPassword = record.source !== 'SELF_REGISTRATION';
+      let newPasswordHash = user.passwordHash;
+
+      if (requiresPassword) {
+        if (!password || typeof password !== 'string' || password.trim() === '') {
+          throw new Error('Password is required to activate your account.');
+        }
+        validatePasswordPolicy(password, false);
+        const salt = bcrypt.genSaltSync(12);
+        newPasswordHash = bcrypt.hashSync(password, salt);
+      } else if (password && password.trim() !== '') {
+        validatePasswordPolicy(password, false);
+        const salt = bcrypt.genSaltSync(12);
+        newPasswordHash = bcrypt.hashSync(password, salt);
+      }
+
+      const now = new Date();
+
+      // Activate User
+      await tx.user.update({
+        where: { id: user.id },
+        data: {
+          passwordHash: newPasswordHash,
+          status: 'ACTIVE',
+          activatedAt: now,
+          emailVerified: true,
+          tokenVersion: { increment: 1 },
+        },
+      });
+
+      // Mark token as used
+      await tx.accountActivationToken.update({
+        where: { id: record.id },
+        data: {
+          usedAt: now,
+        },
+      });
+
+      // Invalidate any other unused activation tokens for this user
+      await tx.accountActivationToken.updateMany({
+        where: {
+          userId: user.id,
+          id: { not: record.id },
+          usedAt: null,
+        },
+        data: { usedAt: now },
+      });
+
+      // Audit logs
+      const fam = await tx.familyMember.findFirst({
+        where: { userId: user.id },
+      });
+      if (fam) {
+        await tx.familyAuditLog.create({
+          data: {
+            id: `log-${nanoid(10)}`,
+            familyId: fam.familyId,
+            actorUserId: user.id,
+            actorName: user.name,
+            action: 'ACCOUNT_ACTIVATED',
+            details: `Parent account activated via email link (source: ${record.source}).`,
+          },
+        });
+      }
+
+      await tx.systemAuditLog.create({
+        data: {
+          id: `syslog-${nanoid(10)}`,
+          actorUserId: user.id,
+          actorEmail: user.email,
+          action: 'ACCOUNT_ACTIVATED',
+          details: `Parent account ${user.email} (${user.id}) activated (source: ${record.source}).`,
+          ipAddress: ipAddress || null,
+        },
+      });
+
+      return {
+        success: true,
+        message: 'Account successfully activated. You may now sign in.',
+        email: user.email,
+      };
+    });
+  }
+
+  public async resendActivationEmail(
+    email: string,
+    ipAddress?: string
+  ): Promise<{ message: string; activationToken?: string }> {
+    const normalizedEmail = (email || '').toLowerCase().trim();
+    const rateLimitKey = `resend-act:${normalizedEmail}:${ipAddress || 'unknown'}`;
+    this.checkRateLimit(rateLimitKey, 3, 5 * 60 * 1000);
+
+    const genericMsg = 'If an unactivated account exists for this email, an activation link has been sent.';
+
+    const user = await prisma.user.findUnique({
+      where: { email: normalizedEmail },
+    });
+
+    if (!user || user.status !== 'PENDING_ACTIVATION') {
+      return { message: genericMsg };
+    }
+
+    const rawActivationToken = generateCryptoToken('act_');
+    const actTokenHash = hashToken(rawActivationToken);
+    const actExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    await prisma.$transaction(async (tx) => {
+      // Invalidate existing unused tokens
+      await tx.accountActivationToken.updateMany({
+        where: { userId: user.id, usedAt: null },
+        data: { usedAt: new Date() },
+      });
+
+      await tx.accountActivationToken.create({
+        data: {
+          id: `act-${nanoid(10)}`,
+          userId: user.id,
+          tokenHash: actTokenHash,
+          source: 'SELF_REGISTRATION',
+          expiresAt: actExpiresAt,
+        },
+      });
+
+      await tx.systemAuditLog.create({
+        data: {
+          id: `syslog-${nanoid(10)}`,
+          actorUserId: user.id,
+          actorEmail: user.email,
+          action: 'RESEND_ACTIVATION_EMAIL',
+          details: `User requested resending activation email for ${user.email}.`,
+          ipAddress: ipAddress || null,
+        },
+      });
+    });
+
+    await mailService.sendAccountActivationEmail(user.email, user.name, rawActivationToken, true);
+
+    return {
+      message: genericMsg,
+      activationToken: process.env.NODE_ENV !== 'production' ? rawActivationToken : undefined,
+    };
+  }
+
+  public async adminResendActivation(
+    actorUserId: string,
+    targetUserId: string,
+    ipAddress?: string
+  ): Promise<{ success: boolean; message: string; activationToken?: string }> {
+    const actor = await prisma.user.findUnique({ where: { id: actorUserId } });
+    if (!actor || actor.systemRole !== 'SYSTEM_ADMIN') {
+      throw new Error('Unauthorized: only SYSTEM_ADMIN can resend activation emails.');
+    }
+
+    const targetUser = await prisma.user.findUnique({ where: { id: targetUserId } });
+    if (!targetUser) {
+      throw new Error('Parent user not found.');
+    }
+
+    if (targetUser.status !== 'PENDING_ACTIVATION') {
+      throw new Error(`Account cannot be activated because its status is ${targetUser.status}.`);
+    }
+
+    const rawActivationToken = generateCryptoToken('act_');
+    const actTokenHash = hashToken(rawActivationToken);
+    const actExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    await prisma.$transaction(async (tx) => {
+      await tx.accountActivationToken.updateMany({
+        where: { userId: targetUser.id, usedAt: null },
+        data: { usedAt: new Date() },
+      });
+
+      await tx.accountActivationToken.create({
+        data: {
+          id: `act-${nanoid(10)}`,
+          userId: targetUser.id,
+          tokenHash: actTokenHash,
+          source: 'ADMIN_REGENERATED',
+          expiresAt: actExpiresAt,
+        },
+      });
+
+      await tx.systemAuditLog.create({
+        data: {
+          id: `syslog-${nanoid(10)}`,
+          actorUserId,
+          actorEmail: actor.email,
+          action: 'ADMIN_RESEND_ACTIVATION',
+          details: `Admin resent activation email for ${targetUser.email} (${targetUser.id}).`,
+          ipAddress: ipAddress || null,
+        },
+      });
+    });
+
+    await mailService.sendAccountActivationEmail(targetUser.email, targetUser.name, rawActivationToken, false);
+
+    return {
+      success: true,
+      message: `Activation email resent successfully to ${targetUser.email}.`,
+      activationToken: process.env.NODE_ENV !== 'production' ? rawActivationToken : undefined,
+    };
+  }
+
+  public async adminCreateParent(
+    actorUserId: string,
+    name: string,
+    email: string,
+    ipAddress?: string
+  ): Promise<{ user: ParentUser; activationToken?: string }> {
+    const actor = await prisma.user.findUnique({ where: { id: actorUserId } });
+    if (!actor || actor.systemRole !== 'SYSTEM_ADMIN') {
+      throw new Error('Unauthorized: only SYSTEM_ADMIN can create parent accounts.');
+    }
+
+    const cleanName = (name || '').trim();
+    const cleanEmail = (email || '').toLowerCase().trim();
+
+    if (!cleanName || cleanName.length < 2) {
+      throw new Error('A valid name with at least 2 characters is required.');
+    }
+
+    if (!cleanEmail || !cleanEmail.includes('@') || !cleanEmail.includes('.')) {
+      throw new Error('A valid email address is required.');
+    }
+
+    const existing = await prisma.user.findUnique({ where: { email: cleanEmail } });
+    if (existing) {
+      throw new Error('An account with this email address already exists.');
+    }
+
+    const userId = `usr-${nanoid(10)}`;
+    const familyId = `fam-${nanoid(10)}`;
+    const placeholderPassword = crypto.randomBytes(32).toString('hex');
+    const salt = bcrypt.genSaltSync(12);
+    const passwordHash = bcrypt.hashSync(placeholderPassword, salt);
+
+    const rawActivationToken = generateCryptoToken('act_');
+    const actTokenHash = hashToken(rawActivationToken);
+    const actExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    const createdUser = await prisma.$transaction(async (tx) => {
+      const user = await tx.user.create({
+        data: {
+          id: userId,
+          email: cleanEmail,
+          name: cleanName,
+          passwordHash,
+          systemRole: 'USER',
+          status: 'PENDING_ACTIVATION',
+          emailVerified: false,
+          activatedAt: null,
+          tokenVersion: 1,
+        },
+      });
+
+      const family = await tx.family.create({
+        data: {
+          id: familyId,
+          name: `${cleanName.split(' ')[0]}’s Family`,
+          ownerUserId: userId,
+          requireMfa: false,
+          approvalRule: 'OWNER_OR_PARENT',
+        },
+      });
+
+      await tx.familyMember.create({
+        data: {
+          id: `fm-${nanoid(10)}`,
+          familyId: family.id,
+          userId: user.id,
+          role: 'OWNER',
+        },
+      });
+
+      await tx.accountActivationToken.create({
+        data: {
+          id: `act-${nanoid(10)}`,
+          userId: user.id,
+          tokenHash: actTokenHash,
+          source: 'ADMIN_CREATED',
+          expiresAt: actExpiresAt,
+        },
+      });
+
+      await tx.familyAuditLog.create({
+        data: {
+          id: `log-${nanoid(10)}`,
+          familyId: family.id,
+          actorUserId: actor.id,
+          actorName: actor.name,
+          action: 'ADMIN_CREATED_PARENT',
+          details: `Admin ${actor.email} created parent account ${cleanEmail} pending email activation.`,
+        },
+      });
+
+      await tx.systemAuditLog.create({
+        data: {
+          id: `syslog-${nanoid(10)}`,
+          actorUserId: actor.id,
+          actorEmail: actor.email,
+          action: 'ADMIN_CREATED_PARENT',
+          details: `Admin created parent ${cleanEmail} (${user.id}) pending email activation.`,
+          ipAddress: ipAddress || null,
+        },
+      });
+
+      return user;
+    });
+
+    await mailService.sendAccountActivationEmail(cleanEmail, cleanName, rawActivationToken, false);
+
+    const domainUser: ParentUser = {
+      id: createdUser.id,
+      email: createdUser.email,
+      name: createdUser.name,
+      passwordHash: createdUser.passwordHash,
+      systemRole: createdUser.systemRole as SystemRole,
+      status: createdUser.status as UserStatus,
+      activatedAt: null,
+      disabledAt: null,
+      disabledReason: null,
+      disabledByUserId: null,
+      emailVerified: createdUser.emailVerified,
+      mfaEnabled: createdUser.mfaEnabled,
+      tokenVersion: createdUser.tokenVersion,
+      createdAt: createdUser.createdAt.toISOString(),
+    };
+
+    return {
+      user: domainUser,
+      activationToken: process.env.NODE_ENV !== 'production' ? rawActivationToken : undefined,
     };
   }
 
@@ -1140,6 +1607,7 @@ export class AuthService {
       passwordHash: user.passwordHash,
       systemRole: user.systemRole as SystemRole,
       status: user.status as any,
+      activatedAt: user.activatedAt ? user.activatedAt.toISOString() : undefined,
       disabledAt: user.disabledAt ? user.disabledAt.toISOString() : undefined,
       disabledReason: user.disabledReason,
       disabledByUserId: user.disabledByUserId,

@@ -22,6 +22,7 @@ import { AdminRollbackPage } from './pages/AdminRollbackPage';
 import { AdminAuditPage } from './pages/AdminAuditPage';
 import { AdminSupportPage } from './pages/AdminSupportPage';
 import { BlockPage } from './pages/BlockPage';
+import { ActivatePage } from './pages/ActivatePage';
 
 function AuthenticatedApp() {
   const [userProfile, setUserProfile] = useState<any>(null);
@@ -216,6 +217,7 @@ function AuthenticatedApp() {
         <Route path="/blocked" element={<BlockPage />} />
         <Route path="/referrals" element={<ReferralPage />} />
         <Route path="/feedback" element={<FeedbackPage />} />
+        <Route path="/activate" element={<ActivatePage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AppLayout>
@@ -225,11 +227,19 @@ function AuthenticatedApp() {
 export function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(Boolean(api.getToken()));
 
-  // Public routes that don't require parent authentication (e.g. child block screen)
+  // Public routes that don't require parent authentication (e.g. child block screen, account activation)
   if (window.location.pathname.startsWith('/blocked')) {
     return (
       <BrowserRouter>
         <BlockPage />
+      </BrowserRouter>
+    );
+  }
+
+  if (window.location.pathname.startsWith('/activate')) {
+    return (
+      <BrowserRouter>
+        <ActivatePage />
       </BrowserRouter>
     );
   }

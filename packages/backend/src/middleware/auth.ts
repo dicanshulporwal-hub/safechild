@@ -40,6 +40,13 @@ export async function authMiddleware(req: AuthenticatedRequest, res: Response, n
       });
     }
 
+    if (user.status === 'PENDING_ACTIVATION') {
+      return res.status(403).json({
+        error: 'Please activate your account before signing in.',
+        code: 'ACCOUNT_ACTIVATION_REQUIRED',
+      });
+    }
+
     req.userId = decoded.userId;
     req.sessionId = decoded.sessionId;
     req.tokenVersion = decoded.tokenVersion;
@@ -49,6 +56,12 @@ export async function authMiddleware(req: AuthenticatedRequest, res: Response, n
       return res.status(403).json({
         error: 'This account has been disabled. Contact the administrator.',
         code: 'ACCOUNT_DISABLED',
+      });
+    }
+    if (e.code === 'ACCOUNT_ACTIVATION_REQUIRED' || e.message?.includes('ACCOUNT_ACTIVATION_REQUIRED') || e.message?.includes('activate your account')) {
+      return res.status(403).json({
+        error: 'Please activate your account before signing in.',
+        code: 'ACCOUNT_ACTIVATION_REQUIRED',
       });
     }
     return res.status(401).json({ error: e.message || 'Unauthorized. Invalid, expired or revoked token.' });

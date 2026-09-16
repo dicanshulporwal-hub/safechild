@@ -16,7 +16,7 @@ describe('SafeBrowse Backend Service Integration Tests', () => {
   it('should register and authenticate test parent user', async () => {
     const email = `test_parent_main_${Date.now()}@porwal.io`;
     const reg = await authService.register(email, 'StrongTestPassphrase2026!', 'Test Parent');
-    await authService.verifyEmail(reg.emailVerificationToken);
+    await authService.activateAccount(reg.activationToken!);
     const { user, token } = await authService.login(email, 'StrongTestPassphrase2026!');
     assert.ok(user);
     assert.ok(token);

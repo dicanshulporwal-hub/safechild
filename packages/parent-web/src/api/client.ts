@@ -279,7 +279,38 @@ class ApiClient {
     });
     const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Registration failed');
-    this.setToken(data.token, data.refreshToken, data.user?.email || email);
+    if (data.token) {
+      this.setToken(data.token, data.refreshToken, data.user?.email || email);
+    }
+    return data;
+  }
+
+  async verifyActivationToken(token: string) {
+    const res = await fetch(`${API_BASE}/auth/activate/verify?token=${encodeURIComponent(token)}`);
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || data.reason || 'Activation token verification failed');
+    return data;
+  }
+
+  async activateAccount(token: string, password?: string) {
+    const res = await fetch(`${API_BASE}/auth/activate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, password }),
+    });
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Activation failed');
+    return data;
+  }
+
+  async resendActivation(email: string) {
+    const res = await fetch(`${API_BASE}/auth/activate/resend`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to resend activation email');
     return data;
   }
 
@@ -792,6 +823,28 @@ class ApiClient {
     });
     const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to enable user');
+    return data;
+  }
+
+  async adminCreateParent(name: string, email: string) {
+    this.invalidateCache(`${API_BASE}/admin/parents`);
+    const res = await fetch(`${API_BASE}/admin/parents`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ name, email }),
+    });
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to create parent');
+    return data;
+  }
+
+  async adminResendActivation(id: string) {
+    const res = await fetch(`${API_BASE}/admin/parents/${id}/resend-activation`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+    });
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to resend activation email');
     return data;
   }
 

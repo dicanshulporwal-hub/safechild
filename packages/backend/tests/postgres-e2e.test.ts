@@ -124,56 +124,53 @@ describe('SafeBrowse Stage 11 Step 3F: Real PostgreSQL API Integration & E2E Sui
     });
 
     assert.strictEqual(res.status, 200);
-    assert.ok(res.data.accessToken);
-    assert.ok(res.data.refreshToken);
-    assert.strictEqual(res.data.emailVerificationPending, true);
+    assert.strictEqual(res.data.activationRequired, true);
     assert.strictEqual(res.data.user.email, parentEmail);
-    assert.ok(res.data.emailVerificationToken);
+    assert.ok(res.data.activationToken);
 
     parentUserId = res.data.user.id;
-    accessToken = res.data.accessToken;
-    refreshToken = res.data.refreshToken;
-    verificationToken = res.data.emailVerificationToken;
+    verificationToken = res.data.activationToken;
   });
 
-  // 2. Immediate login before verification
-  it('2. should permit immediate login before email verification with pending status', async () => {
+  // 2. Login rejected before activation
+  it('2. should reject login before email activation with 403 ACCOUNT_ACTIVATION_REQUIRED', async () => {
     const res = await api('POST', '/api/auth/login', {
       email: parentEmail,
       password: testPassword,
     });
 
-    assert.strictEqual(res.status, 200);
-    assert.strictEqual(res.data.emailVerificationPending, true);
-    assert.ok(res.data.accessToken);
+    assert.strictEqual(res.status, 403);
+    assert.strictEqual(res.data.code, 'ACCOUNT_ACTIVATION_REQUIRED');
   });
 
-  // 3. Email verification link redemption
-  it('3. should verify email address via single-use token', async () => {
-    const res = await api('POST', '/api/auth/verify-email', {
+  // 3. Email activation link redemption
+  it('3. should activate account via single-use token', async () => {
+    const res = await api('POST', '/api/auth/activate', {
       token: verificationToken,
     });
 
     assert.strictEqual(res.status, 200);
     assert.strictEqual(res.data.success, true);
+    assert.strictEqual(res.data.email, parentEmail);
 
     // Assert token cannot be re-used
-    const replayRes = await api('POST', '/api/auth/verify-email', {
+    const replayRes = await api('POST', '/api/auth/activate', {
       token: verificationToken,
     });
     assert.strictEqual(replayRes.status, 400);
   });
 
-  // 4. Post-verification login
-  it('4. should confirm emailVerified is true on subsequent login', async () => {
+  // 4. Post-activation login
+  it('4. should log in successfully after account activation', async () => {
     const res = await api('POST', '/api/auth/login', {
       email: parentEmail,
       password: testPassword,
     });
 
     assert.strictEqual(res.status, 200);
-    assert.strictEqual(res.data.emailVerificationPending, false);
-    assert.strictEqual(res.data.user.emailVerified, true);
+    assert.strictEqual(res.data.user.status, 'ACTIVE');
+    assert.ok(res.data.accessToken);
+    assert.ok(res.data.refreshToken);
     accessToken = res.data.accessToken;
     refreshToken = res.data.refreshToken;
   });
@@ -459,7 +456,8 @@ describe('SafeBrowse Stage 11 Step 3F: Real PostgreSQL API Integration & E2E Sui
       name: 'Co Parent',
     });
     assert.strictEqual(coReg.status, 200);
-    await api('POST', '/api/auth/verify-email', { token: coReg.data.emailVerificationToken });
+    assert.ok(coReg.data.activationToken);
+    await api('POST', '/api/auth/activate', { token: coReg.data.activationToken });
 
     const coLogin = await api('POST', '/api/auth/login', {
       email: coParentEmail,
@@ -604,8 +602,8 @@ describe('SafeBrowse Stage 11 Step 3F: Real PostgreSQL API Integration & E2E Sui
     baseUrl = procB.url;
   });
 
-  // 19. Unverified user denied through a real product API
-  it('19. should deny unverified user from accessing protected family routes', async () => {
+  // 19. Unactivated user denied login and tokens
+  it('19. should deny unactivated user from logging in or receiving session tokens', async () => {
     const unverifiedEmail = `unverified-${nanoid(6).toLowerCase()}@safebrowse.io`;
     const regRes = await api('POST', '/api/auth/register', {
       email: unverifiedEmail,
@@ -613,11 +611,15 @@ describe('SafeBrowse Stage 11 Step 3F: Real PostgreSQL API Integration & E2E Sui
       name: 'Unverified Parent',
     });
     assert.strictEqual(regRes.status, 200);
-    const unverifiedToken = regRes.data.accessToken;
+    assert.strictEqual(regRes.data.activationRequired, true);
+    assert.strictEqual(regRes.data.accessToken, undefined);
 
-    const famRes = await api('GET', '/api/family', undefined, unverifiedToken);
-    assert.strictEqual(famRes.status, 403);
-    assert.match(famRes.data.error, /verify|verified/i);
+    const loginRes = await api('POST', '/api/auth/login', {
+      email: unverifiedEmail,
+      password: testPassword,
+    });
+    assert.strictEqual(loginRes.status, 403);
+    assert.strictEqual(loginRes.data.code, 'ACCOUNT_ACTIVATION_REQUIRED');
   });
 
   // 20. Parent/device authentication separation
@@ -661,7 +663,8 @@ describe('SafeBrowse Stage 11 Step 3F: Real PostgreSQL API Integration & E2E Sui
       password: testPassword,
       name: 'Parent B',
     });
-    await api('POST', '/api/auth/verify-email', { token: regB.data.emailVerificationToken });
+    assert.strictEqual(regB.status, 200);
+    await api('POST', '/api/auth/activate', { token: regB.data.activationToken });
     const loginB = await api('POST', '/api/auth/login', {
       email: familyBEmail,
       password: testPassword,

@@ -12,7 +12,12 @@ const disabledAccountPayload = {
   code: 'ACCOUNT_DISABLED',
 };
 
-// Register new parent account
+const activationRequiredPayload = {
+  error: 'Please activate your account before signing in.',
+  code: 'ACCOUNT_ACTIVATION_REQUIRED',
+};
+
+// Register new parent account (pending email activation)
 authRouter.post('/register', authRateLimiter, async (req, res) => {
   try {
     const { email, password, name, consentVersion } = req.body;
@@ -39,16 +44,67 @@ authRouter.post('/register', authRateLimiter, async (req, res) => {
 
     const responsePayload: any = {
       user: result.user,
-      accessToken: result.accessToken,
-      refreshToken: result.refreshToken,
-      token: result.token,
-      emailVerificationPending: true,
+      message: 'Registration successful. Please check your email to activate your account.',
+      activationRequired: true,
     };
     if (process.env.NODE_ENV !== 'production') {
-      responsePayload.emailVerificationToken = result.emailVerificationToken;
+      responsePayload.activationToken = result.activationToken;
     }
 
     res.json(responsePayload);
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Verify Activation Token (Public)
+authRouter.get('/activate/verify', authRateLimiter, async (req, res) => {
+  try {
+    const token = req.query.token as string;
+    if (!token) {
+      return res.status(400).json({ valid: false, error: 'Activation token is required.' });
+    }
+    const result = await authService.verifyActivationToken(token);
+    if (!result.valid) {
+      return res.status(400).json(result);
+    }
+    res.json(result);
+  } catch (e: any) {
+    res.status(400).json({ valid: false, error: e.message });
+  }
+});
+
+// Activate Account (Public)
+authRouter.post('/activate', authRateLimiter, async (req, res) => {
+  try {
+    const { token, password } = req.body;
+    if (!token) {
+      return res.status(400).json({ error: 'Activation token is required.' });
+    }
+    const ipAddress = (req.ip || req.socket.remoteAddress) as string;
+    const result = await authService.activateAccount(token, password, ipAddress);
+    res.json(result);
+  } catch (e: any) {
+    if (e.code === 'ACCOUNT_DISABLED') {
+      return res.status(403).json(disabledAccountPayload);
+    }
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Resend Account Activation Email (Public - generic response)
+authRouter.post('/activate/resend', authRateLimiter, async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required.' });
+    }
+    const ipAddress = (req.ip || req.socket.remoteAddress) as string;
+    const result = await authService.resendActivationEmail(email, ipAddress);
+    res.json({
+      success: true,
+      ...result,
+    });
   } catch (e: any) {
     res.status(400).json({ error: e.message });
   }
@@ -70,6 +126,9 @@ authRouter.post('/login', authRateLimiter, async (req, res) => {
     if (e.code === 'ACCOUNT_DISABLED' || e.message?.includes('account has been disabled')) {
       return res.status(403).json(disabledAccountPayload);
     }
+    if (e.code === 'ACCOUNT_ACTIVATION_REQUIRED' || e.message?.includes('activate your account')) {
+      return res.status(403).json(activationRequiredPayload);
+    }
     res.status(400).json({ error: e.message });
   }
 });
@@ -88,6 +147,9 @@ authRouter.post('/mfa-login', authRateLimiter, async (req, res) => {
   } catch (e: any) {
     if (e.code === 'ACCOUNT_DISABLED' || e.message?.includes('account has been disabled')) {
       return res.status(403).json(disabledAccountPayload);
+    }
+    if (e.code === 'ACCOUNT_ACTIVATION_REQUIRED' || e.message?.includes('activate your account')) {
+      return res.status(403).json(activationRequiredPayload);
     }
     res.status(400).json({ error: e.message });
   }
@@ -112,6 +174,9 @@ authRouter.post('/refresh', authRateLimiter, async (req, res) => {
   } catch (e: any) {
     if (e.code === 'ACCOUNT_DISABLED' || e.message?.includes('account has been disabled')) {
       return res.status(403).json(disabledAccountPayload);
+    }
+    if (e.code === 'ACCOUNT_ACTIVATION_REQUIRED' || e.message?.includes('activate your account')) {
+      return res.status(403).json(activationRequiredPayload);
     }
     res.status(401).json({ error: e.message });
   }

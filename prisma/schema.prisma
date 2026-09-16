@@ -13,8 +13,15 @@ enum SystemRole {
 }
 
 enum UserStatus {
+  PENDING_ACTIVATION
   ACTIVE
   DISABLED
+}
+
+enum ActivationTokenSource {
+  SELF_REGISTRATION
+  ADMIN_CREATED
+  ADMIN_REGENERATED
 }
 
 enum FamilyRole {
@@ -57,6 +64,7 @@ model User {
   name              String
   systemRole        SystemRole @default(USER)
   status            UserStatus @default(ACTIVE)
+  activatedAt       DateTime?
   disabledAt        DateTime?
   disabledReason    String?
   disabledByUserId  String?
@@ -78,6 +86,7 @@ model User {
 
   sessions                UserSession[]
   challenges              MfaChallenge[]
+  activationTokens        AccountActivationToken[]
   memberships             FamilyMember[]
   ownedFamilies           Family[]                 @relation("FamilyOwner")
   childrenCreated         Child[]
@@ -89,6 +98,21 @@ model User {
 
   @@index([status])
   @@index([systemRole, status])
+}
+
+model AccountActivationToken {
+  id              String                @id
+  userId          String
+  user            User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash       String                @unique
+  source          ActivationTokenSource @default(SELF_REGISTRATION)
+  createdByUserId String?
+  expiresAt       DateTime
+  usedAt          DateTime?
+  createdAt       DateTime              @default(now())
+
+  @@index([userId])
+  @@index([tokenHash])
 }
 
 model UserSession {

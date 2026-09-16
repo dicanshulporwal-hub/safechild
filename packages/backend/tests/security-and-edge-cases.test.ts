@@ -46,10 +46,11 @@ describe('SafeBrowse Security, Edge Cases & Threat Model Test Suite', () => {
     it('should securely hash passwords and verify with bcrypt', async () => {
       const testEmail = `user-${nanoid(6)}@safebrowse.io`;
       const plainPassword = 'MySecretPassword123!';
-      const { user } = await authService.register(testEmail, plainPassword, 'Test Parent');
+      const reg = await authService.register(testEmail, plainPassword, 'Test Parent');
+      await authService.activateAccount(reg.activationToken!);
 
-      assert.notStrictEqual(user.passwordHash, plainPassword);
-      assert.ok(user.passwordHash.startsWith('$2a$') || user.passwordHash.startsWith('$2b$'));
+      assert.notStrictEqual(reg.user.passwordHash, plainPassword);
+      assert.ok(reg.user.passwordHash.startsWith('$2a$') || reg.user.passwordHash.startsWith('$2b$'));
 
       const loginRes = await authService.login(testEmail, plainPassword);
       assert.ok(loginRes.token);
@@ -57,7 +58,8 @@ describe('SafeBrowse Security, Edge Cases & Threat Model Test Suite', () => {
 
     it('should reject invalid passwords during login', async () => {
       const testEmail = `user-${nanoid(6)}@safebrowse.io`;
-      await authService.register(testEmail, 'CorrectPassphrase2026!', 'Parent');
+      const reg = await authService.register(testEmail, 'CorrectPassphrase2026!', 'Parent');
+      await authService.activateAccount(reg.activationToken!);
 
       await assert.rejects(async () => {
         await authService.login(testEmail, 'WrongPassword2026!');
@@ -70,7 +72,7 @@ describe('SafeBrowse Security, Edge Cases & Threat Model Test Suite', () => {
         'SecTestPassphrase2026!',
         'Sec Parent'
       );
-      await authService.verifyEmail(reg.emailVerificationToken);
+      await authService.activateAccount(reg.activationToken!);
       const { token } = await authService.login(reg.user.email, 'SecTestPassphrase2026!');
       const tamperedToken = token!.slice(0, -5) + 'xxxxx';
 
@@ -132,7 +134,7 @@ describe('SafeBrowse Security, Edge Cases & Threat Model Test Suite', () => {
         'SecTestPassphrase2026!',
         'Pair Parent'
       );
-      await authService.verifyEmail(reg.emailVerificationToken);
+      await authService.activateAccount(reg.activationToken!);
       const familyReg = await familyService.getOrCreateUserFamily(reg.user.id);
       const { child } = await childService.createChild(reg.user.id, 'Pair Child', 10, undefined, familyReg.id);
       const pairing = await deviceService.generatePairingCode(reg.user.id, child.id);
@@ -155,7 +157,7 @@ describe('SafeBrowse Security, Edge Cases & Threat Model Test Suite', () => {
         'SecTestPassphrase2026!',
         'Exp Parent'
       );
-      await authService.verifyEmail(reg.emailVerificationToken);
+      await authService.activateAccount(reg.activationToken!);
       const familyReg = await familyService.getOrCreateUserFamily(reg.user.id);
       const { child } = await childService.createChild(reg.user.id, 'Exp Child', 10, undefined, familyReg.id);
       const pairing = await deviceService.generatePairingCode(reg.user.id, child.id);

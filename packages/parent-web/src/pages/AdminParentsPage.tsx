@@ -17,6 +17,8 @@ import {
   ShieldOff,
   UserX,
   UserRoundCheck,
+  UserPlus,
+  Send,
 } from 'lucide-react';
 
 export const AdminParentsPage: React.FC = () => {
@@ -28,6 +30,13 @@ export const AdminParentsPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [forbidden, setForbidden] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+
+  const [showAddParentModal, setShowAddParentModal] = useState(false);
+  const [newParentName, setNewParentName] = useState('');
+  const [newParentEmail, setNewParentEmail] = useState('');
+  const [creatingParent, setCreatingParent] = useState(false);
+
+  const [resendingActivationId, setResendingActivationId] = useState<string | null>(null);
 
   const [selectedParentForReset, setSelectedParentForReset] = useState<any>(null);
   const [newPassword, setNewPassword] = useState('');
@@ -89,6 +98,39 @@ export const AdminParentsPage: React.FC = () => {
       fetchAdminData();
     } catch (e: any) {
       showToast(e.message, 'error');
+    }
+  };
+
+  const handleCreateParent = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newParentName.trim() || !newParentEmail.trim()) {
+      showToast('Name and email are required', 'error');
+      return;
+    }
+    setCreatingParent(true);
+    try {
+      await api.adminCreateParent(newParentName.trim(), newParentEmail.trim());
+      showToast(`Parent account created for ${newParentEmail}. Activation email sent.`, 'success');
+      setShowAddParentModal(false);
+      setNewParentName('');
+      setNewParentEmail('');
+      await fetchAdminData();
+    } catch (e: any) {
+      showToast(e.message, 'error');
+    } finally {
+      setCreatingParent(false);
+    }
+  };
+
+  const handleResendActivation = async (parent: any) => {
+    setResendingActivationId(parent.id);
+    try {
+      await api.adminResendActivation(parent.id);
+      showToast(`Activation email resent to ${parent.email}`, 'success');
+    } catch (e: any) {
+      showToast(e.message, 'error');
+    } finally {
+      setResendingActivationId(null);
     }
   };
 
@@ -219,9 +261,21 @@ export const AdminParentsPage: React.FC = () => {
           <h1 className="text-2xl font-extrabold text-white">System Administrator Console</h1>
           <p className="text-xs text-slate-400 mt-1">Manage parent accounts, account status, fleet health and audit history.</p>
         </div>
-        <button onClick={fetchAdminData} className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl flex items-center gap-2">
-          <RefreshCw className="w-3.5 h-3.5" /> Refresh All
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => {
+              setNewParentName('');
+              setNewParentEmail('');
+              setShowAddParentModal(true);
+            }}
+            className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-lg shadow-purple-600/20 transition cursor-pointer"
+          >
+            <UserPlus className="w-3.5 h-3.5" /> Add Parent
+          </button>
+          <button onClick={fetchAdminData} className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl flex items-center gap-2 transition cursor-pointer">
+            <RefreshCw className="w-3.5 h-3.5" /> Refresh All
+          </button>
+        </div>
       </div>
 
       {metrics && (
@@ -276,6 +330,9 @@ export const AdminParentsPage: React.FC = () => {
                         {parent.status === 'DISABLED' && parent.disabledReason && (
                           <div className="text-[10px] text-slate-500 mt-1 max-w-48 truncate" title={parent.disabledReason}>{parent.disabledReason}</div>
                         )}
+                        {parent.activatedAt && (
+                          <div className="text-[9px] text-slate-500 mt-0.5">Activated: {new Date(parent.activatedAt).toLocaleDateString()}</div>
+                        )}
                       </td>
                       <td className="py-3.5 px-4">
                         {parent.emailVerified ? (
@@ -299,15 +356,25 @@ export const AdminParentsPage: React.FC = () => {
                       </td>
                       <td className="py-3.5 px-4 text-right">
                         <div className="flex justify-end gap-2 flex-wrap">
+                          {parent.status === 'PENDING_ACTIVATION' && (
+                            <button
+                              disabled={resendingActivationId === parent.id}
+                              onClick={() => handleResendActivation(parent)}
+                              title="Resend Activation Email"
+                              className="p-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 disabled:opacity-50 transition cursor-pointer"
+                            >
+                              <Send className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                           <ActionButton title="Inspect" onClick={() => handleInspectParent(parent.id)} icon={<Eye className="w-3.5 h-3.5" />} />
                           <ActionButton title="Reset Password" onClick={() => { setSelectedParentForReset(parent); setNewPassword(''); }} icon={<Key className="w-3.5 h-3.5" />} />
                           <ActionButton title="Promote / Demote Role" onClick={() => handleToggleRole(parent)} icon={<UserCheck className="w-3.5 h-3.5" />} />
                           {parent.mfaEnabled && <ActionButton title="Disable MFA" onClick={() => handleDisableMfa(parent)} icon={<ShieldOff className="w-3.5 h-3.5" />} />}
                           {(parent.status || 'ACTIVE') === 'ACTIVE' ? (
-                            <button disabled={updatingAccountStatus} onClick={() => { setSelectedParentForDisable(parent); setDisableReason(''); }} title="Disable User" className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 disabled:opacity-50"><UserX className="w-3.5 h-3.5" /></button>
-                          ) : (
-                            <button disabled={updatingAccountStatus} onClick={() => handleEnableUser(parent)} title="Enable User" className="p-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 disabled:opacity-50"><UserRoundCheck className="w-3.5 h-3.5" /></button>
-                          )}
+                            <button disabled={updatingAccountStatus} onClick={() => { setSelectedParentForDisable(parent); setDisableReason(''); }} title="Disable User" className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 disabled:opacity-50 transition cursor-pointer"><UserX className="w-3.5 h-3.5" /></button>
+                          ) : parent.status === 'DISABLED' ? (
+                            <button disabled={updatingAccountStatus} onClick={() => handleEnableUser(parent)} title="Enable User" className="p-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 disabled:opacity-50 transition cursor-pointer"><UserRoundCheck className="w-3.5 h-3.5" /></button>
+                          ) : null}
                         </div>
                       </td>
                     </tr>
@@ -338,6 +405,54 @@ export const AdminParentsPage: React.FC = () => {
             </div>
           ))}
         </div>
+      )}
+
+      {showAddParentModal && (
+        <Modal title="Create Parent Account" onClose={() => setShowAddParentModal(false)}>
+          <form onSubmit={handleCreateParent} className="space-y-4">
+            <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300">
+              Parent will be created with status <span className="font-semibold text-amber-300">PENDING_ACTIVATION</span>. An activation email will be sent for them to set their password.
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase font-bold text-slate-400 mb-1">Parent Full Name</label>
+              <input
+                type="text"
+                value={newParentName}
+                onChange={(e) => setNewParentName(e.target.value)}
+                placeholder="e.g. Robert Smith"
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-white text-xs"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase font-bold text-slate-400 mb-1">Parent Email Address</label>
+              <input
+                type="email"
+                value={newParentEmail}
+                onChange={(e) => setNewParentEmail(e.target.value)}
+                placeholder="parent@example.com"
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-white text-xs"
+                required
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowAddParentModal(false)}
+                className="px-4 py-2 bg-slate-800 text-slate-300 text-xs rounded-xl hover:bg-slate-700 transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={creatingParent}
+                className="px-5 py-2 bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold rounded-xl disabled:opacity-50 transition"
+              >
+                {creatingParent ? 'Creating...' : 'Create Parent & Send Invite'}
+              </button>
+            </div>
+          </form>
+        </Modal>
       )}
 
       {selectedParentForReset && (
@@ -385,6 +500,9 @@ export const AdminParentsPage: React.FC = () => {
                 <div><strong>Reason:</strong> {inspectedParent.disabledReason || 'N/A'}</div>
               </div>
             )}
+            <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 text-slate-400">
+              <div><strong>Activated At:</strong> {inspectedParent.activatedAt ? new Date(inspectedParent.activatedAt).toLocaleString() : 'Pending Activation'}</div>
+            </div>
             {inspectedParent.families?.map((f: any) => (
               <div key={f.familyId} className="bg-slate-950 p-4 rounded-xl border border-slate-800">
                 <div className="font-bold text-white">{f.familyName} <span className="text-slate-500">({f.role})</span></div>
@@ -414,12 +532,15 @@ const RoleBadge = ({ role }: { role: string }) => (
   <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold border ${role === 'SYSTEM_ADMIN' ? 'bg-purple-500/20 text-purple-300 border-purple-500/30' : 'bg-slate-800 text-slate-300 border-slate-700'}`}>{role}</span>
 );
 
-const StatusBadge = ({ status }: { status: string }) => (
-  <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold border ${status === 'DISABLED' ? 'bg-rose-500/15 text-rose-300 border-rose-500/30' : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'}`}>{status}</span>
-);
+const StatusBadge = ({ status }: { status: string }) => {
+  if (status === 'PENDING_ACTIVATION') {
+    return <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold border bg-amber-500/15 text-amber-300 border-amber-500/30">PENDING ACTIVATION</span>;
+  }
+  return <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold border ${status === 'DISABLED' ? 'bg-rose-500/15 text-rose-300 border-rose-500/30' : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'}`}>{status}</span>;
+};
 
 const ActionButton = ({ title, onClick, icon }: { title: string; onClick: () => void; icon: React.ReactNode }) => (
-  <button onClick={onClick} title={title} className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition">{icon}</button>
+  <button onClick={onClick} title={title} className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition cursor-pointer">{icon}</button>
 );
 
 const Modal = ({ title, onClose, children, wide = false }: { title: string; onClose: () => void; children: React.ReactNode; wide?: boolean }) => (
@@ -427,7 +548,7 @@ const Modal = ({ title, onClose, children, wide = false }: { title: string; onCl
     <div className={`bg-slate-900 border border-slate-800 rounded-2xl w-full p-6 space-y-4 shadow-2xl max-h-[85vh] overflow-y-auto ${wide ? 'max-w-2xl' : 'max-w-md'}`}>
       <div className="flex items-center justify-between border-b border-slate-800 pb-3">
         <h3 className="text-base font-bold text-white">{title}</h3>
-        <button onClick={onClose} className="text-slate-500 hover:text-white">✕</button>
+        <button onClick={onClose} className="text-slate-500 hover:text-white cursor-pointer">✕</button>
       </div>
       {children}
     </div>

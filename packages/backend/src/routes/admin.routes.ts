@@ -7,6 +7,7 @@ import { requireSystemAdmin } from '../middleware/rbac';
 import { rbacService, SystemPermission } from '../services/rbac.service';
 import { supportConsoleService } from '../services/support.service';
 import { accountStatusService } from '../services/account-status.service';
+import { authService } from '../services/auth.service';
 
 export const adminRouter = Router();
 
@@ -155,6 +156,7 @@ adminRouter.get(
         name: u.name,
         systemRole: u.systemRole,
         status: u.status,
+        activatedAt: u.activatedAt,
         disabledAt: u.disabledAt,
         disabledReason: u.disabledReason,
         disabledByUserId: u.disabledByUserId,
@@ -179,6 +181,50 @@ adminRouter.get(
       res.json({ parents: sanitizedUsers, total: sanitizedUsers.length });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+// POST /api/admin/parents - Create new parent account (pending email activation)
+adminRouter.post(
+  '/parents',
+  authMiddleware,
+  requireVerifiedEmail,
+  requireSystemAdmin(SystemPermission.SYSTEM_PARENTS_MANAGE),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { name, email } = req.body;
+      if (!name || !email) {
+        return res.status(400).json({ error: 'Name and email are required.' });
+      }
+
+      const result = await authService.adminCreateParent(req.userId!, name, email, req.ip);
+      res.status(201).json({
+        success: true,
+        message: `Parent account created for ${result.user.email}. Activation email sent.`,
+        user: result.user,
+        activationToken: result.activationToken,
+      });
+    } catch (e: any) {
+      const status = e.message?.includes('already exists') ? 409 : 400;
+      res.status(status).json({ error: e.message });
+    }
+  }
+);
+
+// POST /api/admin/parents/:id/resend-activation - Resend activation email for parent
+adminRouter.post(
+  '/parents/:id/resend-activation',
+  authMiddleware,
+  requireVerifiedEmail,
+  requireSystemAdmin(SystemPermission.SYSTEM_PARENTS_MANAGE),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const result = await authService.adminResendActivation(req.userId!, req.params.id, req.ip);
+      res.json(result);
+    } catch (e: any) {
+      const status = e.message?.includes('not found') ? 404 : 400;
+      res.status(status).json({ error: e.message });
     }
   }
 );
@@ -215,6 +261,7 @@ adminRouter.get(
         name: user.name,
         systemRole: user.systemRole,
         status: user.status,
+        activatedAt: user.activatedAt,
         disabledAt: user.disabledAt,
         disabledReason: user.disabledReason,
         disabledByUserId: user.disabledByUserId,
@@ -249,7 +296,15 @@ adminRouter.post(
       const user = await prisma.user.findUnique({ where: { id: req.params.id } });
       if (!user) return res.status(404).json({ error: 'Parent user not found.' });
 
-      const updated = await prisma.user.update({ where: { id: req.params.id }, data: { emailVerified: true } });
+      const now = new Date();
+      const updated = await prisma.user.update({
+        where: { id: req.params.id },
+        data: {
+          emailVerified: true,
+          status: user.status === 'PENDING_ACTIVATION' ? 'ACTIVE' : user.status,
+          activatedAt: user.activatedAt || (user.status === 'PENDING_ACTIVATION' ? now : undefined),
+        },
+      });
       await rbacService.logSystemAudit(
         req.userId!,
         'ADMIN_VERIFY_PARENT_EMAIL',

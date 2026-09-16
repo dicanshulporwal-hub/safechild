@@ -15,7 +15,7 @@ export async function bootstrap(
   server: http.Server,
   options: BootstrapOptions = {}
 ): Promise<http.Server> {
-  const port = options.port || process.env.PORT || 1002;
+  const port = options.port !== undefined ? options.port : (process.env.PORT !== undefined ? process.env.PORT : 1002);
   const isProduction = process.env.NODE_ENV === 'production';
 
   // 1. Validate Environment Variables

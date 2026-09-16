@@ -93,7 +93,7 @@ describe('SafeBrowse Stage 11 Step 4: Windows Device Policy Authentication & Syn
     parentEmail = `parent-devauth-${nanoid(6).toLowerCase()}@safebrowse.io`;
     const reg = await authService.register(parentEmail, testPassword, 'Device Auth Parent');
     parentUserId = reg.user.id;
-    await authService.verifyEmail(reg.emailVerificationToken);
+    await authService.activateAccount(reg.activationToken!);
     const login = await authService.login(parentEmail, testPassword);
     parentToken = login.token!;
 
@@ -111,7 +111,7 @@ describe('SafeBrowse Stage 11 Step 4: Windows Device Policy Authentication & Syn
     // Create a second child and device in another family for tenancy/cross-fetch isolation testing
     const otherParentEmail = `other-parent-${nanoid(6).toLowerCase()}@safebrowse.io`;
     const otherReg = await authService.register(otherParentEmail, testPassword, 'Other Parent');
-    await authService.verifyEmail(otherReg.emailVerificationToken);
+    await authService.activateAccount(otherReg.activationToken!);
     const otherFamily = await familyService.getOrCreateUserFamily(otherReg.user.id);
     const otherChildRes = await childService.createChild(otherReg.user.id, 'Other Child', 14, undefined, otherFamily.id);
     otherChildId = otherChildRes.child.id;

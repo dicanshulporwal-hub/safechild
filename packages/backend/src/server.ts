@@ -21,7 +21,7 @@ import { requireVerifiedEmail } from './middleware/requireVerifiedEmail';
 import { bootstrap } from './bootstrap';
 
 const app = express();
-const port = process.env.PORT || 1002;
+const port = process.env.PORT !== undefined ? process.env.PORT : 1002;
 
 app.use(cors({ origin: '*' }));
 app.use(express.json());
