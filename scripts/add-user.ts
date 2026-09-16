@@ -50,6 +50,94 @@ async function main() {
         systemRole,
       },
     });
+
+    if (systemRole === 'USER' && existing.memberships.length > 0) {
+      const familyId = existing.memberships[0].familyId;
+      let children = await prisma.child.findMany({ where: { familyId } });
+      if (children.length === 0) {
+        const child1Id = `child-${nanoid(10)}`;
+        const c1 = await prisma.child.create({
+          data: {
+            id: child1Id,
+            parentId: existing.id,
+            familyId,
+            name: 'Alex Miller',
+            age: 12,
+            avatar: '👦',
+          },
+        });
+        await prisma.policy.create({
+          data: {
+            id: `pol-${nanoid(10)}`,
+            childId: child1Id,
+            familyId,
+            version: 1,
+            isPaused: false,
+            blockedCategories: ['ADULT_CONTENT', 'GAMBLING', 'MALWARE_SECURITY'],
+            safeSearch: {
+              googleSafeSearch: true,
+              bingSafeSearch: true,
+              duckDuckGoSafeSearch: true,
+              youtubeRestrictedMode: 'STRICT',
+            },
+          },
+        });
+
+        const child2Id = `child-${nanoid(10)}`;
+        const c2 = await prisma.child.create({
+          data: {
+            id: child2Id,
+            parentId: existing.id,
+            familyId,
+            name: 'Maya Miller',
+            age: 9,
+            avatar: '👧',
+          },
+        });
+        await prisma.policy.create({
+          data: {
+            id: `pol-${nanoid(10)}`,
+            childId: child2Id,
+            familyId,
+            version: 1,
+            isPaused: false,
+            blockedCategories: ['ADULT_CONTENT', 'GAMING', 'SOCIAL_MEDIA'],
+            safeSearch: {
+              googleSafeSearch: true,
+              bingSafeSearch: true,
+              duckDuckGoSafeSearch: true,
+              youtubeRestrictedMode: 'STRICT',
+            },
+          },
+        });
+        children = [c1, c2];
+        console.log(`   Sample children Alex & Maya created for family ${familyId}`);
+      }
+
+      // Ensure devices exist for children
+      for (const ch of children) {
+        const devCount = await prisma.device.count({ where: { childId: ch.id } });
+        if (devCount === 0) {
+          const isAlex = ch.name.includes('Alex');
+          await prisma.device.create({
+            data: {
+              id: `dev-${nanoid(10)}`,
+              familyId,
+              childId: ch.id,
+              parentId: existing.id,
+              name: isAlex ? 'Alex Windows PC' : 'Maya Galaxy Tab',
+              platform: isAlex ? 'windows' : 'android',
+              agentVersion: '1.1.0',
+              healthStatus: 'healthy',
+              healthState: 'PROTECTED',
+              ipAddress: isAlex ? '192.168.1.145' : '192.168.1.182',
+            },
+          });
+          console.log(`   Device paired for ${ch.name}`);
+        }
+      }
+    }
+
     console.log(`\n✅ Updated existing user:`);
     console.log(`   Email: ${normalizedEmail}`);
     console.log(`   Password: ${password}`);
@@ -95,6 +183,63 @@ async function main() {
         role: 'OWNER',
       },
     });
+
+    if (systemRole === 'USER') {
+      const child1Id = `child-${nanoid(10)}`;
+      await tx.child.create({
+        data: {
+          id: child1Id,
+          parentId: userId,
+          familyId,
+          name: 'Alex Miller',
+          age: 12,
+          avatar: '👦',
+        },
+      });
+
+      await tx.policy.create({
+        data: {
+          id: `pol-${nanoid(10)}`,
+          childId: child1Id,
+          familyId,
+          version: 1,
+          isPaused: false,
+          rules: {
+            create: [
+              { id: `rule-${nanoid(8)}`, domain: 'tiktok.com', action: 'BLOCK', reason: 'Social media control' },
+              { id: `rule-${nanoid(8)}`, domain: 'khanacademy.org', action: 'ALLOW', reason: 'Study platform' },
+            ],
+          },
+        },
+      });
+
+      const child2Id = `child-${nanoid(10)}`;
+      await tx.child.create({
+        data: {
+          id: child2Id,
+          parentId: userId,
+          familyId,
+          name: 'Maya Miller',
+          age: 9,
+          avatar: '👧',
+        },
+      });
+
+      await tx.policy.create({
+        data: {
+          id: `pol-${nanoid(10)}`,
+          childId: child2Id,
+          familyId,
+          version: 1,
+          isPaused: false,
+          rules: {
+            create: [
+              { id: `rule-${nanoid(8)}`, domain: 'youtube.com', action: 'BLOCK', reason: 'Video streaming' },
+            ],
+          },
+        },
+      });
+    }
   });
 
   console.log(`\n🎉 User successfully created and verified in PostgreSQL:`);

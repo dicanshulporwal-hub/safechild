@@ -8,6 +8,7 @@ import {
 } from '@safebrowse/shared';
 import { nanoid } from 'nanoid';
 import { wsManager } from './websocket.service';
+import { pushService } from './push.service';
 import { rbacService } from './rbac.service';
 
 export interface ExtendedAccessRequest extends AccessRequest {
@@ -71,6 +72,19 @@ export class RequestService {
       parentId: child.parentId,
       childId,
     });
+
+    // Send Web Push notification to family parents
+    pushService.sendPushToFamily(child.familyId, {
+      title: 'Website Access Request',
+      body: `${child.name} requested permission to visit ${normDomain}${reason ? ` (${reason})` : ''}`,
+      tag: `req-${created.id}`,
+      data: {
+        requestId: created.id,
+        childId,
+        domain: normDomain,
+        url: `/requests?id=${created.id}`,
+      },
+    }).catch(() => {});
 
     return request;
   }

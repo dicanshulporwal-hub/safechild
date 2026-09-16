@@ -4,7 +4,7 @@ export interface OutboxMailRecord {
   subject: string;
   body: string;
   token?: string;
-  status: 'DEVELOPMENT_CAPTURED' | 'MOCK_DELIVERED';
+  status: 'DEVELOPMENT_CAPTURED' | 'MOCK_DELIVERED' | 'SENT_SMTP' | 'SENT_RESEND';
   createdAt: string;
 }
 
@@ -35,13 +35,13 @@ export class DevelopmentMailAdapter implements IMailService {
   private outbox: OutboxMailRecord[] = [];
 
   public validateConfiguration(): void {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('SECURITY ERROR: DevelopmentMailAdapter is not allowed in production mode.');
+    if (process.env.NODE_ENV === 'production' && !process.env.SMTP_HOST && !process.env.RESEND_API_KEY) {
+      throw new Error('SECURITY ERROR: DevelopmentMailAdapter is not allowed in production mode without explicit email provider credentials.');
     }
   }
 
   public async sendVerificationEmail(email: string, token: string): Promise<void> {
-    const appUrl = process.env.APP_URL || 'https://parent.safebrowse.io';
+    const appUrl = process.env.APP_URL || 'http://localhost:1001';
     const cleanAppUrl = appUrl.endsWith('/') ? appUrl.slice(0, -1) : appUrl;
     const link = `${cleanAppUrl}/verify-email?token=${encodeURIComponent(token)}`;
 
@@ -57,12 +57,12 @@ export class DevelopmentMailAdapter implements IMailService {
     this.outbox.push(record);
 
     if (process.env.NODE_ENV !== 'test') {
-      console.log(`[DevOutbox] 📥 [DEVELOPMENT_CAPTURED] Verification email captured for ${email} (Redacted link: ${cleanAppUrl}/verify-email?token=${token.substring(0, 8)}...)`);
+      console.log(`[DevOutbox] 📥 [DEVELOPMENT_CAPTURED] Verification email captured for ${email} (Link: ${cleanAppUrl}/verify-email?token=${token.substring(0, 8)}...)`);
     }
   }
 
   public async sendPasswordResetEmail(email: string, token: string): Promise<void> {
-    const appUrl = process.env.APP_URL || 'https://parent.safebrowse.io';
+    const appUrl = process.env.APP_URL || 'http://localhost:1001';
     const cleanAppUrl = appUrl.endsWith('/') ? appUrl.slice(0, -1) : appUrl;
     const link = `${cleanAppUrl}/reset-password?token=${encodeURIComponent(token)}`;
 
@@ -78,7 +78,7 @@ export class DevelopmentMailAdapter implements IMailService {
     this.outbox.push(record);
 
     if (process.env.NODE_ENV !== 'test') {
-      console.log(`[DevOutbox] 📥 [DEVELOPMENT_CAPTURED] Password reset email captured for ${email} (Redacted link: ${cleanAppUrl}/reset-password?token=${token.substring(0, 8)}...)`);
+      console.log(`[DevOutbox] 📥 [DEVELOPMENT_CAPTURED] Password reset email captured for ${email} (Link: ${cleanAppUrl}/reset-password?token=${token.substring(0, 8)}...)`);
     }
   }
 
@@ -108,17 +108,97 @@ export class DevelopmentMailAdapter implements IMailService {
 }
 
 /**
+ * Resend API Transactional Mail Adapter.
+ */
+export class ResendMailAdapter implements IMailService {
+  private apiKey: string;
+  private fromEmail: string;
+
+  constructor(apiKey: string, fromEmail: string = 'SafeBrowse <no-reply@safebrowse.io>') {
+    this.apiKey = apiKey;
+    this.fromEmail = fromEmail;
+  }
+
+  public validateConfiguration(): void {
+    if (!this.apiKey || !this.apiKey.startsWith('re_')) {
+      throw new Error('Invalid Resend API Key. Key must begin with "re_".');
+    }
+  }
+
+  private async sendMail(to: string, subject: string, htmlBody: string): Promise<void> {
+    try {
+      const response = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: this.fromEmail,
+          to: [to],
+          subject,
+          html: htmlBody,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Resend HTTP ${response.status}: ${errorText}`);
+      }
+    } catch (e: any) {
+      throw new MailDeliveryError(`Failed to deliver email via Resend: ${e.message}`, 'RESEND_DELIVERY_FAILED');
+    }
+  }
+
+  public async sendVerificationEmail(email: string, token: string): Promise<void> {
+    const appUrl = process.env.APP_URL || 'https://parent.safebrowse.io';
+    const cleanAppUrl = appUrl.endsWith('/') ? appUrl.slice(0, -1) : appUrl;
+    const link = `${cleanAppUrl}/verify-email?token=${encodeURIComponent(token)}`;
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
+        <h2>Verify your SafeBrowse Parent Account</h2>
+        <p>Click the button below to verify your email address:</p>
+        <p><a href="${link}" style="background:#2563eb;color:#fff;padding:12px 24px;text-decoration:none;border-radius:8px;font-weight:bold;display:inline-block;">Verify Email</a></p>
+      </div>
+    `;
+    await this.sendMail(email, 'Verify your SafeBrowse Parent Account', html);
+  }
+
+  public async sendPasswordResetEmail(email: string, token: string): Promise<void> {
+    const appUrl = process.env.APP_URL || 'https://parent.safebrowse.io';
+    const cleanAppUrl = appUrl.endsWith('/') ? appUrl.slice(0, -1) : appUrl;
+    const link = `${cleanAppUrl}/reset-password?token=${encodeURIComponent(token)}`;
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
+        <h2>Reset your SafeBrowse Password</h2>
+        <p>Click the button below to reset your password:</p>
+        <p><a href="${link}" style="background:#dc2626;color:#fff;padding:12px 24px;text-decoration:none;border-radius:8px;font-weight:bold;display:inline-block;">Reset Password</a></p>
+      </div>
+    `;
+    await this.sendMail(email, 'Reset your SafeBrowse Password', html);
+  }
+
+  public async sendSecurityAlert(email: string, subject: string, message: string): Promise<void> {
+    const html = `<div style="font-family: Arial, sans-serif; max-width: 600px; padding: 20px;"><h2 style="color:#dc2626;">[Security Alert] ${subject}</h2><p>${message}</p></div>`;
+    await this.sendMail(email, `[Security Alert] ${subject}`, html);
+  }
+
+  public getOutbox(): OutboxMailRecord[] {
+    return [];
+  }
+
+  public clearOutbox(): void {}
+}
+
+/**
  * Mock Mail Adapter for unit and integration testing.
- * Provides deterministic behavior and configurable simulated failures.
  */
 export class MockMailAdapter implements IMailService {
   private outbox: OutboxMailRecord[] = [];
   private shouldFail: boolean = false;
   private failureErrorMessage: string = 'Simulated mail gateway failure';
 
-  public validateConfiguration(): void {
-    // Tests are always valid
-  }
+  public validateConfiguration(): void {}
 
   public setShouldFail(fail: boolean, errorMessage?: string) {
     this.shouldFail = fail;
@@ -183,15 +263,12 @@ export class MockMailAdapter implements IMailService {
 }
 
 /**
- * Production Mail Adapter Placeholder.
- * In this step, external mail provider integration is intentionally deferred.
- * Application startup in production mode MUST fail with PRODUCTION_MAIL_PROVIDER_NOT_CONFIGURED.
- * It will never report false delivery or fall back to development/mock modes in production.
+ * Production Mail Adapter Placeholder when no credentials are provided.
  */
 export class ProductionMailAdapter implements IMailService {
   public validateConfiguration(): void {
     throw new Error(
-      'PRODUCTION_MAIL_PROVIDER_NOT_CONFIGURED: Production transactional mail provider (e.g. AWS SES, SendGrid, or verified TLS SMTP) has not been configured. Real email delivery is deferred. Application startup aborted for safety.'
+      'PRODUCTION_MAIL_PROVIDER_NOT_CONFIGURED: Production transactional mail provider (e.g. RESEND_API_KEY or SMTP_HOST) has not been configured. Real email delivery is deferred. Application startup aborted for safety.'
     );
   }
 
@@ -224,6 +301,9 @@ export class ProductionMailAdapter implements IMailService {
 }
 
 export function createMailService(): IMailService {
+  if (process.env.RESEND_API_KEY) {
+    return new ResendMailAdapter(process.env.RESEND_API_KEY, process.env.MAIL_FROM);
+  }
   if (process.env.NODE_ENV === 'production') {
     return new ProductionMailAdapter();
   }

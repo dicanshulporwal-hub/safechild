@@ -145,14 +145,30 @@ policyRouter.post(
       if (!access) return;
 
       const { categoryControls } = req.body;
-      const updated = await prisma.policy.update({
-        where: { childId: req.params.childId },
-        data: {
-          blockedCategories: Array.isArray(categoryControls) ? categoryControls : [],
-          version: { increment: 1 },
-        },
-      });
+      const updated = await policyService.updateCategoryControls(
+        req.params.childId,
+        Array.isArray(categoryControls) ? categoryControls : []
+      );
 
+      res.json(updated);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  }
+);
+
+// Update SafeSearch & YouTube Restricted Mode (Parent auth required + POLICY_MANAGE permission)
+policyRouter.post(
+  '/child/:childId/safesearch',
+  authMiddleware,
+  requireVerifiedEmail,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const access = await checkPolicyAccess(req, res, req.params.childId, FamilyPermission.POLICY_MANAGE);
+      if (!access) return;
+
+      const { safeSearch } = req.body;
+      const updated = await policyService.updateSafeSearch(req.params.childId, safeSearch);
       res.json(updated);
     } catch (e: any) {
       res.status(400).json({ error: e.message });
@@ -171,7 +187,7 @@ policyRouter.post(
       if (!access) return;
 
       const { active } = req.body;
-      const updated = await prisma.policy.update({
+      await prisma.policy.update({
         where: { childId: req.params.childId },
         data: {
           studyMode: Boolean(active),
@@ -179,6 +195,7 @@ policyRouter.post(
         },
       });
 
+      const updated = await policyService.getPolicyForChild(req.params.childId);
       res.json(updated);
     } catch (e: any) {
       res.status(400).json({ error: e.message });
@@ -186,7 +203,7 @@ policyRouter.post(
   }
 );
 
-// Update Bedtime Schedule (Parent auth required + POLICY_MANAGE permission)
+// Update Bedtime / Routines (Parent auth required + POLICY_MANAGE permission)
 policyRouter.post(
   '/child/:childId/bedtime',
   authMiddleware,
@@ -197,15 +214,35 @@ policyRouter.post(
       if (!access) return;
 
       const { bedtime } = req.body;
-      const updated = await prisma.policy.update({
-        where: { childId: req.params.childId },
-        data: {
-          routines: bedtime as any,
-          version: { increment: 1 },
-        },
+      const updated = await policyService.updateRoutines(req.params.childId, bedtime);
+      res.json(updated);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  }
+);
+
+// Global 1-Tap Family Dinner Time / Pause (All Children Paused)
+policyRouter.post(
+  '/family/pause-all',
+  authMiddleware,
+  requireVerifiedEmail,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: req.userId },
+        include: { memberships: true },
       });
 
-      res.json(updated);
+      if (!user || user.memberships.length === 0) {
+        return res.status(404).json({ error: 'Family not found.' });
+      }
+
+      const familyId = user.memberships[0].familyId;
+      const { isPaused } = req.body;
+
+      const children = await policyService.setFamilyInternetPause(familyId, isPaused !== false);
+      res.json({ message: isPaused !== false ? 'All family devices paused.' : 'All family devices unpaused.', children });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }

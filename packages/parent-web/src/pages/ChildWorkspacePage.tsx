@@ -14,12 +14,16 @@ import {
   Trash2,
   Clock,
   Search,
+  Brain,
 } from 'lucide-react';
 import { PolicySimulator } from '../components/PolicySimulator';
 import { ProtectionTimeline } from '../components/ProtectionTimeline';
 import { CategoryManager } from '../components/CategoryManager';
 import { RoutinesCard } from '../components/RoutinesCard';
 import { PairDeviceModal } from '../components/PairDeviceModal';
+import { WeeklySafetyDigestModal } from '../components/WeeklySafetyDigestModal';
+import { ScreenTimeRewards } from '../components/ScreenTimeRewards';
+import { AiSafetyWatchdog } from '../components/AiSafetyWatchdog';
 
 export const ChildWorkspacePage: React.FC<{ childrenList: Child[] }> = ({ childrenList }) => {
   const { childId } = useParams();
@@ -43,6 +47,7 @@ export const ChildWorkspacePage: React.FC<{ childrenList: Child[] }> = ({ childr
 
   // Pair modal
   const [showPairModal, setShowPairModal] = useState(false);
+  const [showDigestModal, setShowDigestModal] = useState(false);
 
   // Inline Rule Composer
   const [ruleDomain, setRuleDomain] = useState('');
@@ -271,6 +276,7 @@ export const ChildWorkspacePage: React.FC<{ childrenList: Child[] }> = ({ childr
 
   const tabs = [
     { id: 'overview', label: 'Overview', icon: ShieldCheck },
+    { id: 'watchdog', label: 'AI Safety Watchdog', icon: Brain },
     { id: 'devices', label: `Devices (${devices.length})`, icon: Smartphone },
     { id: 'protection', label: 'Web Protection', icon: Globe },
     { id: 'screentime', label: 'Screen Time', icon: Clock },
@@ -282,63 +288,79 @@ export const ChildWorkspacePage: React.FC<{ childrenList: Child[] }> = ({ childr
   return (
     <div className="space-y-6 animate-fadeIn">
       {/* Workspace Top Banner */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div className="flex items-center gap-4">
-          <div className="w-14 h-14 rounded-2xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-3xl shadow-inner">
+      <div className="bg-slate-900/90 border border-slate-800/90 rounded-3xl p-6 sm:p-8 shadow-2xl backdrop-blur-xl relative overflow-hidden flex flex-col md:flex-row md:items-center justify-between gap-6">
+        <div className="absolute top-0 right-0 w-96 h-full bg-gradient-to-l from-emerald-500/5 via-teal-500/5 to-transparent pointer-events-none" />
+
+        <div className="flex items-center gap-5 z-10">
+          <div className="w-16 h-16 rounded-3xl bg-gradient-to-tr from-emerald-500/20 to-teal-500/20 border border-emerald-500/30 flex items-center justify-center text-3xl shadow-inner ring-4 ring-emerald-500/10">
             {child.avatar || '🧑'}
           </div>
-          <div>
+          <div className="space-y-1">
             <div className="flex items-center gap-3">
-              <h1 className="text-2xl font-extrabold text-white tracking-tight">{child.name}</h1>
-              {child.age && <span className="text-xs text-slate-400 font-semibold">{child.age} yrs</span>}
-              <span className="text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2.5 py-0.5 rounded-full font-bold">
-                🟢 PROTECTED
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">{child.name}</h1>
+              {child.age && (
+                <span className="text-xs text-slate-400 font-bold bg-slate-800/80 px-2.5 py-0.5 rounded-full border border-slate-700/60">
+                  {child.age} yrs
+                </span>
+              )}
+              <span className="inline-flex items-center gap-1.5 text-xs bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 px-3 py-1 rounded-full font-extrabold shadow-sm">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span>PROTECTED</span>
               </span>
             </div>
-            <p className="text-xs text-slate-400 mt-0.5">
-              {devices.length} Paired Device{devices.length === 1 ? '' : 's'} • Policy v{policy?.version || 1}
+            <p className="text-xs text-slate-400 flex items-center gap-2 font-medium">
+              <span>{devices.length} Connected Device{devices.length === 1 ? '' : 's'}</span>
+              <span>•</span>
+              <span className="font-mono text-slate-300">Policy v{policy?.version || 1} Active</span>
             </p>
           </div>
         </div>
 
         {/* Action Controls */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2.5 z-10 flex-wrap">
+          <button
+            onClick={() => setShowDigestModal(true)}
+            className="px-4 py-2.5 bg-gradient-to-r from-cyan-500/20 via-blue-500/20 to-indigo-500/20 hover:from-cyan-500/30 hover:to-indigo-500/30 text-cyan-300 border border-cyan-500/30 hover:border-cyan-500/50 rounded-2xl text-xs font-bold transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
+          >
+            <span>📊 Weekly Digest</span>
+          </button>
+
           <button
             onClick={handleTogglePause}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
+            className={`px-4 py-2.5 rounded-2xl text-xs font-extrabold transition-all flex items-center gap-2 cursor-pointer shadow-md ${
               policy?.isPaused
                 ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 hover:bg-rose-500/30'
-                : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700'
+                : 'bg-slate-800/90 text-slate-200 hover:bg-slate-700 hover:text-white border border-slate-700/80'
             }`}
           >
-            <span>{policy?.isPaused ? '⏸️ Paused' : '⏸️ Pause Net'}</span>
+            <span>{policy?.isPaused ? '⏸️ Internet Paused' : '⏸️ Pause Net'}</span>
           </button>
 
           <button
             onClick={() => setShowPairModal(true)}
-            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition shadow-md shadow-emerald-600/20 flex items-center gap-1.5"
+            className="px-4 py-2.5 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-extrabold rounded-2xl text-xs transition-all shadow-lg shadow-emerald-500/20 flex items-center gap-1.5 cursor-pointer"
           >
-            <Plus className="w-3.5 h-3.5" />
+            <Plus className="w-4 h-4 stroke-[2.5]" />
             <span>Pair Device</span>
           </button>
         </div>
       </div>
 
-      {/* Tabs Navigation */}
-      <div className="flex items-center gap-2 border-b border-slate-800 overflow-x-auto pb-px">
+      {/* Segmented Luxury Tabs Navigation */}
+      <div className="flex items-center gap-1.5 p-1.5 bg-slate-900/60 border border-slate-800/80 rounded-2xl overflow-x-auto shadow-inner">
         {tabs.map((t) => {
           const isSelected = activeTab === t.id;
           return (
             <button
               key={t.id}
               onClick={() => setSearchParams({ tab: t.id })}
-              className={`flex items-center gap-2 px-4 py-2.5 border-b-2 text-xs font-bold whitespace-nowrap transition ${
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-all duration-200 ${
                 isSelected
-                  ? 'border-emerald-500 text-emerald-400 bg-emerald-500/5'
-                  : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                  ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-slate-950 shadow-md shadow-emerald-500/20 scale-[1.01]'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
               }`}
             >
-              <t.icon className="w-4 h-4" />
+              <t.icon className={`w-4 h-4 ${isSelected ? 'stroke-[2.5]' : ''}`} />
               <span>{t.label}</span>
             </button>
           );
@@ -415,11 +437,55 @@ export const ChildWorkspacePage: React.FC<{ childrenList: Child[] }> = ({ childr
                 )}
               </div>
             </div>
+
+            {/* Anti-Tamper & Security Integrity Card */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                  <h3 className="text-sm font-bold text-white uppercase tracking-wider">Security & Tamper Guard</h3>
+                </div>
+                <span className="text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full font-bold">
+                  ACTIVE
+                </span>
+              </div>
+
+              <div className="space-y-2.5 text-xs">
+                <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 flex items-center justify-between">
+                  <div>
+                    <div className="font-bold text-white">DNS Loopback Lock</div>
+                    <div className="text-[10px] text-slate-400">Enforcing 127.0.0.1 on all adapters</div>
+                  </div>
+                  <span className="text-emerald-400 font-bold font-mono text-[11px]">LOCKED</span>
+                </div>
+
+                <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 flex items-center justify-between">
+                  <div>
+                    <div className="font-bold text-white">Service Kill Prevention</div>
+                    <div className="text-[10px] text-slate-400">Non-admin service termination denied</div>
+                  </div>
+                  <span className="text-emerald-400 font-bold font-mono text-[11px]">PROTECTED</span>
+                </div>
+
+                <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 flex items-center justify-between">
+                  <div>
+                    <div className="font-bold text-white">Browser DoH Trap</div>
+                    <div className="text-[10px] text-slate-400">Chrome/Edge DoH bypassed to local filter</div>
+                  </div>
+                  <span className="text-emerald-400 font-bold font-mono text-[11px]">ACTIVE</span>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}
 
-      {/* 2. DEVICES TAB */}
+      {/* 2. AI SAFETY WATCHDOG TAB */}
+      {activeTab === 'watchdog' && (
+        <AiSafetyWatchdog childId={child.id} childName={child.name} />
+      )}
+
+      {/* 3. DEVICES TAB */}
       {activeTab === 'devices' && (
         <div className="space-y-6">
           <div className="flex items-center justify-between">
@@ -664,6 +730,9 @@ export const ChildWorkspacePage: React.FC<{ childrenList: Child[] }> = ({ childr
       {/* 4. SCREEN TIME TAB */}
       {activeTab === 'screentime' && (
         <div className="space-y-6">
+          {/* Quests & Positive Habit Rewards */}
+          <ScreenTimeRewards childId={child.id} childName={child.name} />
+
           {/* Add Daily Limit Form */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
             <h2 className="text-sm font-bold text-white uppercase tracking-wider">Add Screen Time Quota</h2>
@@ -854,6 +923,15 @@ export const ChildWorkspacePage: React.FC<{ childrenList: Child[] }> = ({ childr
             setShowPairModal(false);
             fetchChildData(child.id);
           }}
+        />
+      )}
+
+      {/* Weekly Safety Digest Modal */}
+      {showDigestModal && (
+        <WeeklySafetyDigestModal
+          childId={child.id}
+          childName={child.name}
+          onClose={() => setShowDigestModal(false)}
         />
       )}
     </div>

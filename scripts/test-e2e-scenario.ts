@@ -1,4 +1,5 @@
 import { authService } from '../packages/backend/dist/src/services/auth.service';
+import { familyService } from '../packages/backend/dist/src/services/family.service';
 import { childService } from '../packages/backend/dist/src/services/child.service';
 import { deviceService } from '../packages/backend/dist/src/services/device.service';
 import { policyService } from '../packages/backend/dist/src/services/policy.service';
@@ -10,18 +11,21 @@ async function runE2EAcceptanceScenario() {
   console.log('🧪 Running SafeBrowse Section 22 End-to-End MVP Acceptance Scenario');
   console.log('======================================================================\n');
 
+  const uniqueEmail = `e2e_parent_${Date.now()}@porwal.io`;
+
   // Step 1: Parent registers and creates Rahul profile
   console.log('[Step 1] Parent signs in and retrieves Rahul profile...');
-  const reg = authService.register('e2e_parent@porwal.io', 'StrongPassphrase2026!E2E', 'Sarah (Parent)');
-  authService.verifyEmail(reg.emailVerificationToken);
-  const { child: rahul } = childService.createChild(reg.user.id, 'Rahul', 10, '🧒');
+  const reg = await authService.register(uniqueEmail, 'StrongPassphrase2026!E2E', 'Sarah (Parent)');
+  await authService.verifyEmail(reg.emailVerificationToken);
   const parent = reg.user;
+  const family = await familyService.getOrCreateUserFamily(parent.id);
+  const { child: rahul } = await childService.createChild(parent.id, 'Rahul', 10, '🧒', family.id);
   console.log(`✅ Parent: ${parent.name} | Child: ${rahul.name} (${rahul.id})\n`);
 
   // Step 2: Pairs Rahul's Phone
   console.log("[Step 2] Generating pairing code and pairing Rahul's Android Phone...");
-  const phonePairCode = deviceService.generatePairingCode(parent.id, rahul.id);
-  const { device: phone } = deviceService.pairDevice(
+  const phonePairCode = await deviceService.generatePairingCode(parent.id, rahul.id);
+  const { device: phone } = await deviceService.pairDevice(
     phonePairCode.code,
     "Rahul's Samsung Phone",
     'android',
@@ -31,8 +35,8 @@ async function runE2EAcceptanceScenario() {
 
   // Step 3: Pairs Rahul's Laptop
   console.log("[Step 3] Generating pairing code and pairing Rahul's Windows Laptop...");
-  const laptopPairCode = deviceService.generatePairingCode(parent.id, rahul.id);
-  const { device: laptop } = deviceService.pairDevice(
+  const laptopPairCode = await deviceService.generatePairingCode(parent.id, rahul.id);
+  const { device: laptop } = await deviceService.pairDevice(
     laptopPairCode.code,
     "Rahul's Windows Laptop",
     'windows',
@@ -42,7 +46,7 @@ async function runE2EAcceptanceScenario() {
 
   // Step 4: Blocks youtube.com
   console.log('[Step 4] Parent adds BLOCK rule for "youtube.com"...');
-  const policyV2 = policyService.addRule(rahul.id, 'youtube.com', 'BLOCK', 'Distracting entertainment');
+  const policyV2 = await policyService.addRule(rahul.id, 'youtube.com', 'BLOCK', 'Distracting entertainment');
   console.log(`✅ Policy updated to Version v${policyV2.version}\n`);
 
   // Step 5: Both devices synchronize and test policy
@@ -60,7 +64,7 @@ async function runE2EAcceptanceScenario() {
 
   // Step 6: Rahul selects "Ask Parent"
   console.log('[Step 6] Rahul sends "Ask Parent" request from phone for "youtube.com"...');
-  const request = requestService.createRequest(
+  const request = await requestService.createRequest(
     rahul.id,
     phone.id,
     'youtube.com',
@@ -70,7 +74,7 @@ async function runE2EAcceptanceScenario() {
 
   // Step 7: Parent receives request and approves for 15 minutes
   console.log('[Step 7] Parent approves access for 15 minutes...');
-  const { request: approvedReq, policy: policyV3 } = requestService.resolveRequest(
+  const { request: approvedReq, policy: policyV3 } = await requestService.resolveRequest(
     request.id,
     parent.id,
     'APPROVE',

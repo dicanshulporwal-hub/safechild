@@ -98,6 +98,10 @@ class ApiClient {
   private userEmail: string = '';
   private userRole: string = '';
 
+  // Green Code: In-flight deduplication & TTL Cache
+  private requestCache = new Map<string, { data: any; expiresAt: number }>();
+  private inFlightRequests = new Map<string, Promise<any>>();
+
   constructor() {
     this.token = localStorage.getItem('sb_auth_token') || null;
     this.refreshToken = localStorage.getItem('sb_refresh_token') || null;
@@ -105,8 +109,52 @@ class ApiClient {
     this.userRole = localStorage.getItem('sb_user_role') || '';
   }
 
+  public invalidateCache(prefix?: string) {
+    if (!prefix) {
+      this.requestCache.clear();
+      return;
+    }
+    for (const key of this.requestCache.keys()) {
+      if (key.startsWith(prefix)) {
+        this.requestCache.delete(key);
+      }
+    }
+  }
+
+  public async cachedGet<T = any>(url: string, ttlMs: number = 6000, forceRefresh: boolean = false): Promise<T> {
+    const cacheKey = `${url}:${this.token || 'anon'}`;
+    const now = Date.now();
+
+    if (!forceRefresh) {
+      const cached = this.requestCache.get(cacheKey);
+      if (cached && cached.expiresAt > now) {
+        return cached.data as T;
+      }
+    }
+
+    if (this.inFlightRequests.has(cacheKey)) {
+      return this.inFlightRequests.get(cacheKey) as Promise<T>;
+    }
+
+    const requestPromise = (async () => {
+      try {
+        const res = await fetch(url, { headers: this.getHeaders() });
+        const data = await this.parseResponse(res);
+        if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+        this.requestCache.set(cacheKey, { data, expiresAt: Date.now() + ttlMs });
+        return data as T;
+      } finally {
+        this.inFlightRequests.delete(cacheKey);
+      }
+    })();
+
+    this.inFlightRequests.set(cacheKey, requestPromise);
+    return requestPromise;
+  }
+
   public setToken(token: string, refreshToken?: string, email?: string, role?: string) {
     this.token = token;
+    this.invalidateCache();
     localStorage.setItem('sb_auth_token', token);
     if (refreshToken) {
       this.refreshToken = refreshToken;
@@ -139,6 +187,7 @@ class ApiClient {
   }
 
   public logout() {
+    this.invalidateCache();
     if (this.token) {
       fetch(`${API_BASE}/auth/logout`, {
         method: 'POST',
@@ -266,105 +315,128 @@ class ApiClient {
   }
 
   // --- Children & Policies ---
-  async getChildren(): Promise<Child[]> {
-    const res = await fetch(`${API_BASE}/children`, { headers: this.getHeaders() });
-    if (!res.ok) throw new Error('Failed to load children');
-    return res.json();
+  async getChildren(forceRefresh: boolean = false): Promise<Child[]> {
+    return this.cachedGet<Child[]>(`${API_BASE}/children`, 8000, forceRefresh);
   }
 
   async createChild(name: string, age?: number, avatar?: string): Promise<{ child: Child; policy: Policy }> {
+    this.invalidateCache(`${API_BASE}/children`);
     const res = await fetch(`${API_BASE}/children`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ name, age, avatar }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to create child');
     return data;
   }
 
-  async getPolicy(childId: string): Promise<Policy> {
-    const res = await fetch(`${API_BASE}/policies/child/${childId}`, { headers: this.getHeaders() });
-    if (!res.ok) throw new Error('Failed to load policy');
-    return res.json();
+  async getPolicy(childId: string, forceRefresh: boolean = false): Promise<Policy> {
+    return this.cachedGet<Policy>(`${API_BASE}/policies/child/${childId}`, 8000, forceRefresh);
   }
 
   async addRule(childId: string, domain: string, action: 'BLOCK' | 'ALLOW', reason?: string): Promise<Policy> {
+    this.invalidateCache(`${API_BASE}/policies/child/${childId}`);
     const res = await fetch(`${API_BASE}/policies/child/${childId}/rules`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ domain, action, reason }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to add rule');
     return data;
   }
 
   async removeRule(childId: string, ruleId: string): Promise<Policy> {
+    this.invalidateCache(`${API_BASE}/policies/child/${childId}`);
     const res = await fetch(`${API_BASE}/policies/child/${childId}/rules/${ruleId}`, {
       method: 'DELETE',
       headers: this.getHeaders(),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to remove rule');
     return data;
   }
 
   async setPauseInternet(childId: string, isPaused: boolean, duration?: string): Promise<Policy> {
+    this.invalidateCache(`${API_BASE}/policies/child/${childId}`);
     const res = await fetch(`${API_BASE}/policies/child/${childId}/pause`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ isPaused, duration }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to update internet pause');
     return data;
   }
 
   async updateCategories(childId: string, categoryControls: CategoryControl[]): Promise<Policy> {
+    this.invalidateCache(`${API_BASE}/policies/child/${childId}`);
     const res = await fetch(`${API_BASE}/policies/child/${childId}/categories`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ categoryControls }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to update categories');
     return data;
   }
 
   async toggleStudyMode(childId: string, active: boolean): Promise<Policy> {
+    this.invalidateCache(`${API_BASE}/policies/child/${childId}`);
     const res = await fetch(`${API_BASE}/policies/child/${childId}/study-mode`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ active }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to toggle study mode');
     return data;
   }
 
   async toggleBedtime(childId: string, bedtime: any): Promise<Policy> {
+    this.invalidateCache(`${API_BASE}/policies/child/${childId}`);
     const res = await fetch(`${API_BASE}/policies/child/${childId}/bedtime`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ bedtime }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to toggle bedtime');
     return data;
   }
 
+  async updateSafeSearch(childId: string, safeSearch: any): Promise<Policy> {
+    this.invalidateCache(`${API_BASE}/policies/child/${childId}`);
+    const res = await fetch(`${API_BASE}/policies/child/${childId}/safesearch`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ safeSearch }),
+    });
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to update SafeSearch');
+    return data;
+  }
+
+  async pauseFamilyAll(isPaused: boolean = true): Promise<{ message: string; children: Child[] }> {
+    this.invalidateCache();
+    const res = await fetch(`${API_BASE}/policies/family/pause-all`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ isPaused }),
+    });
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to update family pause');
+    return data;
+  }
+
   // --- Devices & Health ---
-  async getDevices(childId: string): Promise<Device[]> {
-    const res = await fetch(`${API_BASE}/devices/child/${childId}`, { headers: this.getHeaders() });
-    if (!res.ok) throw new Error('Failed to load devices');
-    return res.json();
+  async getDevices(childId: string, forceRefresh: boolean = false): Promise<Device[]> {
+    return this.cachedGet<Device[]>(`${API_BASE}/devices/child/${childId}`, 8000, forceRefresh);
   }
 
   async getDeviceHealth(deviceId: string) {
-    const res = await fetch(`${API_BASE}/devices/${deviceId}/health`, { headers: this.getHeaders() });
-    if (!res.ok) throw new Error('Failed to fetch device health');
-    return res.json();
+    return this.cachedGet(`${API_BASE}/devices/${deviceId}/health`, 6000);
   }
 
   async createPairingCode(childId: string): Promise<{ code: string; expiresAt: string }> {
@@ -373,97 +445,125 @@ class ApiClient {
       headers: this.getHeaders(),
       body: JSON.stringify({ childId }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to create pairing code');
     return data;
   }
 
   async claimPairingCode(code: string, deviceName: string, platform: 'android' | 'windows') {
+    this.invalidateCache();
     const res = await fetch(`${API_BASE}/devices/claim`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code, deviceName, platform }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to claim pairing code');
     return data;
   }
 
   async removeDevice(deviceId: string) {
+    this.invalidateCache();
     const res = await fetch(`${API_BASE}/devices/${deviceId}`, {
       method: 'DELETE',
       headers: this.getHeaders(),
     });
-    return res.json();
+    return this.parseResponse(res);
+  }
+
+  // --- Notifications ---
+  async getNotifications(forceRefresh: boolean = false): Promise<any[]> {
+    return this.cachedGet<any[]>(`${API_BASE}/notifications`, 4000, forceRefresh);
+  }
+
+  async markNotificationRead(id: string) {
+    this.invalidateCache(`${API_BASE}/notifications`);
+    const res = await fetch(`${API_BASE}/notifications/${id}/read`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+    });
+    return this.parseResponse(res);
+  }
+
+  async markAllNotificationsRead(ids?: string[]) {
+    this.invalidateCache(`${API_BASE}/notifications`);
+    const res = await fetch(`${API_BASE}/notifications/read-all`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ ids }),
+    });
+    return this.parseResponse(res);
+  }
+
+  async triggerTestAlert(type: 'REQUEST' | 'SECURITY' = 'REQUEST', domain: string = 'discord.com', reason: string = 'Homework research') {
+    this.invalidateCache(`${API_BASE}/notifications`);
+    const res = await fetch(`${API_BASE}/notifications/test-alert`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ type, domain, reason }),
+    });
+    return this.parseResponse(res);
   }
 
   // --- Requests & Activity ---
   async getAllRequests(): Promise<AccessRequest[]> {
-    const res = await fetch(`${API_BASE}/requests`, { headers: this.getHeaders() });
-    if (!res.ok) return [];
-    return res.json();
+    return this.cachedGet<AccessRequest[]>(`${API_BASE}/requests`, 5000);
   }
 
   async getPendingRequests(): Promise<AccessRequest[]> {
-    const res = await fetch(`${API_BASE}/requests/pending`, { headers: this.getHeaders() });
-    if (!res.ok) return [];
-    return res.json();
+    return this.cachedGet<AccessRequest[]>(`${API_BASE}/requests/pending`, 4000);
   }
 
   async resolveRequest(requestId: string, action: 'APPROVE' | 'DENY', duration?: string) {
+    this.invalidateCache(`${API_BASE}/requests`);
+    this.invalidateCache(`${API_BASE}/notifications`);
     const res = await fetch(`${API_BASE}/requests/${requestId}/resolve`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ action, duration }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to resolve request');
     return data;
   }
 
   async getActivity(childId: string): Promise<ActivityEvent[]> {
-    const res = await fetch(`${API_BASE}/activity/child/${childId}`, { headers: this.getHeaders() });
-    if (!res.ok) return [];
-    return res.json();
+    return this.cachedGet<ActivityEvent[]>(`${API_BASE}/activity/child/${childId}`, 5000);
   }
 
   async getTimeline(childId: string) {
-    const res = await fetch(`${API_BASE}/operations/timeline/${childId}`, { headers: this.getHeaders() });
-    if (!res.ok) return [];
-    return res.json();
+    return this.cachedGet(`${API_BASE}/operations/timeline/${childId}`, 5000);
   }
 
   async getStats(childId: string): Promise<Stats> {
-    const res = await fetch(`${API_BASE}/activity/stats/${childId}`, { headers: this.getHeaders() });
-    if (!res.ok) return { todayBlockedCount: 0, pendingRequestsCount: 0, totalEventsToday: 0 };
-    return res.json();
+    return this.cachedGet<Stats>(`${API_BASE}/activity/stats/${childId}`, 5000);
   }
 
   // --- Profile & Security ---
-  async getProfile() {
-    const res = await fetch(`${API_BASE}/me`, { headers: this.getHeaders() });
-    if (!res.ok) throw new Error('Failed to load profile');
-    return res.json();
+  async getProfile(forceRefresh: boolean = false) {
+    return this.cachedGet(`${API_BASE}/me`, 15000, forceRefresh);
   }
 
   async updateProfile(data: any) {
+    this.invalidateCache(`${API_BASE}/me`);
     const res = await fetch(`${API_BASE}/me`, {
       method: 'PATCH',
       headers: this.getHeaders(),
       body: JSON.stringify(data),
     });
-    const result = await res.json();
+    const result = await this.parseResponse(res);
     if (!res.ok) throw new Error(result.error || 'Failed to update profile');
     return result;
   }
 
   async changePassword(currentPassword: string, newPassword: string) {
+    this.invalidateCache();
     const res = await fetch(`${API_BASE}/me/change-password`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ currentPassword, newPassword }),
     });
-    const result = await res.json();
+    const result = await this.parseResponse(res);
     if (!res.ok) throw new Error(result.error || 'Failed to change password');
     return result;
   }
@@ -473,176 +573,172 @@ class ApiClient {
       method: 'POST',
       headers: this.getHeaders(),
     });
-    return res.json();
+    return this.parseResponse(res);
   }
 
   async verifyMfa(otpCode: string) {
+    this.invalidateCache(`${API_BASE}/me`);
     const res = await fetch(`${API_BASE}/me/mfa/verify`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ otpCode }),
     });
-    const result = await res.json();
+    const result = await this.parseResponse(res);
     if (!res.ok) throw new Error(result.error || 'Failed to verify MFA');
     return result;
   }
 
   async disableMfa(password: string) {
+    this.invalidateCache(`${API_BASE}/me`);
     const res = await fetch(`${API_BASE}/me/mfa/disable`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ password }),
     });
-    const result = await res.json();
+    const result = await this.parseResponse(res);
     if (!res.ok) throw new Error(result.error || 'Failed to disable MFA');
     return result;
   }
 
   async getSessions() {
-    const res = await fetch(`${API_BASE}/me/sessions`, { headers: this.getHeaders() });
-    return res.json();
+    return this.cachedGet(`${API_BASE}/me/sessions`, 6000);
   }
 
   async revokeSession(sessionId: string) {
+    this.invalidateCache(`${API_BASE}/me/sessions`);
     const res = await fetch(`${API_BASE}/me/sessions/${sessionId}`, {
       method: 'DELETE',
       headers: this.getHeaders(),
     });
-    return res.json();
+    return this.parseResponse(res);
   }
 
   async revokeOtherSessions() {
+    this.invalidateCache(`${API_BASE}/me/sessions`);
     const res = await fetch(`${API_BASE}/me/sessions/revoke-others`, {
       method: 'POST',
       headers: this.getHeaders(),
     });
-    return res.json();
+    return this.parseResponse(res);
   }
 
   // --- Family & Referrals ---
-  async getFamily() {
-    const res = await fetch(`${API_BASE}/family`, { headers: this.getHeaders() });
-    return res.json();
+  async getFamily(forceRefresh: boolean = false) {
+    return this.cachedGet(`${API_BASE}/family`, 10000, forceRefresh);
   }
 
   async getFamilyAudit() {
-    const res = await fetch(`${API_BASE}/family/audit`, { headers: this.getHeaders() });
-    return res.json();
+    return this.cachedGet(`${API_BASE}/family/audit`, 8000);
   }
 
   async updateFamily(payload: { familyId: string; name?: string; requireMfa?: boolean; approvalRule?: string }) {
+    this.invalidateCache(`${API_BASE}/family`);
     const res = await fetch(`${API_BASE}/family`, {
       method: 'PATCH',
       headers: this.getHeaders(),
       body: JSON.stringify(payload),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to update family settings');
     return data;
   }
 
   async inviteParent(familyId: string, email: string, role: string) {
+    this.invalidateCache(`${API_BASE}/family`);
     const res = await fetch(`${API_BASE}/family/invitations`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ familyId, email, role }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to send invite');
     return data;
   }
 
   async revokeInvitation(id: string) {
+    this.invalidateCache(`${API_BASE}/family`);
     const res = await fetch(`${API_BASE}/family/invitations/${id}`, {
       method: 'DELETE',
       headers: this.getHeaders(),
     });
-    return res.json();
+    return this.parseResponse(res);
   }
 
   async changeFamilyMemberRole(memberId: string, familyId: string, role: 'PARENT' | 'VIEWER') {
+    this.invalidateCache(`${API_BASE}/family`);
     const res = await fetch(`${API_BASE}/family/members/${memberId}/role`, {
       method: 'PATCH',
       headers: this.getHeaders(),
       body: JSON.stringify({ familyId, role }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to change member role');
     return data;
   }
 
   async removeFamilyMember(memberId: string, familyId: string) {
+    this.invalidateCache(`${API_BASE}/family`);
     const res = await fetch(`${API_BASE}/family/members/${memberId}?familyId=${familyId}`, {
       method: 'DELETE',
       headers: this.getHeaders(),
     });
-    return res.json();
+    return this.parseResponse(res);
   }
 
   async transferOwnership(familyId: string, newOwnerUserId: string, password?: string, otpCode?: string) {
+    this.invalidateCache();
     const res = await fetch(`${API_BASE}/family/transfer-ownership`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ familyId, newOwnerUserId, password, otpCode }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Transfer failed');
     return data;
   }
 
   async getReferrals() {
-    const res = await fetch(`${API_BASE}/referrals`, { headers: this.getHeaders() });
-    return res.json();
+    return this.cachedGet(`${API_BASE}/referrals`, 15000);
   }
 
-  // --- Canonical Admin Endpoints ---
-  async getAdminMetrics() {
-    const res = await fetch(`${API_BASE}/admin/metrics`, { headers: this.getHeaders() });
-    if (!res.ok) throw new Error('Forbidden. System administrator privilege required.');
-    return res.json();
+  // --- Canonical Admin Endpoints (Green Caching Enabled) ---
+  async getAdminMetrics(forceRefresh: boolean = false) {
+    return this.cachedGet(`${API_BASE}/admin/metrics`, 8000, forceRefresh);
   }
 
-  async getAdminFleet() {
-    const res = await fetch(`${API_BASE}/admin/fleet`, { headers: this.getHeaders() });
-    if (!res.ok) throw new Error('Forbidden. System administrator privilege required.');
-    return res.json();
+  async getAdminFleet(forceRefresh: boolean = false) {
+    return this.cachedGet(`${API_BASE}/admin/fleet`, 8000, forceRefresh);
   }
 
-  async getAdminAudit() {
-    const res = await fetch(`${API_BASE}/admin/audit`, { headers: this.getHeaders() });
-    if (!res.ok) throw new Error('Forbidden. System administrator privilege required.');
-    return res.json();
+  async getAdminAudit(forceRefresh: boolean = false) {
+    return this.cachedGet(`${API_BASE}/admin/audit`, 6000, forceRefresh);
   }
 
-  async getAdminSupport() {
-    const res = await fetch(`${API_BASE}/admin/support`, { headers: this.getHeaders() });
-    if (!res.ok) throw new Error('Forbidden. System administrator privilege required.');
-    return res.json();
+  async getAdminSupport(forceRefresh: boolean = false) {
+    return this.cachedGet(`${API_BASE}/admin/support`, 6000, forceRefresh);
   }
 
-  async getAdminParents() {
-    const res = await fetch(`${API_BASE}/admin/parents`, { headers: this.getHeaders() });
-    if (!res.ok) throw new Error('Forbidden. System administrator privilege required.');
-    return res.json();
+  async getAdminParents(forceRefresh: boolean = false) {
+    return this.cachedGet(`${API_BASE}/admin/parents`, 8000, forceRefresh);
   }
 
-  async getAdminParentDetails(id: string) {
-    const res = await fetch(`${API_BASE}/admin/parents/${id}`, { headers: this.getHeaders() });
-    if (!res.ok) throw new Error('Forbidden. System administrator privilege required.');
-    return res.json();
+  async getAdminParentDetails(id: string, forceRefresh: boolean = false) {
+    return this.cachedGet(`${API_BASE}/admin/parents/${id}`, 8000, forceRefresh);
   }
 
   async adminVerifyParentEmail(id: string) {
+    this.invalidateCache(`${API_BASE}/admin/parents`);
     const res = await fetch(`${API_BASE}/admin/parents/${id}/verify-email`, {
       method: 'POST',
       headers: this.getHeaders(),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to verify email');
     return data;
   }
 
   async adminResetParentPassword(id: string, newPassword: string) {
+    this.invalidateCache(`${API_BASE}/admin/parents`);
     const res = await fetch(`${API_BASE}/admin/parents/${id}/reset-password`, {
       method: 'POST',
       headers: this.getHeaders(),
@@ -654,6 +750,7 @@ class ApiClient {
   }
 
   async adminDisableParentMfa(id: string) {
+    this.invalidateCache(`${API_BASE}/admin/parents`);
     const res = await fetch(`${API_BASE}/admin/parents/${id}/disable-mfa`, {
       method: 'POST',
       headers: this.getHeaders(),
@@ -664,28 +761,31 @@ class ApiClient {
   }
 
   async adminChangeUserRole(id: string, systemRole: 'USER' | 'SYSTEM_ADMIN') {
+    this.invalidateCache();
     const res = await fetch(`${API_BASE}/admin/parents/${id}/role`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ systemRole }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to update role');
     return data;
   }
 
   async dispatchAdminRollback(targetVersion: string, reason?: string) {
+    this.invalidateCache();
     const res = await fetch(`${API_BASE}/admin/rollback`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ targetVersion, reason }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Rollback failed');
     return data;
   }
 
   async bootstrapDevAdmin(bootstrapSecret?: string) {
+    this.invalidateCache();
     const headers: Record<string, string> = { ...(this.getHeaders() as Record<string, string>) };
     if (bootstrapSecret) {
       headers['x-admin-bootstrap-secret'] = bootstrapSecret;
@@ -695,30 +795,29 @@ class ApiClient {
       headers,
       body: JSON.stringify({ bootstrapSecret }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Bootstrap failed');
     return data;
   }
 
-  async getOperationsFleet() {
-    const res = await fetch(`${API_BASE}/admin/fleet`, { headers: this.getHeaders() });
-    return res.json();
+  async getOperationsFleet(forceRefresh: boolean = false) {
+    return this.cachedGet(`${API_BASE}/admin/fleet`, 8000, forceRefresh);
   }
 
   async dispatchRollback(targetVersion: string, reason?: string) {
+    this.invalidateCache();
     const res = await fetch(`${API_BASE}/admin/rollback`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ targetVersion, reason }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Rollback failed');
     return data;
   }
 
   async getHealth() {
-    const res = await fetch(`${API_BASE}/health`);
-    return res.json();
+    return this.cachedGet(`${API_BASE}/health`, 10000);
   }
 
   async submitFeedback(data: any) {
@@ -727,73 +826,103 @@ class ApiClient {
       headers: this.getHeaders(),
       body: JSON.stringify(data),
     });
-    return res.json();
+    return this.parseResponse(res);
   }
 
   // --- Screen Time & Usage Budgets ---
-  async getUsageBudgets(childId: string) {
-    const res = await fetch(`${API_BASE}/usage/child/${childId}`, { headers: this.getHeaders() });
-    if (!res.ok) throw new Error('Failed to load screen time budgets');
-    return res.json();
+  async getUsageBudgets(childId: string, forceRefresh: boolean = false) {
+    return this.cachedGet(`${API_BASE}/usage/child/${childId}`, 8000, forceRefresh);
   }
 
   async setUsageBudget(childId: string, target: string, targetType: string, dailyLimitMinutes: number) {
+    this.invalidateCache(`${API_BASE}/usage/child/${childId}`);
     const res = await fetch(`${API_BASE}/usage/child/${childId}/budget`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ target, targetType, dailyLimitMinutes }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to save usage budget');
     return data;
   }
 
   async addBonusTime(childId: string, budgetId: string, bonusMinutes: number) {
+    this.invalidateCache(`${API_BASE}/usage/child/${childId}`);
     const res = await fetch(`${API_BASE}/usage/child/${childId}/budget/${budgetId}/bonus`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({ bonusMinutes }),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to grant bonus time');
     return data;
   }
 
   async setUnlimitedToday(childId: string, budgetId: string) {
+    this.invalidateCache(`${API_BASE}/usage/child/${childId}`);
     const res = await fetch(`${API_BASE}/usage/child/${childId}/budget/${budgetId}/unlimited`, {
       method: 'POST',
       headers: this.getHeaders(),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to set unlimited today');
     return data;
   }
 
   async removeUsageBudget(childId: string, budgetId: string) {
+    this.invalidateCache(`${API_BASE}/usage/child/${childId}`);
     const res = await fetch(`${API_BASE}/usage/child/${childId}/budget/${budgetId}`, {
       method: 'DELETE',
       headers: this.getHeaders(),
     });
-    const data = await res.json();
+    const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to delete budget');
     return data;
   }
 
-  async updateSafeSearch(childId: string, config: any) {
-    const res = await fetch(`${API_BASE}/usage/child/${childId}/safesearch`, {
+  async getWeeklyDigest() {
+    return this.cachedGet(`${API_BASE}/usage/digest`, 15000);
+  }
+
+  async regenerateRecoveryCodes(): Promise<{ success: boolean; recoveryCodes: string[] }> {
+    const res = await fetch(`${API_BASE}/profile/mfa/recovery-codes/regenerate`, {
       method: 'POST',
       headers: this.getHeaders(),
-      body: JSON.stringify(config),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to update SafeSearch');
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to regenerate recovery codes');
     return data;
   }
 
-  async getWeeklyDigest() {
-    const res = await fetch(`${API_BASE}/usage/digest`, { headers: this.getHeaders() });
-    if (!res.ok) throw new Error('Failed to load weekly digest');
-    return res.json();
+  async getVapidPublicKey(): Promise<{ publicKey: string }> {
+    const res = await fetch(`${API_BASE}/notifications/vapid-public-key`, {
+      headers: this.getHeaders(),
+    });
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to fetch VAPID public key');
+    return data;
+  }
+
+  async subscribePush(subscription: any) {
+    const res = await fetch(`${API_BASE}/notifications/push-subscribe`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ subscription }),
+    });
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to register push subscription');
+    return data;
+  }
+
+  async unsubscribePush(endpoint: string) {
+    const res = await fetch(`${API_BASE}/notifications/push-unsubscribe`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ endpoint }),
+    });
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to remove push subscription');
+    return data;
   }
 }
 

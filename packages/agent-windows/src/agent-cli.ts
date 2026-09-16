@@ -1,6 +1,7 @@
 import { PolicySyncClient, DeviceConfig } from './sync-client';
 import { BlockPageServer } from './block-server';
 import { DnsFilterProxy } from './dns-proxy';
+import { WindowsProcessLimiter } from './process-limiter';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -86,6 +87,10 @@ async function main() {
     console.warn(`[SafeBrowse DNS] Notice: Port 53 bind notice (${err.message}). Starting on fallback port 5353.`);
     await dnsProxy.start(5353);
   }
+
+  // 4. Initialize Windows Application Process Watchdog & Time Limiter
+  const processLimiter = new WindowsProcessLimiter(config, () => syncClient.getActivePolicy());
+  processLimiter.start();
 
   console.log('[SafeBrowse] Local Device Protection is ACTIVE.');
   console.log(`[SafeBrowse] Protecting: ${config.deviceName}`);

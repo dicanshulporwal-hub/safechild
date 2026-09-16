@@ -68,24 +68,31 @@ export const RequestsPage: React.FC = () => {
   return (
     <div className="max-w-6xl space-y-6 animate-fadeIn">
       {/* Page Header */}
-      <div>
-        <h1 className="text-2xl font-extrabold text-white tracking-tight">Ask Parent Requests</h1>
-        <p className="text-xs text-slate-400">Review, approve, and grant temporary web unlocks for your children</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">Ask Parent Requests</h1>
+          <p className="text-xs text-slate-400 mt-1">Review, approve, and grant temporary web unlocks requested by your children.</p>
+        </div>
+        <span className="px-3.5 py-1.5 bg-amber-500/10 border border-amber-500/30 text-amber-300 rounded-full text-xs font-extrabold shadow-sm">
+          {pendingRequests.length} Action Item{pendingRequests.length === 1 ? '' : 's'}
+        </span>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left Column: Request List */}
         <div className="lg:col-span-5 space-y-4">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-bold uppercase text-slate-400">
-              Pending ({pendingRequests.length})
+            <span className="text-[11px] font-extrabold uppercase tracking-wider text-slate-400">
+              Pending Requests ({pendingRequests.length})
             </span>
           </div>
 
-          <div className="space-y-2">
+          <div className="space-y-2.5">
             {pendingRequests.length === 0 ? (
-              <div className="p-6 bg-slate-900 border border-slate-800 rounded-2xl text-center text-xs text-slate-400">
-                🎉 No pending access requests!
+              <div className="p-8 bg-slate-900/80 border border-slate-800/80 rounded-3xl text-center space-y-2">
+                <div className="text-2xl">🎉</div>
+                <div className="text-xs font-bold text-white">Inbox Zero</div>
+                <div className="text-[11px] text-slate-400">No pending website unlock requests right now.</div>
               </div>
             ) : (
               pendingRequests.map((req) => {
@@ -96,23 +103,23 @@ export const RequestsPage: React.FC = () => {
                   <div
                     key={req.id}
                     onClick={() => navigate(`/requests/${req.id}`)}
-                    className={`p-4 rounded-2xl border cursor-pointer transition ${
+                    className={`p-4 rounded-2xl border cursor-pointer transition-all duration-200 ${
                       isSelected
-                        ? 'bg-amber-500/10 border-amber-500/40 shadow-lg shadow-amber-500/10'
-                        : 'bg-slate-900 border-slate-800 hover:border-slate-700'
+                        ? 'bg-amber-500/10 border-amber-500/50 shadow-xl shadow-amber-500/10 scale-[1.01]'
+                        : 'bg-slate-900/80 border-slate-800/80 hover:border-slate-700/80 hover:bg-slate-900'
                     }`}
                   >
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                        <span>{child?.avatar || '🧑'}</span>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-xs font-extrabold text-white flex items-center gap-2">
+                        <span className="text-base">{child?.avatar || '🧑'}</span>
                         <span>{child?.name || 'Child'}</span>
                       </span>
-                      <span className="text-[10px] text-slate-400">
+                      <span className="text-[10px] text-slate-500 font-mono">
                         {reqDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                       </span>
                     </div>
-                    <div className="text-sm font-bold text-amber-400 font-mono">{req.domain}</div>
-                    {req.reason && <div className="text-xs text-slate-400 mt-1 italic">"{req.reason}"</div>}
+                    <div className="text-sm font-extrabold text-amber-300 font-mono">{req.domain}</div>
+                    {req.reason && <div className="text-xs text-slate-300 mt-1 italic line-clamp-2">"{req.reason}"</div>}
                   </div>
                 );
               })
@@ -121,8 +128,8 @@ export const RequestsPage: React.FC = () => {
 
           {resolvedRequests.length > 0 && (
             <div className="pt-4 space-y-2">
-              <span className="text-xs font-bold uppercase text-slate-500">
-                Recently Resolved ({resolvedRequests.length})
+              <span className="text-[11px] font-extrabold uppercase tracking-wider text-slate-500">
+                Resolved Activity ({resolvedRequests.length})
               </span>
               <div className="space-y-2">
                 {resolvedRequests.slice(0, 5).map((req) => {
@@ -132,7 +139,7 @@ export const RequestsPage: React.FC = () => {
                     <div
                       key={req.id}
                       onClick={() => navigate(`/requests/${req.id}`)}
-                      className="p-3 bg-slate-950/40 border border-slate-800/80 rounded-xl cursor-pointer hover:border-slate-700 flex items-center justify-between text-xs"
+                      className="p-3 bg-slate-950/60 border border-slate-800/80 rounded-xl cursor-pointer hover:border-slate-700 flex items-center justify-between text-xs"
                     >
                       <div>
                         <div className="font-semibold text-slate-300">
@@ -158,43 +165,43 @@ export const RequestsPage: React.FC = () => {
         {/* Right Column: Decision Pane */}
         <div className="lg:col-span-7">
           {selectedRequest ? (
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-6 shadow-xl sticky top-20">
-              <div className="flex items-center justify-between pb-4 border-b border-slate-800">
+            <div className="bg-slate-900/90 border border-slate-800/90 rounded-3xl p-6 sm:p-8 space-y-6 shadow-2xl backdrop-blur-xl sticky top-20">
+              <div className="flex items-center justify-between pb-4 border-b border-slate-800/80">
                 <div>
-                  <span className="text-xs font-bold uppercase text-slate-400">Request Details</span>
-                  <h2 className="text-xl font-bold text-white font-mono mt-0.5">{selectedRequest.domain}</h2>
+                  <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400">Unlock Request</span>
+                  <h2 className="text-xl sm:text-2xl font-extrabold text-white font-mono mt-0.5">{selectedRequest.domain}</h2>
                 </div>
-                <span className={`px-3 py-1 rounded-full text-xs font-bold ${
+                <span className={`px-3.5 py-1 rounded-full text-xs font-extrabold ${
                   selectedRequest.status === 'PENDING'
-                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
                     : selectedRequest.status === 'APPROVED'
-                    ? 'bg-emerald-500/20 text-emerald-300'
-                    : 'bg-rose-500/20 text-rose-300'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
                 }`}>
                   {selectedRequest.status}
                 </span>
               </div>
 
-              <div className="grid grid-cols-2 gap-4 text-xs">
-                <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
-                  <div className="text-slate-500 font-semibold mb-1">Child Profile</div>
-                  <div className="font-bold text-white text-sm">
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <div className="p-3.5 bg-slate-950/70 rounded-2xl border border-slate-800/80">
+                  <div className="text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1">Child Profile</div>
+                  <div className="font-extrabold text-white text-sm">
                     {childrenMap[selectedRequest.childId]?.name || 'Child'}
                   </div>
                 </div>
 
-                <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
-                  <div className="text-slate-500 font-semibold mb-1">Requested At</div>
-                  <div className="font-bold text-white text-sm">
+                <div className="p-3.5 bg-slate-950/70 rounded-2xl border border-slate-800/80">
+                  <div className="text-slate-400 text-[10px] font-bold uppercase tracking-wider mb-1">Requested At</div>
+                  <div className="font-extrabold text-white text-sm">
                     {new Date(selectedRequest.createdAt || selectedRequest.requestedAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </div>
                 </div>
               </div>
 
               {selectedRequest.reason && (
-                <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-1">
-                  <div className="text-[11px] font-bold uppercase text-slate-400">Child's Explanation</div>
-                  <div className="text-sm text-slate-200 italic">"{selectedRequest.reason}"</div>
+                <div className="p-4 bg-slate-950/80 rounded-2xl border border-slate-800/80 space-y-1">
+                  <div className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400">Child's Explanation</div>
+                  <div className="text-sm text-slate-200 italic font-medium">"{selectedRequest.reason}"</div>
                 </div>
               )}
 
@@ -205,28 +212,28 @@ export const RequestsPage: React.FC = () => {
                     <button
                       onClick={() => handleResolve(selectedRequest.id, 'APPROVE', '15m')}
                       disabled={resolvingId === selectedRequest.id}
-                      className="p-3 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-bold text-xs rounded-xl transition"
+                      className="p-3.5 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-extrabold text-xs rounded-2xl transition shadow-sm cursor-pointer"
                     >
                       ⏱️ 15 Minutes
                     </button>
                     <button
                       onClick={() => handleResolve(selectedRequest.id, 'APPROVE', '1h')}
                       disabled={resolvingId === selectedRequest.id}
-                      className="p-3 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-bold text-xs rounded-xl transition"
+                      className="p-3.5 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-extrabold text-xs rounded-2xl transition shadow-sm cursor-pointer"
                     >
                       ⌛ 1 Hour
                     </button>
                     <button
                       onClick={() => handleResolve(selectedRequest.id, 'APPROVE', 'today')}
                       disabled={resolvingId === selectedRequest.id}
-                      className="p-3 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-bold text-xs rounded-xl transition"
+                      className="p-3.5 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-extrabold text-xs rounded-2xl transition shadow-sm cursor-pointer"
                     >
                       📅 Until Bedtime
                     </button>
                     <button
                       onClick={() => handleResolve(selectedRequest.id, 'APPROVE', 'always')}
                       disabled={resolvingId === selectedRequest.id}
-                      className="p-3 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-bold text-xs rounded-xl transition"
+                      className="p-3.5 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-extrabold text-xs rounded-2xl transition shadow-sm cursor-pointer"
                     >
                       ♾️ Always Allow
                     </button>
@@ -235,13 +242,13 @@ export const RequestsPage: React.FC = () => {
                   <button
                     onClick={() => handleResolve(selectedRequest.id, 'DENY')}
                     disabled={resolvingId === selectedRequest.id}
-                    className="w-full py-2.5 bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/30 text-rose-300 font-bold text-xs rounded-xl transition mt-2"
+                    className="w-full py-3 bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/30 text-rose-300 font-extrabold text-xs rounded-2xl transition mt-2 cursor-pointer"
                   >
                     🚫 Deny Request
                   </button>
                 </div>
               ) : (
-                <div className="p-4 bg-slate-950/80 rounded-xl border border-slate-800 text-xs text-slate-400">
+                <div className="p-4 bg-slate-950/80 rounded-2xl border border-slate-800 text-xs text-slate-400">
                   This request was {selectedRequest.status.toLowerCase()}
                   {selectedRequest.resolvedByName ? ` by ${selectedRequest.resolvedByName}` : ''} on{' '}
                   {new Date(selectedRequest.resolvedAt || selectedRequest.createdAt || selectedRequest.requestedAt || Date.now()).toLocaleString()}.
@@ -249,7 +256,7 @@ export const RequestsPage: React.FC = () => {
               )}
             </div>
           ) : (
-            <div className="p-12 bg-slate-900 border border-slate-800 rounded-2xl text-center text-slate-500 text-sm">
+            <div className="p-12 bg-slate-900/60 border border-slate-800/80 rounded-3xl text-center text-slate-500 text-sm">
               Select an access request from the list to review.
             </div>
           )}

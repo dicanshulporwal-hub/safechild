@@ -10,7 +10,10 @@ export type WebsiteCategory =
   | 'GAMING'
   | 'SOCIAL_MEDIA'
   | 'EDUCATION'
-  | 'ENTERTAINMENT';
+  | 'ENTERTAINMENT'
+  | 'AI_TOOLS'
+  | 'PIRACY'
+  | 'MALWARE_SECURITY';
 
 export type MatchedRuleType =
   | 'ESSENTIAL_ALLOW'

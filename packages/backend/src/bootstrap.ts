@@ -3,6 +3,7 @@ import express from 'express';
 import { prisma } from './db/prisma';
 import { mailService } from './services/mail.service';
 import { wsManager } from './services/websocket.service';
+import { ensureDemoAccounts } from './services/seed.service';
 
 export interface BootstrapOptions {
   port?: number | string;
@@ -114,10 +115,13 @@ export async function bootstrap(
     process.exit(1);
   }
 
-  // 5. Initialize WebSockets
+  // 5. Seed / Self-Heal Demo Accounts
+  await ensureDemoAccounts();
+
+  // 6. Initialize WebSockets
   wsManager.init(server);
 
-  // 6. Open HTTP Port
+  // 7. Open HTTP Port
   if (!options.skipListen) {
     await new Promise<void>((resolve) => {
       server.listen(port, () => {

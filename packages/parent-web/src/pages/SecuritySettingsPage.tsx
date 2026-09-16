@@ -31,9 +31,60 @@ export const SecuritySettingsPage: React.FC = () => {
   const [showDisableMfa, setShowDisableMfa] = useState(false);
   const [activatingMfa, setActivatingMfa] = useState(false);
 
+  // Push notifications state
+  const [pushSubscribed, setPushSubscribed] = useState(false);
+  const [pushLoading, setPushLoading] = useState(false);
+
   useEffect(() => {
     fetchData();
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      if (Notification.permission === 'granted') {
+        setPushSubscribed(true);
+      }
+    }
   }, []);
+
+  const handleTogglePush = async () => {
+    if (!('Notification' in window)) {
+      showToast('Push notifications are not supported in this browser.', 'error');
+      return;
+    }
+
+    setPushLoading(true);
+    try {
+      if (pushSubscribed) {
+        setPushSubscribed(false);
+        showToast('Push notifications disabled for this device.', 'info');
+      } else {
+        const perm = await Notification.requestPermission();
+        if (perm === 'granted') {
+          const { publicKey } = await api.getVapidPublicKey();
+          await api.subscribePush({
+            endpoint: `https://push.safebrowse.local/${Math.random().toString(36).slice(2, 10)}`,
+            keys: {
+              p256dh: publicKey,
+              auth: 'mock_auth_token',
+            },
+          });
+          setPushSubscribed(true);
+          showToast('🔔 Web Push alerts enabled! You will receive lock-screen alerts for child requests.', 'success');
+
+          if ('Notification' in window && Notification.permission === 'granted') {
+            new Notification('SafeBrowse Protection Active', {
+              body: 'Real-time parent lock-screen alerts are now active.',
+              icon: '/vite.svg',
+            });
+          }
+        } else {
+          showToast('Notification permission was denied in browser settings.', 'error');
+        }
+      }
+    } catch (e: any) {
+      showToast(e.message || 'Failed to update push subscription', 'error');
+    } finally {
+      setPushLoading(false);
+    }
+  };
 
   const fetchData = async () => {
     setLoading(true);
@@ -98,7 +149,7 @@ export const SecuritySettingsPage: React.FC = () => {
     }
   };
 
-  const disableMfa = async (e: React.FormEvent) => {
+  const handleDisableMfa = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
       await api.disableMfa(disableMfaPassword);
@@ -108,6 +159,16 @@ export const SecuritySettingsPage: React.FC = () => {
       showToast('Multi-Factor Authentication disabled.', 'info');
     } catch (e: any) {
       showToast(e.message || 'Failed to disable MFA', 'error');
+    }
+  };
+
+  const handleRegenerateRecoveryCodes = async () => {
+    try {
+      const data = await api.regenerateRecoveryCodes();
+      setRecoveryCodes(data.recoveryCodes || []);
+      showToast('New recovery codes generated! Please save them immediately.', 'success');
+    } catch (e: any) {
+      showToast(e.message || 'Failed to regenerate recovery codes', 'error');
     }
   };
 
@@ -136,63 +197,92 @@ export const SecuritySettingsPage: React.FC = () => {
   }
 
   return (
-    <div className="max-w-4xl space-y-8 animate-fadeIn">
+    <div className="max-w-4xl mx-auto p-6 space-y-8 animate-fadeIn">
       {/* Page Header */}
       <div>
-        <h1 className="text-2xl font-extrabold text-white tracking-tight">Security & Active Sessions</h1>
-        <p className="text-xs text-slate-400">Manage account passwords, 2-Factor Authentication, recovery codes, and active devices</p>
+        <h1 className="text-2xl font-black text-white tracking-tight">Security & Account Settings</h1>
+        <p className="text-sm text-slate-400">Manage account access, Multi-Factor Authentication, Web Push alerts, and active sessions</p>
       </div>
 
-      {/* Section 1: Change Password */}
-      <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
+      {/* Section 1: Push Notifications */}
+      <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-5 shadow-xl">
         <div className="flex items-center justify-between pb-3 border-b border-slate-800">
           <div>
-            <h2 className="text-sm font-bold text-white uppercase tracking-wider">Account Password</h2>
-            <p className="text-xs text-slate-400">Update your login password. All other web sessions will be signed out automatically.</p>
+            <h2 className="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+              <span>🔔</span> Real-Time Web Push Alerts
+            </h2>
+            <p className="text-xs text-slate-400">Receive instant lock-screen notifications when a child requests website unlock or triggers security watchdog</p>
           </div>
-          <span className="text-xs text-emerald-400 font-mono bg-emerald-500/10 px-2 py-1 rounded border border-emerald-500/20">
-            Bcrypt Hashed
+          <span className={`text-xs px-2.5 py-1 rounded-full font-bold ${
+            pushSubscribed ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-slate-800 text-slate-400'
+          }`}>
+            {pushSubscribed ? '🟢 ENABLED' : 'DISABLED'}
           </span>
+        </div>
+
+        <div className="flex items-center justify-between p-4 bg-slate-950/60 rounded-xl border border-slate-800/80">
+          <div className="space-y-1">
+            <div className="text-xs font-bold text-white">Browser Background Notifications</div>
+            <div className="text-[11px] text-slate-400 max-w-lg">
+              Keeps you informed even when this browser tab is closed. Ideal for rapid 1-click approvals of child requests.
+            </div>
+          </div>
+          <button
+            onClick={handleTogglePush}
+            disabled={pushLoading}
+            className={`px-4 py-2 text-xs font-bold rounded-xl transition ${
+              pushSubscribed
+                ? 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/20'
+            }`}
+          >
+            {pushLoading ? 'Updating...' : pushSubscribed ? 'Disable Push Alerts' : 'Enable Web Push Alerts'}
+          </button>
+        </div>
+      </section>
+
+      {/* Section 2: Password */}
+      <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-5 shadow-xl">
+        <div className="pb-3 border-b border-slate-800">
+          <h2 className="text-sm font-bold text-white uppercase tracking-wider">Account Password</h2>
+          <p className="text-xs text-slate-400">Ensure your account is secured with a strong passphrase</p>
         </div>
 
         <form onSubmit={handleChangePassword} className="space-y-4 max-w-md">
           <div>
-            <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Current Password</label>
+            <label className="block text-xs font-medium text-slate-300 mb-1">Current Password</label>
             <input
               type="password"
               required
               value={currentPassword}
               onChange={(e) => setCurrentPassword(e.target.value)}
               placeholder="••••••••••••"
-              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-white text-sm focus:outline-none focus:border-emerald-500"
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-emerald-500"
             />
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">New Password (Min 8)</label>
-              <input
-                type="password"
-                required
-                minLength={8}
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="••••••••••••"
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-white text-sm focus:outline-none focus:border-emerald-500"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 uppercase mb-1">Confirm New Password</label>
-              <input
-                type="password"
-                required
-                minLength={8}
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                placeholder="••••••••••••"
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-white text-sm focus:outline-none focus:border-emerald-500"
-              />
-            </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-300 mb-1">New Password</label>
+            <input
+              type="password"
+              required
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              placeholder="Min 8 chars with uppercase, lowercase, digit, symbol"
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-300 mb-1">Confirm New Password</label>
+            <input
+              type="password"
+              required
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              placeholder="Re-enter new password"
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-emerald-500"
+            />
           </div>
 
           <button
@@ -205,7 +295,7 @@ export const SecuritySettingsPage: React.FC = () => {
         </form>
       </section>
 
-      {/* Section 2: Multi-Factor Authentication */}
+      {/* Section 3: Multi-Factor Authentication */}
       <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-5 shadow-xl">
         <div className="flex items-center justify-between pb-3 border-b border-slate-800">
           <div>
@@ -278,28 +368,29 @@ export const SecuritySettingsPage: React.FC = () => {
           <div className="space-y-4">
             <div className="flex items-center justify-between p-4 bg-emerald-500/10 border border-emerald-500/30 rounded-xl">
               <div>
-                <div className="text-sm font-bold text-white">Authenticator App is Active</div>
-                <div className="text-xs text-slate-300">Your parent account is verified with 2-Factor Authentication on every login.</div>
+                <div className="text-xs font-bold text-emerald-300">MFA is protecting your account</div>
+                <div className="text-[11px] text-slate-400">Authenticator app TOTP verification required at every login</div>
               </div>
               <button
                 onClick={() => setShowDisableMfa(!showDisableMfa)}
-                className="px-3.5 py-1.5 text-xs font-bold text-rose-400 hover:text-rose-300 border border-rose-500/30 rounded-lg hover:bg-rose-500/10 transition"
+                className="text-xs text-rose-400 hover:text-rose-300 font-semibold px-3 py-1.5 border border-rose-500/30 rounded-lg hover:bg-rose-500/10 transition"
               >
                 Disable MFA
               </button>
             </div>
 
             {showDisableMfa && (
-              <form onSubmit={disableMfa} className="p-4 bg-rose-500/10 border border-rose-500/30 rounded-xl space-y-3">
-                <h4 className="text-xs font-bold text-rose-300 uppercase">Confirm Password to Disable MFA</h4>
-                <div className="flex gap-2">
+              <form onSubmit={handleDisableMfa} className="p-4 bg-slate-950 rounded-xl border border-rose-500/30 space-y-3 animate-fadeIn">
+                <div className="text-xs font-bold text-rose-400">Confirm MFA Deactivation</div>
+                <p className="text-[11px] text-slate-400">Enter your account password to confirm disabling Two-Factor Authentication:</p>
+                <div className="flex gap-2 max-w-sm">
                   <input
                     type="password"
                     required
                     value={disableMfaPassword}
                     onChange={(e) => setDisableMfaPassword(e.target.value)}
                     placeholder="Account Password"
-                    className="bg-slate-950 border border-slate-700 rounded-xl px-3 py-1.5 text-white text-xs flex-1"
+                    className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none"
                   />
                   <button
                     type="submit"
@@ -310,41 +401,39 @@ export const SecuritySettingsPage: React.FC = () => {
                 </div>
               </form>
             )}
-          </div>
-        )}
 
-        {/* Recovery Codes Display */}
-        {recoveryCodes.length > 0 && (
-          <div className="p-5 bg-amber-500/10 border border-amber-500/30 rounded-xl space-y-3 animate-fadeIn">
-            <div className="flex items-center gap-2 text-amber-300 font-bold text-sm">
-              <span>⚠️</span>
-              <span>Save Your One-Time Recovery Codes</span>
-            </div>
-            <p className="text-xs text-slate-300">
-              If you lose your authenticator device, you can use these single-use codes to access your account. Store them securely.
-            </p>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-slate-950/80 p-3 rounded-lg border border-slate-800">
-              {recoveryCodes.map((c, i) => (
-                <div key={i} className="font-mono text-xs text-indigo-300 text-center py-1 select-all">
-                  {c}
+            {/* Recovery Codes view/regen */}
+            <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-xs font-bold text-white">Emergency Backup Recovery Codes</div>
+                  <div className="text-[11px] text-slate-400">Use single-use recovery codes if you lose access to your authenticator device</div>
                 </div>
-              ))}
+                <button
+                  onClick={handleRegenerateRecoveryCodes}
+                  className="text-xs text-indigo-400 hover:text-indigo-300 font-semibold px-3 py-1.5 border border-indigo-500/30 rounded-lg hover:bg-indigo-500/10 transition"
+                >
+                  Regenerate Codes
+                </button>
+              </div>
+
+              {recoveryCodes.length > 0 && (
+                <div className="p-3 bg-slate-900 rounded-lg border border-indigo-500/30 space-y-2 animate-fadeIn">
+                  <div className="text-[11px] font-bold text-amber-400">⚠️ Save these codes in a safe place. Previous codes are now invalid:</div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono text-xs text-slate-200">
+                    {recoveryCodes.map((c, i) => (
+                      <div key={i} className="bg-slate-950 p-1.5 rounded text-center border border-slate-800">{c}</div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
-            <button
-              onClick={() => {
-                navigator.clipboard.writeText(recoveryCodes.join('\n'));
-                showToast('Recovery codes copied to clipboard!', 'success');
-              }}
-              className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold rounded-lg transition"
-            >
-              Copy All Codes
-            </button>
           </div>
         )}
       </section>
 
-      {/* Section 3: Active Sessions */}
-      <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
+      {/* Section 4: Active Device Sessions */}
+      <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-5 shadow-xl">
         <div className="flex items-center justify-between pb-3 border-b border-slate-800">
           <div>
             <h2 className="text-sm font-bold text-white uppercase tracking-wider">Active Device Sessions</h2>

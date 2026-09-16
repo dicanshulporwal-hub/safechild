@@ -76,6 +76,7 @@ model User {
   pairingCodesCreated     PairingCode[]
   passwordResetTokens     PasswordResetToken[]
   emailVerificationTokens EmailVerificationToken[]
+  pushSubscriptions       PushSubscription[]
 }
 
 model UserSession {
@@ -392,3 +393,18 @@ model Referral {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 }
+
+model PushSubscription {
+  id        String   @id
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+

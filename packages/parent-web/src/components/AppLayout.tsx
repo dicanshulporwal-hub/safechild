@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { NavLink, useNavigate, useLocation } from 'react-router-dom';
-import { Child, Stats } from '../api/client';
+import { api, Child, Stats } from '../api/client';
 import {
   ShieldCheck,
   Users,
@@ -15,6 +15,9 @@ import {
   Clock,
   Settings,
 } from 'lucide-react';
+import { NotificationCenter } from './NotificationCenter';
+import { useToast } from './Toast';
+import { AiHelpBot } from './AiHelpBot';
 
 interface AppLayoutProps {
   childrenList: Child[];
@@ -39,21 +42,13 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
 }) => {
   const navigate = useNavigate();
   const location = useLocation();
+  const { showToast } = useToast();
   const [showAddChildModal, setShowAddChildModal] = useState(false);
+  const [isFamilyPaused, setIsFamilyPaused] = useState(false);
   const [childName, setChildName] = useState('');
   const [childAge, setChildAge] = useState('');
 
-  const [isSystemAdmin, setIsSystemAdmin] = useState(false);
-
-  React.useEffect(() => {
-    import('../api/client').then(({ api }) => {
-      api.getProfile?.().then((p: any) => {
-        if (p?.systemRole === 'SYSTEM_ADMIN') {
-          setIsSystemAdmin(true);
-        }
-      }).catch(() => {});
-    });
-  }, []);
+  const isSystemAdmin = api.getUserRole() === 'SYSTEM_ADMIN';
 
   const handleCreateChild = (e: React.FormEvent) => {
     e.preventDefault();
@@ -126,27 +121,32 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
   ];
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col antialiased">
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col antialiased selection:bg-emerald-500/30 selection:text-emerald-200">
       {/* Top Header */}
-      <header className="bg-slate-900/90 border-b border-slate-800 sticky top-0 z-30 backdrop-blur-md">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between gap-4">
+      <header className="bg-slate-900/80 border-b border-slate-800/80 sticky top-0 z-40 backdrop-blur-xl shadow-lg shadow-black/20">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2.5 flex items-center justify-between gap-4">
           {/* Logo & Brand */}
-          <div className="flex items-center gap-3 cursor-pointer" onClick={() => navigate(selectedChild ? `/children/${selectedChild.id}` : '/dashboard')}>
-            <div className="w-9 h-9 rounded-xl bg-emerald-500 flex items-center justify-center text-slate-950 font-bold shadow-lg shadow-emerald-500/20">
-              <ShieldCheck className="w-5 h-5 text-slate-950" />
+          <div
+            className="flex items-center gap-3 cursor-pointer group"
+            onClick={() => navigate(selectedChild ? `/children/${selectedChild.id}` : '/dashboard')}
+          >
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center text-slate-950 font-bold shadow-lg shadow-emerald-500/25 group-hover:scale-105 transition-transform duration-200">
+              <ShieldCheck className="w-5 h-5 text-slate-950 stroke-[2.5]" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-extrabold text-lg text-white tracking-tight">SafeBrowse</span>
-                <span className="text-[10px] uppercase tracking-wider font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full">
-                  Family
+                <span className="font-extrabold text-lg text-white tracking-tight group-hover:text-emerald-300 transition-colors">
+                  SafeBrowse
+                </span>
+                <span className="text-[10px] uppercase tracking-wider font-extrabold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full shadow-sm">
+                  Family Guard
                 </span>
               </div>
             </div>
           </div>
 
           {/* Child Switcher Pills */}
-          <div className="hidden md:flex items-center gap-2">
+          <div className="hidden md:flex items-center gap-2 p-1 bg-slate-950/70 border border-slate-800/80 rounded-2xl">
             {childrenList.map((child) => {
               const isSelected = selectedChild?.id === child.id;
               return (
@@ -156,46 +156,76 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
                     onSelectChild(child);
                     navigate(`/children/${child.id}`);
                   }}
-                  className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                  className={`flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all duration-200 ${
                     isSelected
-                      ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-500/20'
-                      : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white'
+                      ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-slate-950 shadow-md shadow-emerald-500/25 scale-[1.02]'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-900'
                   }`}
                 >
-                  <span>{child.avatar || '🧑'}</span>
+                  <span className="text-sm">{child.avatar || '🧑'}</span>
                   <span>{child.name}</span>
-                  {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-slate-950"></span>}
+                  {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-slate-950 animate-pulse" />}
                 </button>
               );
             })}
 
             <button
               onClick={() => setShowAddChildModal(true)}
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-full text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-800 border border-dashed border-slate-700 transition"
+              className="flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-bold text-slate-400 hover:text-emerald-300 hover:bg-slate-900 border border-dashed border-slate-700/80 transition-all duration-200"
             >
               <Plus className="w-3.5 h-3.5" />
-              <span>Add</span>
+              <span>Add Child</span>
             </button>
           </div>
 
           {/* User Profile & Sign Out */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5">
+            {/* 1-Tap Dinner Time / Global Family Pause Button */}
+            <button
+              onClick={async () => {
+                const nextState = !isFamilyPaused;
+                try {
+                  const res = await api.pauseFamilyAll(nextState);
+                  setIsFamilyPaused(nextState);
+                  showToast(
+                    nextState
+                      ? '🍽️ Dinner Time Active: Internet paused across all family devices!'
+                      : '🟢 Family Internet Resumed: All devices unpaused.',
+                    nextState ? 'info' : 'success'
+                  );
+                } catch (e: any) {
+                  showToast(e.message || 'Failed to toggle family pause', 'error');
+                }
+              }}
+              title={isFamilyPaused ? "Click to resume family internet" : "Pause all children's devices for family time"}
+              className={`hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-extrabold transition-all duration-200 cursor-pointer shadow-sm active:scale-95 ${
+                isFamilyPaused
+                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 hover:bg-rose-500/30'
+                  : 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 hover:border-amber-500/50'
+              }`}
+            >
+              <span className="text-sm">{isFamilyPaused ? '⏸️' : '🍽️'}</span>
+              <span>{isFamilyPaused ? 'Family Paused' : 'Dinner Time'}</span>
+            </button>
+
+            <NotificationCenter />
+
             {stats.pendingRequestsCount > 0 && (
               <button
                 onClick={() => navigate('/requests')}
-                className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 px-3 py-1 rounded-full text-xs font-bold shadow-md shadow-amber-500/20 animate-pulse"
+                className="flex items-center gap-1.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 px-3 py-1.5 rounded-xl text-xs font-extrabold shadow-md shadow-amber-500/25 animate-pulse transition"
               >
                 <span>📨</span>
                 <span>{stats.pendingRequestsCount} Pending</span>
               </button>
             )}
 
-            <div className="flex items-center gap-2 pl-3 border-l border-slate-800">
+            <div className="flex items-center gap-2 pl-2.5 border-l border-slate-800">
               <button
                 onClick={() => navigate('/settings/profile')}
-                className="flex items-center gap-1.5 text-xs font-medium text-slate-300 hover:text-emerald-400 transition"
+                className="flex items-center gap-2 text-xs font-semibold text-slate-300 hover:text-emerald-400 transition group"
               >
-                <div className="w-7 h-7 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-xs font-bold text-white">
+                <div className="w-8 h-8 rounded-xl bg-slate-800 border border-slate-700/80 flex items-center justify-center text-xs font-bold text-white group-hover:border-emerald-500/50 shadow-inner transition-colors">
                   {parentEmail ? parentEmail.charAt(0).toUpperCase() : 'P'}
                 </div>
                 <span className="hidden lg:inline max-w-[120px] truncate">{parentEmail}</span>
@@ -203,7 +233,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
 
               <button
                 onClick={onLogout}
-                className="p-1.5 text-slate-400 hover:text-rose-400 rounded-lg hover:bg-slate-800 transition"
+                className="p-2 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 rounded-xl transition-all"
                 title="Sign Out"
               >
                 <LogOut className="w-4 h-4" />
@@ -216,19 +246,19 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
       {/* Main App Body with Sidebar Layout */}
       <div className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col md:flex-row gap-6">
         {/* Left Sidebar Navigation (Desktop) */}
-        <aside className="w-full md:w-60 shrink-0 space-y-1">
-          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 px-3 pb-2">
-            Navigation
+        <aside className="w-full md:w-64 shrink-0 space-y-1">
+          <div className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500 px-3.5 pb-2">
+            Family Command Center
           </div>
           {navItems.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
               className={({ isActive }) =>
-                `flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-semibold transition-all ${
+                `flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition-all duration-200 ${
                   isActive
-                    ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
+                    ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 shadow-sm shadow-emerald-500/5'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/80 border border-transparent'
                 }`
               }
             >
@@ -237,7 +267,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
                 <span>{item.label}</span>
               </div>
               {item.badge !== undefined && (
-                <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500 text-slate-950 font-mono">
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-mono shadow-sm">
                   {item.badge}
                 </span>
               )}
@@ -306,6 +336,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
           </div>
         </div>
       )}
+      {/* Floating AI Assistant for Help & Guidance */}
+      <AiHelpBot />
     </div>
   );
 };

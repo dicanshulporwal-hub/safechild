@@ -1,4 +1,5 @@
 import { prisma } from '../db/prisma';
+import { Child } from '@prisma/client';
 import {
   Policy,
   PolicyRule,
@@ -31,9 +32,42 @@ export class PolicyService {
           familyId: child.familyId,
           version: 1,
           isPaused: false,
+          blockedCategories: ['ADULT_CONTENT', 'GAMBLING', 'MALWARE_SECURITY'],
+          safeSearch: {
+            googleSafeSearch: true,
+            bingSafeSearch: true,
+            duckDuckGoSafeSearch: true,
+            youtubeRestrictedMode: 'OFF',
+          },
           rules: [],
         },
       });
+    }
+
+    const blockedList = policy.blockedCategories || [];
+    const categoryControls: any[] = blockedList.map((cat: string) => ({
+      category: cat,
+      action: 'BLOCK',
+    }));
+
+    let formattedRules: PolicyRule[] = [];
+    if (Array.isArray(policy.rules)) {
+      formattedRules = policy.rules as unknown as PolicyRule[];
+    } else if (policy.rules && typeof policy.rules === 'object' && Array.isArray((policy.rules as any).create)) {
+      formattedRules = (policy.rules as any).create.map((r: any) => ({
+        id: r.id || `r-${nanoid(6)}`,
+        domain: r.domain || r.pattern || '',
+        action: (r.action as any) || 'BLOCK',
+        reason: r.reason,
+        addedAt: r.addedAt || new Date().toISOString(),
+      }));
+    } else if (Array.isArray(policy.blacklistedDomains) && policy.blacklistedDomains.length > 0) {
+      formattedRules = policy.blacklistedDomains.map((d: string) => ({
+        id: `r-${nanoid(6)}`,
+        domain: d,
+        action: 'BLOCK',
+        addedAt: new Date().toISOString(),
+      }));
     }
 
     return {
@@ -42,7 +76,27 @@ export class PolicyService {
       familyId: policy.familyId,
       version: policy.version,
       isPaused: policy.isPaused,
-      rules: (policy.rules as any) || [],
+      categoryControls,
+      studyMode: {
+        active: Boolean(policy.studyMode),
+        allowedCategories: ['EDUCATION'],
+      },
+      bedtime: (policy.routines as any) || {
+        enabled: false,
+        startHour: 21,
+        startMinute: 30,
+        endHour: 7,
+        endMinute: 0,
+        allowEducationalOnly: true,
+      },
+      safeSearch: (policy.safeSearch as any) || {
+        googleSafeSearch: true,
+        bingSafeSearch: true,
+        duckDuckGoSafeSearch: true,
+        youtubeRestrictedMode: 'OFF',
+      },
+      usageBudgets: (policy.usageBudgets as any) || [],
+      rules: formattedRules,
       updatedAt: policy.updatedAt.toISOString(),
     };
   }
@@ -112,7 +166,7 @@ export class PolicyService {
       updatedRules = [newPermanentRule, ...filteredRules];
     }
 
-    const updated = await prisma.policy.update({
+    await prisma.policy.update({
       where: { childId },
       data: {
         rules: updatedRules as any,
@@ -120,15 +174,7 @@ export class PolicyService {
       },
     });
 
-    const resultPolicy: Policy = {
-      id: updated.id,
-      childId: updated.childId,
-      familyId: updated.familyId,
-      version: updated.version,
-      isPaused: updated.isPaused,
-      rules: (updated.rules as any) || [],
-      updatedAt: updated.updatedAt.toISOString(),
-    };
+    const resultPolicy = await this.getPolicyForChild(childId);
 
     wsManager.broadcast({
       type: 'POLICY_UPDATED',
@@ -146,7 +192,7 @@ export class PolicyService {
     const policy = await this.getPolicyForChild(childId);
     const updatedRules = policy.rules.filter((r: PolicyRule) => r.id !== ruleId);
 
-    const updated = await prisma.policy.update({
+    await prisma.policy.update({
       where: { childId },
       data: {
         rules: updatedRules as any,
@@ -154,15 +200,7 @@ export class PolicyService {
       },
     });
 
-    const resultPolicy: Policy = {
-      id: updated.id,
-      childId: updated.childId,
-      familyId: updated.familyId,
-      version: updated.version,
-      isPaused: updated.isPaused,
-      rules: (updated.rules as any) || [],
-      updatedAt: updated.updatedAt.toISOString(),
-    };
+    const resultPolicy = await this.getPolicyForChild(childId);
 
     wsManager.broadcast({
       type: 'POLICY_UPDATED',
@@ -183,7 +221,7 @@ export class PolicyService {
   ): Promise<Policy> {
     await this.getPolicyForChild(childId);
 
-    const updated = await prisma.policy.update({
+    await prisma.policy.update({
       where: { childId },
       data: {
         isPaused,
@@ -191,15 +229,108 @@ export class PolicyService {
       },
     });
 
-    const resultPolicy: Policy = {
-      id: updated.id,
-      childId: updated.childId,
-      familyId: updated.familyId,
-      version: updated.version,
-      isPaused: updated.isPaused,
-      rules: (updated.rules as any) || [],
-      updatedAt: updated.updatedAt.toISOString(),
-    };
+    const resultPolicy = await this.getPolicyForChild(childId);
+
+    wsManager.broadcast({
+      type: 'POLICY_UPDATED',
+      payload: resultPolicy,
+      childId,
+    });
+
+    return resultPolicy;
+  }
+
+  /**
+   * Global 1-Tap Family Internet Pause (Dinner Time)
+   */
+  public async setFamilyInternetPause(familyId: string, isPaused: boolean): Promise<Child[]> {
+    const children = await prisma.child.findMany({
+      where: { familyId },
+    });
+
+    for (const ch of children) {
+      await prisma.policy.updateMany({
+        where: { childId: ch.id },
+        data: {
+          isPaused,
+          version: { increment: 1 },
+        },
+      });
+
+      const updated = await this.getPolicyForChild(ch.id);
+      wsManager.broadcast({
+        type: 'POLICY_UPDATED',
+        payload: updated,
+        childId: ch.id,
+      });
+    }
+
+    return children as any;
+  }
+
+  /**
+   * Update Category Controls (1-Click Category Blocking)
+   */
+  public async updateCategoryControls(childId: string, categoryControls: Array<{ category: string; action: 'BLOCK' | 'ALLOW' }>): Promise<Policy> {
+    const blockedList = categoryControls
+      .filter((c) => c.action === 'BLOCK')
+      .map((c) => c.category);
+
+    await prisma.policy.update({
+      where: { childId },
+      data: {
+        blockedCategories: blockedList,
+        version: { increment: 1 },
+      },
+    });
+
+    const resultPolicy = await this.getPolicyForChild(childId);
+
+    wsManager.broadcast({
+      type: 'POLICY_UPDATED',
+      payload: resultPolicy,
+      childId,
+    });
+
+    return resultPolicy;
+  }
+
+  /**
+   * Update SafeSearch & YouTube Restricted Mode
+   */
+  public async updateSafeSearch(childId: string, safeSearchConfig: any): Promise<Policy> {
+    await prisma.policy.update({
+      where: { childId },
+      data: {
+        safeSearch: safeSearchConfig,
+        version: { increment: 1 },
+      },
+    });
+
+    const resultPolicy = await this.getPolicyForChild(childId);
+
+    wsManager.broadcast({
+      type: 'POLICY_UPDATED',
+      payload: resultPolicy,
+      childId,
+    });
+
+    return resultPolicy;
+  }
+
+  /**
+   * Update Routines & Bedtime Curfew
+   */
+  public async updateRoutines(childId: string, routinesConfig: any): Promise<Policy> {
+    await prisma.policy.update({
+      where: { childId },
+      data: {
+        routines: routinesConfig,
+        version: { increment: 1 },
+      },
+    });
+
+    const resultPolicy = await this.getPolicyForChild(childId);
 
     wsManager.broadcast({
       type: 'POLICY_UPDATED',

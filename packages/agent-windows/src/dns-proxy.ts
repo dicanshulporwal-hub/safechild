@@ -75,6 +75,75 @@ export class DnsFilterProxy {
     }
   }
 
+  /**
+   * Constructs an authoritative A-record DNS response pointing to an enforced VIP
+   */
+  private buildARecordResponse(queryBuffer: Buffer, ipStr: string): Buffer {
+    try {
+      const ipParts = ipStr.split('.').map(Number);
+      const response = Buffer.from(queryBuffer);
+      response[2] = 0x81; // Standard query response, No error
+      response[3] = 0x80;
+      response[4] = 0x00; // QDCOUNT = 1
+      response[5] = 0x01;
+      response[6] = 0x00; // ANCOUNT = 1
+      response[7] = 0x01;
+      response[8] = 0x00;
+      response[9] = 0x00;
+      response[10] = 0x00;
+      response[11] = 0x00;
+
+      const answer = Buffer.from([
+        0xc0, 0x0c, // Pointer to Question Name
+        0x00, 0x01, // Type A
+        0x00, 0x01, // Class IN
+        0x00, 0x00, 0x00, 0x3c, // TTL 60s
+        0x00, 0x04, // Data Length 4
+        ipParts[0], ipParts[1], ipParts[2], ipParts[3],
+      ]);
+
+      return Buffer.concat([response, answer]);
+    } catch (e) {
+      return queryBuffer;
+    }
+  }
+
+  /**
+   * Check if the domain requires SafeSearch / YouTube Restricted DNS rewrite
+   */
+  private checkSafeSearchRewrite(domain: string, policy: Policy): string | null {
+    const safeSearch = policy.safeSearch;
+    if (!safeSearch) return null;
+
+    const lower = domain.toLowerCase();
+
+    // Google SafeSearch: forcesafesearch.google.com (216.239.38.120)
+    if (safeSearch.googleSafeSearch && (lower === 'google.com' || lower.endsWith('.google.com') || lower.startsWith('www.google.'))) {
+      return '216.239.38.120';
+    }
+
+    // Bing Strict SafeSearch: strict.bing.com (204.79.197.220)
+    if (safeSearch.bingSafeSearch && (lower === 'bing.com' || lower.endsWith('.bing.com'))) {
+      return '204.79.197.220';
+    }
+
+    // DuckDuckGo SafeSearch: safe.duckduckgo.com (52.142.124.215)
+    if (safeSearch.duckDuckGoSafeSearch && (lower === 'duckduckgo.com' || lower.endsWith('.duckduckgo.com'))) {
+      return '52.142.124.215';
+    }
+
+    // YouTube Restricted Mode: restrict.youtube.com (216.239.38.119)
+    if (
+      safeSearch.youtubeRestrictedMode &&
+      safeSearch.youtubeRestrictedMode !== 'OFF' &&
+      (lower === 'youtube.com' || lower.endsWith('.youtube.com') || lower === 'youtubei.googleapis.com')
+    ) {
+      return '216.239.38.119';
+    }
+
+    return null;
+  }
+
   public start(port: number = 53): Promise<number> {
     return new Promise((resolve, reject) => {
       this.socket = dgram.createSocket('udp4');
@@ -91,9 +160,18 @@ export class DnsFilterProxy {
             const blockResp = this.buildNxDomainResponse(msg);
             this.socket?.send(blockResp, rinfo.port, rinfo.address);
             return;
-          } else {
-            console.log(`[Windows DNS Filter] ✅ ALLOWED: ${domain} -> Forwarding upstream`);
           }
+
+          // Check for SafeSearch / YouTube Restricted DNS Rewriting
+          const rewriteIp = this.checkSafeSearchRewrite(domain, policy);
+          if (rewriteIp) {
+            console.log(`[Windows DNS Filter] 🔒 SAFESEARCH ENFORCED: ${domain} -> Rewriting to ${rewriteIp}`);
+            const safeSearchResp = this.buildARecordResponse(msg, rewriteIp);
+            this.socket?.send(safeSearchResp, rinfo.port, rinfo.address);
+            return;
+          }
+
+          console.log(`[Windows DNS Filter] ✅ ALLOWED: ${domain} -> Forwarding upstream`);
         }
 
         // Forward allowed queries to upstream DNS (e.g. 1.1.1.1)

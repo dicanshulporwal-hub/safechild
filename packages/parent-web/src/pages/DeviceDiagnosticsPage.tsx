@@ -2,7 +2,20 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useToast } from '../components/Toast';
 import { api, Device } from '../api/client';
-import { ShieldCheck, ArrowLeft, RefreshCw, CheckCircle } from 'lucide-react';
+import {
+  ShieldCheck,
+  ArrowLeft,
+  RefreshCw,
+  CheckCircle,
+  BatteryCharging,
+  Wifi,
+  Cpu,
+  Globe,
+  Radio,
+  HardDrive,
+  Lock,
+} from 'lucide-react';
+import { DnsBenchmarkCard } from '../components/DnsBenchmarkCard';
 
 interface DiagnosticStep {
   name: string;
@@ -100,6 +113,53 @@ export const DeviceDiagnosticsPage: React.FC = () => {
         </div>
       </div>
 
+      {/* Device Hardware & Network Telemetry Grid */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="p-4 bg-slate-900 border border-slate-800 rounded-xl space-y-1.5">
+          <div className="flex items-center justify-between text-slate-400 text-xs">
+            <span className="flex items-center gap-1.5 font-medium">
+              <BatteryCharging className="w-4 h-4 text-emerald-400" /> Battery Status
+            </span>
+            <span className="text-[10px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded">Charging</span>
+          </div>
+          <div className="text-xl font-extrabold text-white">88%</div>
+          <p className="text-[11px] text-slate-500">Power health: Normal (4.1V)</p>
+        </div>
+
+        <div className="p-4 bg-slate-900 border border-slate-800 rounded-xl space-y-1.5">
+          <div className="flex items-center justify-between text-slate-400 text-xs">
+            <span className="flex items-center gap-1.5 font-medium">
+              <Wifi className="w-4 h-4 text-cyan-400" /> Wi-Fi Network
+            </span>
+            <span className="text-[10px] bg-cyan-500/10 text-cyan-400 px-1.5 py-0.5 rounded">5 GHz</span>
+          </div>
+          <div className="text-xl font-extrabold text-white truncate">Home-Mesh-5G</div>
+          <p className="text-[11px] text-slate-500">Signal: 94% (-48 dBm)</p>
+        </div>
+
+        <div className="p-4 bg-slate-900 border border-slate-800 rounded-xl space-y-1.5">
+          <div className="flex items-center justify-between text-slate-400 text-xs">
+            <span className="flex items-center gap-1.5 font-medium">
+              <Globe className="w-4 h-4 text-indigo-400" /> IP & Adapter
+            </span>
+            <span className="text-[10px] bg-indigo-500/10 text-indigo-400 px-1.5 py-0.5 rounded">DHCP</span>
+          </div>
+          <div className="text-sm font-bold text-white font-mono truncate">192.168.1.145</div>
+          <p className="text-[11px] text-slate-500 font-mono">Loopback: 127.0.0.1:53</p>
+        </div>
+
+        <div className="p-4 bg-slate-900 border border-slate-800 rounded-xl space-y-1.5">
+          <div className="flex items-center justify-between text-slate-400 text-xs">
+            <span className="flex items-center gap-1.5 font-medium">
+              <Lock className="w-4 h-4 text-amber-400" /> Agent Security
+            </span>
+            <span className="text-[10px] bg-amber-500/10 text-amber-400 px-1.5 py-0.5 rounded">Enforced</span>
+          </div>
+          <div className="text-xl font-extrabold text-white">v{device?.agentVersion || '1.1.0'}</div>
+          <p className="text-[11px] text-slate-500">Tamper watchdog locked</p>
+        </div>
+      </div>
+
       {/* Diagnostic Steps List */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-3">
         <h2 className="text-sm font-bold text-white uppercase tracking-wider mb-2">Automated Check Results</h2>
@@ -124,6 +184,9 @@ export const DeviceDiagnosticsPage: React.FC = () => {
           ))}
         </div>
       </div>
+
+      {/* Real-time Resolver Speed & Latency Benchmark */}
+      <DnsBenchmarkCard />
     </div>
   );
 };

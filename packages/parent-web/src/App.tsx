@@ -21,6 +21,7 @@ import { AdminLayout } from './components/AdminLayout';
 import { AdminRollbackPage } from './pages/AdminRollbackPage';
 import { AdminAuditPage } from './pages/AdminAuditPage';
 import { AdminSupportPage } from './pages/AdminSupportPage';
+import { BlockPage } from './pages/BlockPage';
 
 function AuthenticatedApp() {
   const [userProfile, setUserProfile] = useState<any>(null);
@@ -212,6 +213,7 @@ function AuthenticatedApp() {
         <Route path="/admin/parents" element={<AdminParentsPage />} />
         <Route path="/admin/operations" element={<OperationsDashboardPage />} />
         <Route path="/status" element={<StatusPage />} />
+        <Route path="/blocked" element={<BlockPage />} />
         <Route path="/referrals" element={<ReferralPage />} />
         <Route path="/feedback" element={<FeedbackPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
@@ -222,6 +224,15 @@ function AuthenticatedApp() {
 
 export function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(Boolean(api.getToken()));
+
+  // Public routes that don't require parent authentication (e.g. child block screen)
+  if (window.location.pathname.startsWith('/blocked')) {
+    return (
+      <BrowserRouter>
+        <BlockPage />
+      </BrowserRouter>
+    );
+  }
 
   const handleAuthSuccess = () => {
     setIsAuthenticated(true);
