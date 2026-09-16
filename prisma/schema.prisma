@@ -51,30 +51,30 @@ enum DeviceHealthState {
 }
 
 model User {
-  id                      String                   @id
-  email                   String                   @unique
-  passwordHash            String
-  name                    String
-  systemRole              SystemRole               @default(USER)
-  status                  UserStatus               @default(ACTIVE)
-  disabledAt              DateTime?
-  disabledReason          String?
-  disabledByUserId        String?
-  emailVerified           Boolean                  @default(false)
-  mfaEnabled              Boolean                  @default(false)
-  mfaSecret               String?
-  mfaRecoveryCodes        String[]                 @default([])
-  totpLastUsedSteps       Json?
-  pendingMfaSecret        String?
-  mobileNumber            String?
-  profilePhoto            String?
-  timezone                String?
-  language                String?
-  notificationPrefs       Json?
-  tokenVersion            Int                      @default(1)
-  createdAt               DateTime                 @default(now())
-  updatedAt               DateTime                 @updatedAt
-  lastLoginAt             DateTime?
+  id                String     @id
+  email             String     @unique
+  passwordHash      String
+  name              String
+  systemRole        SystemRole @default(USER)
+  status            UserStatus @default(ACTIVE)
+  disabledAt        DateTime?
+  disabledReason    String?
+  disabledByUserId  String?
+  emailVerified     Boolean    @default(false)
+  mfaEnabled        Boolean    @default(false)
+  mfaSecret         String?
+  mfaRecoveryCodes  String[]   @default([])
+  totpLastUsedSteps Json?
+  pendingMfaSecret  String?
+  mobileNumber      String?
+  profilePhoto      String?
+  timezone          String?
+  language          String?
+  notificationPrefs Json?
+  tokenVersion      Int        @default(1)
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+  lastLoginAt       DateTime?
 
   sessions                UserSession[]
   challenges              MfaChallenge[]
@@ -111,31 +111,31 @@ model UserSession {
 }
 
 model MfaChallenge {
-  id             String    @id
-  userId         String
-  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  jtiHash        String    @unique
-  purpose        String
-  createdAt      DateTime  @default(now())
-  expiresAt      DateTime
-  consumedAt     DateTime?
-  invalidatedAt  DateTime?
-  attemptCount   Int       @default(0)
-  ipAddress      String?
-  userAgent      String?
+  id            String    @id
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jtiHash       String    @unique
+  purpose       String
+  createdAt     DateTime  @default(now())
+  expiresAt     DateTime
+  consumedAt    DateTime?
+  invalidatedAt DateTime?
+  attemptCount  Int       @default(0)
+  ipAddress     String?
+  userAgent     String?
 
   @@index([userId])
 }
 
 model Family {
-  id                String             @id
-  name              String
-  ownerUserId       String
-  owner             User               @relation("FamilyOwner", fields: [ownerUserId], references: [id], onDelete: Restrict)
-  requireMfa        Boolean            @default(false)
-  approvalRule      FamilyApprovalRule @default(OWNER_OR_PARENT)
-  createdAt         DateTime           @default(now())
-  updatedAt         DateTime           @updatedAt
+  id           String             @id
+  name         String
+  ownerUserId  String
+  owner        User               @relation("FamilyOwner", fields: [ownerUserId], references: [id], onDelete: Restrict)
+  requireMfa   Boolean            @default(false)
+  approvalRule FamilyApprovalRule @default(OWNER_OR_PARENT)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
 
   members           FamilyMember[]
   invitations       FamilyInvitation[]

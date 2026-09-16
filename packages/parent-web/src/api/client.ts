@@ -772,6 +772,29 @@ class ApiClient {
     return data;
   }
 
+  async adminDisableUser(id: string, reason: string) {
+    this.invalidateCache(`${API_BASE}/admin/parents`);
+    const res = await fetch(`${API_BASE}/admin/parents/${id}/disable`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ reason }),
+    });
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to disable user');
+    return data;
+  }
+
+  async adminEnableUser(id: string) {
+    this.invalidateCache(`${API_BASE}/admin/parents`);
+    const res = await fetch(`${API_BASE}/admin/parents/${id}/enable`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+    });
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to enable user');
+    return data;
+  }
+
   async dispatchAdminRollback(targetVersion: string, reason?: string) {
     this.invalidateCache();
     const res = await fetch(`${API_BASE}/admin/rollback`, {

@@ -45,6 +45,12 @@ export async function authMiddleware(req: AuthenticatedRequest, res: Response, n
     req.tokenVersion = decoded.tokenVersion;
     next();
   } catch (e: any) {
+    if (e.code === 'ACCOUNT_DISABLED' || e.message?.includes('ACCOUNT_DISABLED') || e.message?.includes('account has been disabled')) {
+      return res.status(403).json({
+        error: 'This account has been disabled. Contact the administrator.',
+        code: 'ACCOUNT_DISABLED',
+      });
+    }
     return res.status(401).json({ error: e.message || 'Unauthorized. Invalid, expired or revoked token.' });
   }
 }

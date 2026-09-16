@@ -144,7 +144,7 @@ export const AdminParentsPage: React.FC = () => {
     }
     setUpdatingAccountStatus(true);
     try {
-      await postAdminAction(`/api/admin/parents/${selectedParentForDisable.id}/disable`, { reason });
+      await api.adminDisableUser(selectedParentForDisable.id, reason);
       showToast(`Account disabled for ${selectedParentForDisable.email}`, 'success');
       setSelectedParentForDisable(null);
       setDisableReason('');
@@ -160,7 +160,7 @@ export const AdminParentsPage: React.FC = () => {
     if (!window.confirm(`Enable ${parent.email}? The user will need to sign in again; old sessions will remain revoked.`)) return;
     setUpdatingAccountStatus(true);
     try {
-      await postAdminAction(`/api/admin/parents/${parent.id}/enable`);
+      await api.adminEnableUser(parent.id);
       showToast(`Account enabled for ${parent.email}`, 'success');
       await fetchAdminData();
     } catch (e: any) {
@@ -356,10 +356,12 @@ export const AdminParentsPage: React.FC = () => {
         <Modal title={`Disable ${selectedParentForDisable.email}?`} onClose={() => setSelectedParentForDisable(null)}>
           <form onSubmit={handleDisableUser} className="space-y-4">
             <div className="text-xs text-slate-300 space-y-1 bg-slate-950 border border-slate-800 rounded-xl p-4">
-              <div>• Login will be blocked immediately.</div>
-              <div>• Active web sessions will be revoked.</div>
-              <div>• Family, child, policy and device data will remain intact.</div>
-              <div>• Child device protection will continue.</div>
+              <div>• Login will be blocked</div>
+              <div>• Web sessions will be revoked</div>
+              <div>• Family data remains</div>
+              <div>• Child data remains</div>
+              <div>• Policies remain</div>
+              <div>• Device protection remains</div>
             </div>
             <div>
               <label className="block text-[11px] uppercase font-bold text-slate-400 mb-1">Reason (required)</label>

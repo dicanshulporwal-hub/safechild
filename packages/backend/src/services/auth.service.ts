@@ -6,6 +6,7 @@ import {
   PasswordResetToken,
   MfaChallenge,
   SystemRole,
+  UserStatus,
 } from '../types/models';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
@@ -111,8 +112,13 @@ export class AuthService {
   ): Promise<{ accessToken: string; refreshToken: string; session: UserSession }> {
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { tokenVersion: true },
+      select: { tokenVersion: true, status: true },
     });
+    if (user?.status === 'DISABLED') {
+      const err = new Error('This account has been disabled. Contact the administrator.');
+      (err as any).code = 'ACCOUNT_DISABLED';
+      throw err;
+    }
     const tokenVersion = user?.tokenVersion || 1;
 
     const rawRefreshToken = generateCryptoToken('rt_');
@@ -202,34 +208,47 @@ export class AuthService {
 
       // Replay attack handling or invalid session
       if (!matchingSession || matchingSession.isRevoked || isReplayAttack) {
-        if (matchingSession && (matchingSession.isRevoked || isReplayAttack)) {
-          // Revoke entire token family
-          await tx.userSession.updateMany({
-            where: { sessionFamilyId: matchingSession.sessionFamilyId },
-            data: { isRevoked: true },
-          });
-
-          await tx.user.update({
+        if (matchingSession) {
+          const user = await tx.user.findUnique({
             where: { id: matchingSession.userId },
-            data: { tokenVersion: { increment: 1 } },
           });
+          if (user && user.status === 'DISABLED') {
+            return {
+              error: 'This account has been disabled. Contact the administrator.',
+              code: 'ACCOUNT_DISABLED',
+              status: 403,
+            };
+          }
 
-          const fam = await tx.familyMember.findFirst({
-            where: { userId: matchingSession.userId },
-            include: { user: true },
-          });
-          if (fam) {
-            await tx.familyAuditLog.create({
-              data: {
-                id: `log-${nanoid(10)}`,
-                familyId: fam.familyId,
-                actorUserId: matchingSession.userId,
-                actorName: fam.user.name,
-                action: 'SESSION_REFRESH_REPLAY_ATTACK',
-                details:
-                  'Security Incident: Refresh token replay attack detected. All active sessions in family revoked.',
-              },
+          if (matchingSession.isRevoked || isReplayAttack) {
+            // Revoke entire token family
+            await tx.userSession.updateMany({
+              where: { sessionFamilyId: matchingSession.sessionFamilyId },
+              data: { isRevoked: true },
             });
+
+            await tx.user.update({
+              where: { id: matchingSession.userId },
+              data: { tokenVersion: { increment: 1 } },
+            });
+
+            const fam = await tx.familyMember.findFirst({
+              where: { userId: matchingSession.userId },
+              include: { user: true },
+            });
+            if (fam) {
+              await tx.familyAuditLog.create({
+                data: {
+                  id: `log-${nanoid(10)}`,
+                  familyId: fam.familyId,
+                  actorUserId: matchingSession.userId,
+                  actorName: fam.user.name,
+                  action: 'SESSION_REFRESH_REPLAY_ATTACK',
+                  details:
+                    'Security Incident: Refresh token replay attack detected. All active sessions in family revoked.',
+                },
+              });
+            }
           }
         }
         return { error: 'Invalid, expired or revoked refresh token. Please log in again.' };
@@ -254,6 +273,18 @@ export class AuthService {
           data: { isRevoked: true },
         });
         return { error: 'User not found.' };
+      }
+
+      if (user.status === 'DISABLED') {
+        await tx.userSession.update({
+          where: { id: matchingSession.id },
+          data: { isRevoked: true },
+        });
+        return {
+          error: 'This account has been disabled. Contact the administrator.',
+          code: 'ACCOUNT_DISABLED',
+          status: 403,
+        };
       }
 
       // Token version consistency
@@ -293,7 +324,11 @@ export class AuthService {
     });
 
     if ('error' in result && (result as any).error) {
-      throw new Error((result as any).error);
+      const err = new Error((result as any).error);
+      if ((result as any).code) {
+        (err as any).code = (result as any).code;
+      }
+      throw err;
     }
 
     return result as { accessToken: string; refreshToken: string };
@@ -409,6 +444,10 @@ export class AuthService {
       name: result.name,
       passwordHash: result.passwordHash,
       systemRole: result.systemRole as SystemRole,
+      status: result.status as UserStatus,
+      disabledAt: result.disabledAt ? result.disabledAt.toISOString() : null,
+      disabledReason: result.disabledReason,
+      disabledByUserId: result.disabledByUserId,
       emailVerified: result.emailVerified,
       mfaEnabled: result.mfaEnabled,
       tokenVersion: result.tokenVersion,
@@ -441,6 +480,12 @@ export class AuthService {
     if (!user) {
       this.recordFailedAttempt(rateLimitKey, 5, 15 * 60 * 1000);
       throw new Error('Invalid email or password.');
+    }
+
+    if (user.status === 'DISABLED') {
+      const err = new Error('This account has been disabled. Contact the administrator.');
+      (err as any).code = 'ACCOUNT_DISABLED';
+      throw err;
     }
 
     if (!bcrypt.compareSync(password, user.passwordHash)) {
@@ -535,6 +580,10 @@ export class AuthService {
       name: user.name,
       passwordHash: user.passwordHash,
       systemRole: user.systemRole as SystemRole,
+      status: user.status as UserStatus,
+      disabledAt: user.disabledAt ? user.disabledAt.toISOString() : null,
+      disabledReason: user.disabledReason,
+      disabledByUserId: user.disabledByUserId,
       emailVerified: user.emailVerified,
       mfaEnabled: user.mfaEnabled,
       tokenVersion: user.tokenVersion,
@@ -584,6 +633,21 @@ export class AuthService {
     }
 
     return prisma.$transaction(async (tx) => {
+      const user = await tx.user.findUnique({
+        where: { id: decoded.userId },
+      });
+      if (!user) {
+        throw new Error('User account not found.');
+      }
+      if (user.status === 'DISABLED') {
+        const err = new Error('This account has been disabled. Contact the administrator.');
+        (err as any).code = 'ACCOUNT_DISABLED';
+        throw err;
+      }
+      if (!user.mfaSecret) {
+        throw new Error('MFA configuration not found for this account.');
+      }
+
       const challenge = await tx.mfaChallenge.findUnique({
         where: { id: decoded.ticketId },
       });
@@ -622,13 +686,6 @@ export class AuthService {
           data: { attemptCount: { increment: 1 } },
         });
         throw new Error('MFA challenge integrity check failed.');
-      }
-
-      const user = await tx.user.findUnique({
-        where: { id: decoded.userId },
-      });
-      if (!user || !user.mfaSecret) {
-        throw new Error('User or MFA configuration not found.');
       }
 
       const cleanInput = codeOrRecoveryCode.trim().toUpperCase();
@@ -745,6 +802,10 @@ export class AuthService {
         name: user.name,
         passwordHash: user.passwordHash,
         systemRole: user.systemRole as SystemRole,
+        status: user.status as UserStatus,
+        disabledAt: user.disabledAt ? user.disabledAt.toISOString() : null,
+        disabledReason: user.disabledReason,
+        disabledByUserId: user.disabledByUserId,
         emailVerified: user.emailVerified,
         mfaEnabled: user.mfaEnabled,
         tokenVersion: user.tokenVersion,
@@ -807,6 +868,21 @@ export class AuthService {
       throw new Error('Invalid token claims: tokenVersion missing.');
     }
 
+    // User existence, status and tokenVersion check
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { tokenVersion: true, status: true },
+    });
+
+    if (!user) {
+      throw new Error('User account not found.');
+    }
+    if (user.status === 'DISABLED') {
+      const err = new Error('This account has been disabled. Contact the administrator.');
+      (err as any).code = 'ACCOUNT_DISABLED';
+      throw err;
+    }
+
     // Session validation against PostgreSQL
     const session = await prisma.userSession.findUnique({
       where: { id: decoded.sessionId },
@@ -826,16 +902,6 @@ export class AuthService {
     }
     if (session.tokenVersion !== decoded.tokenVersion) {
       throw new Error('Session has been invalidated. Please sign in again.');
-    }
-
-    // User existence and tokenVersion check
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { tokenVersion: true },
-    });
-
-    if (!user) {
-      throw new Error('User account not found.');
     }
     if (decoded.tokenVersion !== (user.tokenVersion || 1)) {
       throw new Error('Token has been invalidated. Please sign in again.');
@@ -1073,6 +1139,10 @@ export class AuthService {
       name: user.name,
       passwordHash: user.passwordHash,
       systemRole: user.systemRole as SystemRole,
+      status: user.status as any,
+      disabledAt: user.disabledAt ? user.disabledAt.toISOString() : undefined,
+      disabledReason: user.disabledReason,
+      disabledByUserId: user.disabledByUserId,
       emailVerified: user.emailVerified,
       mfaEnabled: user.mfaEnabled,
       mfaSecret: user.mfaSecret,
