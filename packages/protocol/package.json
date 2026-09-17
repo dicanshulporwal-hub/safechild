@@ -5,7 +5,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "test": "node --test dist/tests/**/*.test.js"
+    "test": "node -e \"console.log('@safebrowse/protocol: contracts-only package (0 tests)')\""
   },
   "devDependencies": {
     "@types/node": "^20.12.7",

@@ -19,7 +19,7 @@
     "dev": "concurrently \"npm run dev:backend\" \"npm run dev:web\"",
     "test": "npm run test --workspaces --if-present",
     "test:e2e": "ts-node scripts/test-e2e-scenario.ts",
-    "test:postgres:e2e": "node --test packages/backend/dist/tests/postgres-e2e.test.js",
+    "test:postgres:e2e": "node packages/backend/scripts/run-tests.js dist/tests/postgres-e2e.test.js",
     "verify:postgres-cutover": "ts-node scripts/verify-postgres-cutover.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",

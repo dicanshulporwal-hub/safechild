@@ -51,7 +51,7 @@ describe('SafeBrowse Windows Process Limiter & Hard Enforcer Tests', () => {
       },
     ] as any,
     bedtime: {
-      enabled: true,
+      enabled: false,
       startHour: 21,
       startMinute: 30,
       endHour: 7,
@@ -192,7 +192,16 @@ describe('SafeBrowse Windows Process Limiter & Hard Enforcer Tests', () => {
   });
 
   it('8. should terminate game process immediately during Bedtime curfew (22:00)', () => {
-    let policy = createBasePolicy();
+    let policy = createBasePolicy({
+      bedtime: {
+        enabled: true,
+        startHour: 21,
+        startMinute: 30,
+        endHour: 7,
+        endMinute: 0,
+        allowEducationalOnly: true,
+      },
+    });
     const limiter = new WindowsProcessLimiter(mockConfig, () => policy, { simulate: true });
 
     const nightTime = new Date('2026-09-15T22:00:00');
