@@ -4,9 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       pilotBackendUrl:
-        description: 'Pilot Backend URL'
+        description: Pilot Backend URL
         required: false
-        default: 'http://100.88.17.16:11002'
+        type: string
+        default: http://100.88.17.16:11002
+
+  push:
+    branches:
+      - feature/stage11-step4-device-enforcement
 
 jobs:
   build-windows-msi:
@@ -60,7 +65,7 @@ jobs:
         run: |
           $releaseWinDir = "release/windows"
           if (-not (Test-Path $releaseWinDir)) { New-Item -ItemType Directory -Path $releaseWinDir -Force }
-          
+
           $bundleJs = "$releaseWinDir/bundle.js"
           $seaConfig = "$releaseWinDir/sea-config.json"
           $seaBlob = "$releaseWinDir/sea-prep.blob"
@@ -89,7 +94,7 @@ jobs:
           Copy-Item "packages/agent-windows/dist/SafeBrowseServiceHost.exe" "$releaseWinDir/SafeBrowseServiceHost.exe" -Force
           Copy-Item "packages/agent-windows/wix/SafeBrowse-Pair.cmd" "$releaseWinDir/SafeBrowse-Pair.cmd" -Force
           Copy-Item "packages/agent-windows/wix/SafeBrowse-EmergencyRestore.cmd" "$releaseWinDir/SafeBrowse-EmergencyRestore.cmd" -Force
-          
+
           $scriptsDest = "$releaseWinDir/scripts"
           if (-not (Test-Path $scriptsDest)) { New-Item -ItemType Directory -Path $scriptsDest -Force }
           Copy-Item "packages/agent-windows/scripts/configure-dns.ps1" "$scriptsDest/configure-dns.ps1" -Force
@@ -137,19 +142,20 @@ jobs:
           $hostHash = (Get-FileHash -Path $serviceHostPath -Algorithm SHA256).Hash.ToLower()
           $msiHash = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash.ToLower()
 
-          $manifest = @"
-# SafeBrowse Windows Pilot Build Checksum Manifest
-Timestamp: $((Get-Date).ToUniversalTime().ToString("o"))
-SigningStatus: UNSIGNED (Local Pilot Physical Validation Build)
-TargetBackend: ${{ github.event.inputs.pilotBackendUrl || 'http://100.88.17.16:11002' }}
-
-$exeHash *SafeBrowseChild-Pilot.exe
-$hostHash *SafeBrowseServiceHost.exe
-$msiHash *SafeBrowseChild-Pilot.msi
-"@
+          $manifestBackend = "${{ inputs.pilotBackendUrl || github.event.inputs.pilotBackendUrl || 'http://100.88.17.16:11002' }}"
+          $manifestLines = @(
+            "# SafeBrowse Windows Pilot Build Checksum Manifest"
+            "Timestamp: $((Get-Date).ToUniversalTime().ToString('o'))"
+            "SigningStatus: UNSIGNED (Local Pilot Physical Validation Build)"
+            "TargetBackend: $manifestBackend"
+            ""
+            "$exeHash *SafeBrowseChild-Pilot.exe"
+            "$hostHash *SafeBrowseServiceHost.exe"
+            "$msiHash *SafeBrowseChild-Pilot.msi"
+          )
 
           $manifestFile = "$releaseWinDir/SHA256SUMS.txt"
-          Set-Content -Path $manifestFile -Value $manifest -Encoding UTF8
+          Set-Content -Path $manifestFile -Value ($manifestLines -join "`n") -Encoding UTF8
 
           Set-Content -Path "$exePath.sha256" -Value "$exeHash *SafeBrowseChild-Pilot.exe" -Encoding UTF8
           Set-Content -Path "$msiPath.sha256" -Value "$msiHash *SafeBrowseChild-Pilot.msi" -Encoding UTF8
