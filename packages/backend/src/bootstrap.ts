@@ -7,6 +7,7 @@ import { ensureDemoAccounts } from './services/seed.service';
 
 export interface BootstrapOptions {
   port?: number | string;
+  host?: string;
   skipListen?: boolean;
 }
 
@@ -17,6 +18,13 @@ export async function bootstrap(
 ): Promise<http.Server> {
   const port = options.port !== undefined ? options.port : (process.env.PORT !== undefined ? process.env.PORT : 1002);
   const isProduction = process.env.NODE_ENV === 'production';
+  const host = options.host !== undefined && options.host.trim().length > 0
+    ? options.host.trim()
+    : (process.env.HOST !== undefined && process.env.HOST.trim().length > 0)
+      ? process.env.HOST.trim()
+      : isProduction
+        ? '0.0.0.0'
+        : '127.0.0.1';
 
   // 1. Validate Environment Variables
   const missing: string[] = [];
@@ -124,7 +132,7 @@ export async function bootstrap(
   // 7. Open HTTP Port
   if (!options.skipListen) {
     await new Promise<void>((resolve) => {
-      server.listen(port, () => {
+      server.listen(Number(port), host, () => {
         const address = server.address() as any;
         const actualPort = address?.port || port;
         console.log(`SafeBrowse API Server running on port ${actualPort} [PostgreSQL Single System of Record]`);
