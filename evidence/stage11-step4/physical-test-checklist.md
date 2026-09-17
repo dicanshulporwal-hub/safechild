@@ -46,39 +46,49 @@
 
 ## 2. Windows Physical Device Testing Protocol
 
+See detailed step-by-step physical test procedure in: [`docs/stage11/windows-msi-pilot-validation-procedure.md`](../../docs/stage11/windows-msi-pilot-validation-procedure.md).
+
 ### 2.1 Installation & Service Verification
-1. Open PowerShell or Command Prompt as **Administrator** on the physical Windows PC.
-2. Run installer setup:
-   ```cmd
-   .\release\windows\SafeBrowseChild-Pilot-Setup.cmd --pairing-code SB-XXXXXX
+1. Pre-installation connectivity verification:
+   ```powershell
+   Test-NetConnection -ComputerName 100.88.17.16 -Port 11002
+   curl.exe -s http://100.88.17.16:11002/health
    ```
-3. Verify service registration and status:
+2. Install elevated MSI package:
+   ```cmd
+   msiexec.exe /i SafeBrowseChild-Pilot.msi /l*v install.log
+   ```
+3. Pair device with Parent Portal code:
+   ```cmd
+   "C:\Program Files\SafeBrowse\SafeBrowse-Pair.cmd" SB-XXXXXX "Rahul's Windows Laptop"
+   ```
+4. Verify service registration and status:
    ```cmd
    sc.exe query SafeBrowseChildService
    ```
-4. Verify port 53 DNS listener:
+5. Verify port 53 DNS listener:
    ```cmd
    netstat -ano | findstr ":53 "
    ```
-5. Check binary signature / Authenticode properties:
+6. Check binary signature / Authenticode properties:
    ```powershell
-   Get-AuthenticodeSignature .\release\windows\SafeBrowseChild-Pilot.exe
+   Get-AuthenticodeSignature "C:\Program Files\SafeBrowse\SafeBrowseChild-Pilot.exe"
    ```
 
 ### 2.2 Windows Test Matrix (To be completed by Tester)
 
 | # | Test Case Description | User Action / Command | Observed Result | Pass / Fail | Timestamp |
 |---|---|---|---|---|---|
-| **W1** | **Service Installation** | Run installer setup as Admin; verify `sc.exe query` status is RUNNING | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
-| **W2** | **Adapter DNS Configuration** | Check `Get-DnsClientServerAddress`; confirm `127.0.0.1` | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
-| **W3** | **Website Blocking in Edge** | In Microsoft Edge, navigate to blocked domain | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
-| **W4** | **Website Blocking in Chrome** | In Google Chrome, navigate to blocked domain | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
-| **W5** | **Ask Parent Flow** | Submit access request; approve in parent portal; confirm access | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
-| **W6** | **Bedtime / Pause Enforcement**| Toggle Internet Pause in parent portal; confirm DNS blocks | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
-| **W7** | **Offline Enforcement** | Disconnect Wi-Fi/Ethernet; verify cached policy blocks local resolution | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
-| **W8** | **Service Non-Admin Protection**| From standard user command prompt, attempt `sc.exe stop SafeBrowseChildService` | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
-| **W9** | **Reboot Persistence** | Restart Windows PC; verify `SafeBrowseChildService` auto-starts | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
-| **W10**| **Clean Uninstallation** | Run uninstaller rollback; verify original DNS adapters restored | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
+| **W1** | **MSI Installation & Service** | Install MSI elevated; verify `sc.exe query SafeBrowseChildService` | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
+| **W2** | **Device Pairing & Credentials**| Run `SafeBrowse-Pair.cmd SB-XXXXXX`; confirm `device-config.json` in ProgramData | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
+| **W3** | **Adapter DNS Configuration** | Check `Get-DnsClientServerAddress`; confirm `127.0.0.1` | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
+| **W4** | **Website Blocking in Edge/Chrome** | In Microsoft Edge/Chrome, navigate to blocked domain (`gambling-test-site.com`) | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
+| **W5** | **SafeSearch VIP Enforcement** | Run `nslookup google.com 127.0.0.1` (expect `216.239.38.120`) | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
+| **W6** | **IPv6 / AAAA Bypass Shield** | Run `nslookup -type=AAAA google.com 127.0.0.1` (expect NODATA/0 answers) | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
+| **W7** | **Ask Parent Flow** | Submit access request on block screen; approve in parent portal; confirm unlock | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
+| **W8** | **Bedtime / Pause Enforcement**| Toggle Internet Pause in parent portal; confirm DNS returns NXDOMAIN | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
+| **W9** | **Offline Enforcement** | Disconnect Wi-Fi/Ethernet; verify cached policy blocks local resolution | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
+| **W10**| **Reboot & Clean Uninstall** | Reboot machine (auto-resumes); Uninstall MSI (verifies DNS and rules restored) | `[ USER_RECORD ]` | `[ ] PASS / [ ] FAIL` | `____:____:____` |
 
 ---
 

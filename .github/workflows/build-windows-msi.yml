@@ -1,0 +1,173 @@
+name: Windows MSI Pilot Packaging
+
+on:
+  workflow_dispatch:
+    inputs:
+      pilotBackendUrl:
+        description: 'Pilot Backend URL'
+        required: false
+        default: 'http://100.88.17.16:11002'
+
+jobs:
+  build-windows-msi:
+    name: Build Windows MSI Pilot Package
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared and protocol workspaces
+        run: |
+          npm run build:shared
+          npm run build:protocol
+
+      - name: Build Windows agent
+        run: npm run build:windows
+
+      - name: Run Windows agent automated tests
+        run: npm run test --workspace=@safebrowse/agent-windows
+
+      - name: Compile Windows Service Host Wrapper (SafeBrowseServiceHost.exe)
+        shell: pwsh
+        run: |
+          $cscPath = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not (Test-Path $cscPath)) {
+            $cscPath = "csc.exe"
+          }
+          $sourceFile = "packages/agent-windows/service-host/SafeBrowseServiceHost.cs"
+          $outDir = "packages/agent-windows/dist"
+          if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force }
+          $outputExe = "$outDir/SafeBrowseServiceHost.exe"
+          Write-Host "Compiling $sourceFile with $cscPath..."
+          & $cscPath /target:exe /optimize+ /out:$outputExe /r:System.ServiceProcess.dll $sourceFile
+          if (-not (Test-Path $outputExe)) {
+            Write-Error "Failed compiling SafeBrowseServiceHost.exe"
+            exit 1
+          }
+          Write-Host "Compiled SafeBrowseServiceHost.exe successfully."
+
+      - name: Build Single Executable Application (SafeBrowseChild-Pilot.exe)
+        shell: pwsh
+        run: |
+          $releaseWinDir = "release/windows"
+          if (-not (Test-Path $releaseWinDir)) { New-Item -ItemType Directory -Path $releaseWinDir -Force }
+          
+          $bundleJs = "$releaseWinDir/bundle.js"
+          $seaConfig = "$releaseWinDir/sea-config.json"
+          $seaBlob = "$releaseWinDir/sea-prep.blob"
+          $targetExe = "$releaseWinDir/SafeBrowseChild-Pilot.exe"
+          $entryTs = "packages/agent-windows/src/agent-cli.ts"
+
+          # 1. Bundle TypeScript agent with esbuild
+          Write-Host "Bundling agent-cli.ts with esbuild..."
+          npx esbuild "$entryTs" --bundle --platform=node --target=node20 --outfile="$bundleJs"
+
+          # 2. Generate SEA blob
+          @{ main = $bundleJs; output = $seaBlob } | ConvertTo-Json | Set-Content -Path $seaConfig -Encoding UTF8
+          Write-Host "Generating Node SEA blob..."
+          node --experimental-sea-config "$seaConfig"
+
+          # 3. Copy host node.exe
+          $nodeExe = (Get-Command node).Source
+          Write-Host "Copying host node binary ($nodeExe) to $targetExe..."
+          Copy-Item -Path $nodeExe -Destination $targetExe -Force
+
+          # 4. Inject SEA blob into executable via postject
+          Write-Host "Injecting SEA blob with postject..."
+          npx --yes postject "$targetExe" NODE_SEA_BLOB "$seaBlob" --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
+
+          # Copy SafeBrowseServiceHost.exe and helper scripts to release/windows
+          Copy-Item "packages/agent-windows/dist/SafeBrowseServiceHost.exe" "$releaseWinDir/SafeBrowseServiceHost.exe" -Force
+          Copy-Item "packages/agent-windows/wix/SafeBrowse-Pair.cmd" "$releaseWinDir/SafeBrowse-Pair.cmd" -Force
+          Copy-Item "packages/agent-windows/wix/SafeBrowse-EmergencyRestore.cmd" "$releaseWinDir/SafeBrowse-EmergencyRestore.cmd" -Force
+          
+          $scriptsDest = "$releaseWinDir/scripts"
+          if (-not (Test-Path $scriptsDest)) { New-Item -ItemType Directory -Path $scriptsDest -Force }
+          Copy-Item "packages/agent-windows/scripts/configure-dns.ps1" "$scriptsDest/configure-dns.ps1" -Force
+          Copy-Item "packages/agent-windows/scripts/restore-dns.ps1" "$scriptsDest/restore-dns.ps1" -Force
+
+          # Cleanup intermediate build files
+          Remove-Item $bundleJs, $seaConfig, $seaBlob -ErrorAction SilentlyContinue
+
+          if (-not (Test-Path $targetExe)) {
+            Write-Error "Failed to generate SafeBrowseChild-Pilot.exe"
+            exit 1
+          }
+          Write-Host "SafeBrowseChild-Pilot.exe generated successfully."
+
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 4.0.5
+
+      - name: Build SafeBrowseChild-Pilot.msi via WiX Toolset
+        shell: pwsh
+        run: |
+          $wxsPath = "packages/agent-windows/wix/SafeBrowseChild-Pilot.wxs"
+          $sourceDir = (Resolve-Path "release/windows").Path
+          $msiOutput = "$sourceDir/SafeBrowseChild-Pilot.msi"
+
+          Write-Host "Building MSI package with WiX Toolset v4..."
+          wix build -arch x64 "$wxsPath" -d SourceDir="$sourceDir" -o "$msiOutput"
+
+          if (-not (Test-Path $msiOutput)) {
+            Write-Error "Failed to generate SafeBrowseChild-Pilot.msi"
+            exit 1
+          }
+          Write-Host "SafeBrowseChild-Pilot.msi built successfully."
+
+      - name: Calculate SHA-256 Checksums and Manifest
+        shell: pwsh
+        run: |
+          $releaseWinDir = "release/windows"
+          $exePath = "$releaseWinDir/SafeBrowseChild-Pilot.exe"
+          $serviceHostPath = "$releaseWinDir/SafeBrowseServiceHost.exe"
+          $msiPath = "$releaseWinDir/SafeBrowseChild-Pilot.msi"
+
+          $exeHash = (Get-FileHash -Path $exePath -Algorithm SHA256).Hash.ToLower()
+          $hostHash = (Get-FileHash -Path $serviceHostPath -Algorithm SHA256).Hash.ToLower()
+          $msiHash = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash.ToLower()
+
+          $manifest = @"
+# SafeBrowse Windows Pilot Build Checksum Manifest
+Timestamp: $((Get-Date).ToUniversalTime().ToString("o"))
+SigningStatus: UNSIGNED (Local Pilot Physical Validation Build)
+TargetBackend: ${{ github.event.inputs.pilotBackendUrl || 'http://100.88.17.16:11002' }}
+
+$exeHash *SafeBrowseChild-Pilot.exe
+$hostHash *SafeBrowseServiceHost.exe
+$msiHash *SafeBrowseChild-Pilot.msi
+"@
+
+          $manifestFile = "$releaseWinDir/SHA256SUMS.txt"
+          Set-Content -Path $manifestFile -Value $manifest -Encoding UTF8
+
+          Set-Content -Path "$exePath.sha256" -Value "$exeHash *SafeBrowseChild-Pilot.exe" -Encoding UTF8
+          Set-Content -Path "$msiPath.sha256" -Value "$msiHash *SafeBrowseChild-Pilot.msi" -Encoding UTF8
+
+          Write-Host "=== Checksum Summary ==="
+          Write-Host "SafeBrowseChild-Pilot.exe: $exeHash"
+          Write-Host "SafeBrowseServiceHost.exe: $hostHash"
+          Write-Host "SafeBrowseChild-Pilot.msi: $msiHash"
+          Write-Host "NOTE: Pilot MSI and binaries are UNSIGNED for Stage 11 Step 4 physical validation."
+
+      - name: Upload SafeBrowse Windows Pilot MSI Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SafeBrowseChild-Pilot-MSI
+          path: |
+            release/windows/SafeBrowseChild-Pilot.msi
+            release/windows/SafeBrowseChild-Pilot.msi.sha256
+            release/windows/SafeBrowseChild-Pilot.exe
+            release/windows/SafeBrowseChild-Pilot.exe.sha256
+            release/windows/SHA256SUMS.txt
+          if-no-files-found: error

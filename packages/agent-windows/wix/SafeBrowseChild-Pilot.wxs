@@ -1,0 +1,98 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="SafeBrowse Child Pilot"
+      Manufacturer="SafeBrowse"
+      Version="1.0.0.0"
+      UpgradeCode="B7C5E643-81D2-4A7F-991A-7110C99AA511"
+      Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- 1. Program Files (64-bit) Structure -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="SafeBrowse">
+        <!-- Main Node SEA Binary -->
+        <Component Id="MainExecutable" Guid="3F8A682D-E8C2-4E51-87BE-189A84B30411" Bitness="always64">
+          <File Id="SafeBrowseChildExe" Source="$(var.SourceDir)\SafeBrowseChild-Pilot.exe" KeyPath="yes" />
+        </Component>
+
+        <!-- Windows Service Host (Native SCM wrapper) -->
+        <Component Id="ServiceHostExecutable" Guid="4D9E71F2-92A3-483B-A70E-9218D6C4B922" Bitness="always64">
+          <File Id="ServiceHostExe" Source="$(var.SourceDir)\SafeBrowseServiceHost.exe" KeyPath="yes" />
+          <ServiceInstall
+              Id="InstallSafeBrowseService"
+              Name="SafeBrowseChildService"
+              DisplayName="SafeBrowse Child Protection Service"
+              Description="SafeBrowse kernel DNS proxy and parental policy enforcement engine."
+              Type="ownProcess"
+              Start="delayedAuto"
+              ErrorControl="normal"
+              Account="LocalSystem" />
+          <ServiceControl
+              Id="ControlSafeBrowseService"
+              Name="SafeBrowseChildService"
+              Stop="both"
+              Remove="uninstall"
+              Wait="yes" />
+        </Component>
+
+        <!-- Pairing Utility Script -->
+        <Component Id="PairingScript" Guid="5B1C98A4-D271-460A-8F32-83A456C17833" Bitness="always64">
+          <File Id="PairingCmd" Source="$(var.SourceDir)\SafeBrowse-Pair.cmd" KeyPath="yes" />
+        </Component>
+
+        <!-- Emergency Network Restore Script -->
+        <Component Id="RestoreScript" Guid="6C2D09B5-E382-471B-9043-94B567D28944" Bitness="always64">
+          <File Id="RestoreCmd" Source="$(var.SourceDir)\SafeBrowse-EmergencyRestore.cmd" KeyPath="yes" />
+        </Component>
+
+        <!-- Helper PowerShell Scripts -->
+        <Directory Id="ScriptsFolder" Name="scripts">
+          <Component Id="DnsScripts" Guid="7E3E1AC6-F493-482C-A154-A5C678E39A55" Bitness="always64">
+            <File Id="ConfigureDnsPs1" Source="$(var.SourceDir)\scripts\configure-dns.ps1" KeyPath="yes" />
+            <File Id="RestoreDnsPs1" Source="$(var.SourceDir)\scripts\restore-dns.ps1" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- 2. ProgramData Machine Storage (C:\ProgramData\SafeBrowse) -->
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="CommonAppDataSafeBrowse" Name="SafeBrowse">
+        <Component Id="CreateProgramDataDir" Guid="8F4F2BD7-05A4-493D-B265-B6D789F4AB66">
+          <CreateFolder />
+        </Component>
+        <Directory Id="CommonAppDataLogs" Name="logs">
+          <Component Id="CreateLogsDir" Guid="9A5A3CE8-16B5-4A4E-C376-C7E890A5BC77">
+            <CreateFolder />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- 3. Fail-Safe Uninstall Custom Action: Restores original DNS before removing files -->
+    <CustomAction
+        Id="RestoreDnsOnUninstall"
+        Directory="INSTALLFOLDER"
+        ExeCommand="&quot;[INSTALLFOLDER]SafeBrowseChild-Pilot.exe&quot; --emergency-restore"
+        Execute="deferred"
+        Impersonate="no"
+        Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="RestoreDnsOnUninstall" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+
+    <!-- 4. Feature Set -->
+    <Feature Id="MainFeature" Title="SafeBrowse Child Agent" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="ServiceHostExecutable" />
+      <ComponentRef Id="PairingScript" />
+      <ComponentRef Id="RestoreScript" />
+      <ComponentRef Id="DnsScripts" />
+      <ComponentRef Id="CreateProgramDataDir" />
+      <ComponentRef Id="CreateLogsDir" />
+    </Feature>
+  </Package>
+</Wix>

@@ -143,26 +143,57 @@ async function buildWindowsExe() {
   const exeSha = crypto.createHash('sha256').update(fs.readFileSync(targetExe)).digest('hex');
   fs.writeFileSync(`${targetExe}.sha256`, `${exeSha} *SafeBrowseChild-Pilot.exe\n`);
 
-  // 5. Create Setup Batch Script
-  const setupCmd = `@echo off
-echo ======================================================================
-echo SafeBrowse Child Agent - Windows Pilot Setup
-echo ======================================================================
-echo Verifying Administrator privileges...
-net session >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [ERROR] Administrator privileges required. Please right-click and Run as Administrator.
-    pause
-    exit /b 1
-)
-echo [OK] Administrator privileges confirmed.
-echo.
-echo Installing SafeBrowse Child Service and configuring Local DNS (127.0.0.1)...
-"%~dp0SafeBrowseChild-Pilot.exe" %*
-echo.
-echo Setup finished. Check service status with: sc.exe query SafeBrowseChildService
-`;
-  fs.writeFileSync(path.join(windowsReleaseDir, 'SafeBrowseChild-Pilot-Setup.cmd'), setupCmd);
+  // 5. Compile Windows Service Host wrapper if csc is available
+  const cscPath = 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe';
+  const serviceHostCs = path.join(rootDir, 'packages', 'agent-windows', 'service-host', 'SafeBrowseServiceHost.cs');
+  const serviceHostExe = path.join(windowsReleaseDir, 'SafeBrowseServiceHost.exe');
+  if (process.platform === 'win32' && fs.existsSync(serviceHostCs)) {
+    try {
+      console.log('Compiling SafeBrowseServiceHost.exe...');
+      execSync(`"${cscPath}" /target:exe /optimize+ /out:"${serviceHostExe}" /r:System.ServiceProcess.dll "${serviceHostCs}"`, { stdio: 'inherit' });
+      const hostSha = crypto.createHash('sha256').update(fs.readFileSync(serviceHostExe)).digest('hex');
+      fs.writeFileSync(`${serviceHostExe}.sha256`, `${hostSha} *SafeBrowseServiceHost.exe\n`);
+    } catch (e: any) {
+      console.warn(`[Build Warning] Could not compile ServiceHost: ${e.message}`);
+    }
+  }
+
+  // 6. Copy Helper and Pairing Scripts
+  const wixDir = path.join(rootDir, 'packages', 'agent-windows', 'wix');
+  ['SafeBrowse-Pair.cmd', 'SafeBrowse-EmergencyRestore.cmd'].forEach((cmd) => {
+    const src = path.join(wixDir, cmd);
+    if (fs.existsSync(src)) {
+      fs.copyFileSync(src, path.join(windowsReleaseDir, cmd));
+    }
+  });
+
+  const scriptsSrc = path.join(rootDir, 'packages', 'agent-windows', 'scripts');
+  const scriptsDest = path.join(windowsReleaseDir, 'scripts');
+  if (!fs.existsSync(scriptsDest)) fs.mkdirSync(scriptsDest, { recursive: true });
+  ['configure-dns.ps1', 'restore-dns.ps1'].forEach((ps1) => {
+    const src = path.join(scriptsSrc, ps1);
+    if (fs.existsSync(src)) {
+      fs.copyFileSync(src, path.join(scriptsDest, ps1));
+    }
+  });
+
+  // 7. Build MSI with WiX Toolset if available
+  const wxsPath = path.join(wixDir, 'SafeBrowseChild-Pilot.wxs');
+  const msiOutput = path.join(windowsReleaseDir, 'SafeBrowseChild-Pilot.msi');
+  if (process.platform === 'win32' && fs.existsSync(wxsPath)) {
+    try {
+      console.log('Attempting WiX Toolset v4 MSI build...');
+      execSync(`wix build -arch x64 "${wxsPath}" -d SourceDir="${windowsReleaseDir}" -o "${msiOutput}"`, { stdio: 'inherit' });
+      if (fs.existsSync(msiOutput)) {
+        const msiSha = crypto.createHash('sha256').update(fs.readFileSync(msiOutput)).digest('hex');
+        fs.writeFileSync(`${msiOutput}.sha256`, `${msiSha} *SafeBrowseChild-Pilot.msi\n`);
+        console.log(`✅ Genuine Windows MSI Package Generated: ${msiOutput}`);
+        console.log(`   SHA-256: ${msiSha}\n`);
+      }
+    } catch (e: any) {
+      console.warn(`[Build Notice] WiX Toolset build skipped (${e.message}). MSI will be built via GitHub Actions Windows runner.`);
+    }
+  }
 
   // Clean intermediate temp files
   [bundleJs, seaConfig, seaBlob].forEach((f) => {

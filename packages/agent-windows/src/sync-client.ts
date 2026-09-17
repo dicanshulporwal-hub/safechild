@@ -3,6 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import WebSocket from 'ws';
 
+import { configManager } from './config-manager';
+
 export interface DeviceConfig {
   deviceId: string;
   deviceToken: string;
@@ -21,7 +23,7 @@ export class PolicySyncClient {
 
   constructor(config: DeviceConfig, cacheDir?: string) {
     this.config = config;
-    const dir = cacheDir || path.join(process.cwd(), 'cache');
+    const dir = cacheDir || configManager.getCacheDir();
     if (!fs.existsSync(dir)) {
       try {
         fs.mkdirSync(dir, { recursive: true });

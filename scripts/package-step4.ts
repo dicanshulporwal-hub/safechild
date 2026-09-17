@@ -225,7 +225,7 @@ function scanAndCollect(dir: string) {
       }
 
       const fileBuffer = fs.readFileSync(fullPath);
-      const isTextFile = /\.(ts|js|json|md|yml|yaml|xml|html|css|cmd|bat|ps1|txt|properties|kts)$/i.test(relPath);
+      const isTextFile = /\.(ts|js|json|md|yml|yaml|xml|html|css|cmd|bat|ps1|txt|properties|kts|wxs|cs)$/i.test(relPath);
 
       if (isTextFile) {
         const textContent = fileBuffer.toString('utf8');
@@ -290,6 +290,12 @@ let manifest: any = {
       file: 'release/windows/SafeBrowseChild-Pilot.exe',
       version: '1.0.0',
       platform: 'Windows 10/11 x64',
+      signingMode: 'Unsigned (Local Pilot Testing)',
+    },
+    windowsMsi: {
+      file: 'release/windows/SafeBrowseChild-Pilot.msi',
+      version: '1.0.0',
+      platform: 'Windows 10/11 x64 (WiX v4)',
       signingMode: 'Unsigned (Local Pilot Testing)',
     }
   },
