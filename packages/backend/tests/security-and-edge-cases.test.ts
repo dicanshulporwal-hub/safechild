@@ -7,7 +7,12 @@ import {
   Policy,
 } from '@safebrowse/shared';
 import { authService } from '../src/services/auth.service';
-import { mailService } from '../src/services/mail.service';
+import {
+  mailService,
+  createMailService,
+  MockMailAdapter,
+  ResendMailAdapter,
+} from '../src/services/mail.service';
 import { childService } from '../src/services/child.service';
 import { deviceService } from '../src/services/device.service';
 import { requestService } from '../src/services/request.service';
@@ -220,6 +225,27 @@ describe('SafeBrowse Security, Edge Cases & Threat Model Test Suite', () => {
       const afterExpiry = evaluatePolicy(policy, 'youtube.com', new Date('2026-08-29T12:16:00Z'));
       assert.strictEqual(afterExpiry.action, 'BLOCK');
       assert.strictEqual(afterExpiry.reason, 'EXPLICIT_BLOCK');
+    });
+  });
+
+  describe('6. Mail Adapter Factory & Test Suite Email Isolation', () => {
+    it('should strictly instantiate MockMailAdapter when NODE_ENV is test regardless of RESEND_API_KEY presence', () => {
+      const origEnv = process.env.NODE_ENV;
+      const origKey = process.env.RESEND_API_KEY;
+      try {
+        process.env.NODE_ENV = 'test';
+        process.env.RESEND_API_KEY = 're_simulated_synthetic_test_token_12345';
+        const service = createMailService();
+        assert.ok(service instanceof MockMailAdapter, 'Expected MockMailAdapter in test mode');
+        assert.strictEqual(service instanceof ResendMailAdapter, false, 'Must never instantiate ResendMailAdapter in test mode');
+      } finally {
+        process.env.NODE_ENV = origEnv;
+        if (origKey !== undefined) {
+          process.env.RESEND_API_KEY = origKey;
+        } else {
+          delete process.env.RESEND_API_KEY;
+        }
+      }
     });
   });
 });

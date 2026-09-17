@@ -15,33 +15,61 @@ data class PolicyRule(
     val expiresAt: String? = null
 )
 
+data class SafeSearchConfig(
+    val googleSafeSearch: Boolean = false,
+    val bingSafeSearch: Boolean = false,
+    val duckDuckGoSafeSearch: Boolean = false,
+    val youtubeRestrictedMode: String? = "OFF" // "OFF", "MODERATE", "STRICT"
+)
+
 data class Policy(
     val id: String,
     val childId: String,
     val version: Int,
     val isPaused: Boolean,
     val pauseExpiresAt: String? = null,
-    val rules: List<PolicyRule> = emptyList()
+    val rules: List<PolicyRule> = emptyList(),
+    val safeSearch: SafeSearchConfig? = null
 )
 
 data class PolicyDecision(
     val action: String, // "BLOCK" or "ALLOW"
     val reason: String,
-    val expiresAt: String? = null
+    val expiresAt: String? = null,
+    val rewriteIp: String? = null
 )
 
-class LocalPolicyManager(private val context: Context) {
-    private val prefs = context.getSharedPreferences("safebrowse_policy", Context.MODE_PRIVATE)
+class LocalPolicyManager {
+    private var context: Context? = null
+    private var inMemoryPolicy: Policy? = null
     private val gson = Gson()
 
+    constructor(context: Context) {
+        this.context = context
+    }
+
+    // Constructor for testing without requiring Android Context
+    constructor(initialPolicy: Policy? = null) {
+        this.inMemoryPolicy = initialPolicy
+    }
+
     fun savePolicy(policy: Policy) {
-        prefs.edit().putString("active_policy_json", gson.toJson(policy)).apply()
+        inMemoryPolicy = policy
+        context?.let { ctx ->
+            val prefs = ctx.getSharedPreferences("safebrowse_policy", Context.MODE_PRIVATE)
+            prefs.edit().putString("active_policy_json", gson.toJson(policy)).apply()
+        }
     }
 
     fun getPolicy(): Policy? {
+        if (inMemoryPolicy != null) return inMemoryPolicy
+        val ctx = context ?: return null
+        val prefs = ctx.getSharedPreferences("safebrowse_policy", Context.MODE_PRIVATE)
         val json = prefs.getString("active_policy_json", null) ?: return null
         return try {
-            gson.fromJson(json, Policy::class.java)
+            val policy = gson.fromJson(json, Policy::class.java)
+            inMemoryPolicy = policy
+            policy
         } catch (e: Exception) {
             null
         }
@@ -79,10 +107,56 @@ class LocalPolicyManager(private val context: Context) {
         }
     }
 
-    fun evaluate(targetDomain: String): PolicyDecision {
+    /**
+     * Checks if the domain requires SafeSearch / YouTube Restricted DNS rewriting.
+     * Matches Windows dns-proxy.ts behavior and VIP mappings exactly:
+     * - Google SafeSearch: forcesafesearch.google.com -> 216.239.38.120
+     * - Bing Strict SafeSearch: strict.bing.com -> 204.79.197.220
+     * - DuckDuckGo SafeSearch: safe.duckduckgo.com -> 52.142.124.215
+     * - YouTube Restricted Mode: restrict.youtube.com -> 216.239.38.119
+     */
+    fun checkSafeSearchRewrite(targetDomain: String, policy: Policy): String? {
+        val safeSearch = policy.safeSearch ?: return null
+        val lower = normalizeDomain(targetDomain)
+
+        // 1. Google SafeSearch: forcesafesearch.google.com (216.239.38.120)
+        if (safeSearch.googleSafeSearch && (lower == "google.com" || lower.endsWith(".google.com") || lower.startsWith("google.") || lower.startsWith("www.google."))) {
+            return "216.239.38.120"
+        }
+
+        // 2. Bing Strict SafeSearch: strict.bing.com (204.79.197.220)
+        if (safeSearch.bingSafeSearch && (lower == "bing.com" || lower.endsWith(".bing.com"))) {
+            return "204.79.197.220"
+        }
+
+        // 3. DuckDuckGo SafeSearch: safe.duckduckgo.com (52.142.124.215)
+        if (safeSearch.duckDuckGoSafeSearch && (lower == "duckduckgo.com" || lower.endsWith(".duckduckgo.com"))) {
+            return "52.142.124.215"
+        }
+
+        // 4. YouTube Restricted Mode: restrict.youtube.com (216.239.38.119)
+        if (safeSearch.youtubeRestrictedMode != null &&
+            safeSearch.youtubeRestrictedMode != "OFF" &&
+            (lower == "youtube.com" || lower.endsWith(".youtube.com") || lower == "youtubei.googleapis.com")
+        ) {
+            return "216.239.38.119"
+        }
+
+        return null
+    }
+
+    /**
+     * Evaluates domain against policy hierarchy with strict precedence:
+     * 1. Global Internet Pause (Level 1: top priority block)
+     * 2. Active Temporary Allow (Level 2: time-bounded access, applies SafeSearch rewrite if relevant)
+     * 3. Explicit Whitelist (Level 3: explicit ALLOW rule, applies SafeSearch rewrite if relevant)
+     * 4. Explicit Blacklist (Level 4: explicit BLOCK rule, authoritative over SafeSearch rewrite)
+     * 5. Default Fallback (Level 5: applies SafeSearch rewrite if configured; otherwise DEFAULT_ALLOW)
+     */
+    fun evaluate(targetDomain: String, currentTime: Date = Date()): PolicyDecision {
         val policy = getPolicy() ?: return PolicyDecision("ALLOW", "DEFAULT_ALLOW")
         val norm = normalizeDomain(targetDomain)
-        val now = Date()
+        val now = currentTime
 
         // 1. Check Global Pause
         if (policy.isPaused) {
@@ -103,23 +177,30 @@ class LocalPolicyManager(private val context: Context) {
         if (tempRule != null) {
             val expiry = parseIsoDate(tempRule.expiresAt!!)
             if (expiry != null && now.before(expiry)) {
-                return PolicyDecision("ALLOW", "TEMPORARY_ALLOW", tempRule.expiresAt)
+                val rewriteIp = checkSafeSearchRewrite(norm, policy)
+                return PolicyDecision("ALLOW", "TEMPORARY_ALLOW", tempRule.expiresAt, rewriteIp = rewriteIp)
             }
         }
 
         // 3. Check Explicit Whitelist
         val allowRule = policy.rules.find { it.action == "ALLOW" && domainMatches(norm, it.domain) }
         if (allowRule != null) {
-            return PolicyDecision("ALLOW", "EXPLICIT_ALLOW")
+            val rewriteIp = checkSafeSearchRewrite(norm, policy)
+            return PolicyDecision("ALLOW", "EXPLICIT_ALLOW", rewriteIp = rewriteIp)
         }
 
-        // 4. Check Explicit Blacklist
+        // 4. Check Explicit Blacklist (Authoritative over SafeSearch rewrite)
         val blockRule = policy.rules.find { it.action == "BLOCK" && domainMatches(norm, it.domain) }
         if (blockRule != null) {
             return PolicyDecision("BLOCK", "EXPLICIT_BLOCK")
         }
 
-        // 5. Default Fallback
+        // 5. Default Fallback with SafeSearch / YouTube VIP rewrite
+        val rewriteIp = checkSafeSearchRewrite(norm, policy)
+        if (rewriteIp != null) {
+            return PolicyDecision("ALLOW", "SAFESEARCH_REWRITE", rewriteIp = rewriteIp)
+        }
+
         return PolicyDecision("ALLOW", "DEFAULT_ALLOW")
     }
 }

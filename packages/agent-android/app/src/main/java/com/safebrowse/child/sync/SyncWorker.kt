@@ -26,7 +26,7 @@ class SyncWorker(appContext: Context, workerParams: WorkerParameters) :
         val prefs = applicationContext.getSharedPreferences("safebrowse_device", Context.MODE_PRIVATE)
         val deviceId = prefs.getString("device_id", null) ?: return@withContext Result.failure()
         val deviceToken = prefs.getString("device_token", null) ?: return@withContext Result.failure()
-        val backendUrl = prefs.getString("backend_url", "http://10.0.2.2:4000") ?: return@withContext Result.failure()
+        val backendUrl = com.safebrowse.child.config.AgentConfig.getBackendUrl(applicationContext)
 
         val policyManager = LocalPolicyManager(applicationContext)
         val activeVersion = policyManager.getPolicy()?.version ?: 1

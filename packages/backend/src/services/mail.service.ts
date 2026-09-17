@@ -388,14 +388,14 @@ export class ProductionMailAdapter implements IMailService {
 }
 
 export function createMailService(): IMailService {
+  if (process.env.NODE_ENV === 'test') {
+    return new MockMailAdapter();
+  }
   if (process.env.RESEND_API_KEY) {
     return new ResendMailAdapter(process.env.RESEND_API_KEY, process.env.MAIL_FROM);
   }
   if (process.env.NODE_ENV === 'production') {
     return new ProductionMailAdapter();
-  }
-  if (process.env.NODE_ENV === 'test') {
-    return new MockMailAdapter();
   }
   return new DevelopmentMailAdapter();
 }

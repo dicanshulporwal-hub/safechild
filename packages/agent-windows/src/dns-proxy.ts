@@ -18,9 +18,9 @@ export class DnsFilterProxy {
   }
 
   /**
-   * Helper to parse query domain name from a raw DNS packet
+   * Helper to parse query domain name and QTYPE from a raw DNS packet
    */
-  private extractDomainFromDnsPacket(buffer: Buffer): string | null {
+  public extractQueryFromDnsPacket(buffer: Buffer): { domain: string; qtype: number } | null {
     try {
       if (buffer.length < 12) return null;
       let offset = 12;
@@ -28,9 +28,12 @@ export class DnsFilterProxy {
 
       while (offset < buffer.length) {
         const len = buffer[offset];
-        if (len === 0) break;
+        if (len === 0) {
+          offset++;
+          break;
+        }
         if ((len & 0xc0) === 0xc0) {
-          // Pointer compression
+          offset += 2;
           break;
         }
         offset += 1;
@@ -40,17 +43,27 @@ export class DnsFilterProxy {
         offset += len;
       }
 
-      return parts.join('.');
+      if (parts.length === 0) return null;
+      const domain = parts.join('.');
+      let qtype = 1; // Default Type A
+      if (offset + 2 <= buffer.length) {
+        qtype = buffer.readUInt16BE(offset);
+      }
+      return { domain, qtype };
     } catch (e) {
       return null;
     }
+  }
+
+  private extractDomainFromDnsPacket(buffer: Buffer): string | null {
+    return this.extractQueryFromDnsPacket(buffer)?.domain ?? null;
   }
 
   /**
    * Constructs an authoritative NXDOMAIN (RCODE 3 - Non-Existent Domain) response.
    * This cleanly denies connection without HTTPS certificate mismatch or ERR_CONNECTION_REFUSED.
    */
-  private buildNxDomainResponse(queryBuffer: Buffer): Buffer {
+  public buildNxDomainResponse(queryBuffer: Buffer): Buffer {
     try {
       const response = Buffer.from(queryBuffer);
       // Flags: QR = 1 (response), AA = 1 (auth), RA = 1 (recursion available), RCODE = 3 (NXDOMAIN)
@@ -76,9 +89,38 @@ export class DnsFilterProxy {
   }
 
   /**
+   * Constructs an authoritative NODATA (RCODE 0 - NOERROR with ANCOUNT = 0) response.
+   * Tells dual-stack clients that no IPv6 records exist for this domain, compelling them to use the IPv4 VIP.
+   */
+  public buildNoDataResponse(queryBuffer: Buffer): Buffer {
+    try {
+      const response = Buffer.from(queryBuffer);
+      // Flags: QR = 1 (response), AA = 1 (auth), RA = 1 (recursion available), RCODE = 0 (NOERROR)
+      response[2] = 0x81; // 1000 0001
+      response[3] = 0x80; // 1000 0000 (RCODE 0 = NOERROR)
+
+      // Answer count: 0
+      response[6] = 0x00;
+      response[7] = 0x00;
+
+      // Authority count: 0
+      response[8] = 0x00;
+      response[9] = 0x00;
+
+      // Additional count: 0
+      response[10] = 0x00;
+      response[11] = 0x00;
+
+      return response;
+    } catch (e) {
+      return queryBuffer;
+    }
+  }
+
+  /**
    * Constructs an authoritative A-record DNS response pointing to an enforced VIP
    */
-  private buildARecordResponse(queryBuffer: Buffer, ipStr: string): Buffer {
+  public buildARecordResponse(queryBuffer: Buffer, ipStr: string): Buffer {
     try {
       const ipParts = ipStr.split('.').map(Number);
       const response = Buffer.from(queryBuffer);
@@ -111,14 +153,14 @@ export class DnsFilterProxy {
   /**
    * Check if the domain requires SafeSearch / YouTube Restricted DNS rewrite
    */
-  private checkSafeSearchRewrite(domain: string, policy: Policy): string | null {
+  public checkSafeSearchRewrite(domain: string, policy: Policy): string | null {
     const safeSearch = policy.safeSearch;
     if (!safeSearch) return null;
 
     const lower = domain.toLowerCase();
 
     // Google SafeSearch: forcesafesearch.google.com (216.239.38.120)
-    if (safeSearch.googleSafeSearch && (lower === 'google.com' || lower.endsWith('.google.com') || lower.startsWith('www.google.'))) {
+    if (safeSearch.googleSafeSearch && (lower === 'google.com' || lower.endsWith('.google.com') || lower.startsWith('google.') || lower.startsWith('www.google.'))) {
       return '216.239.38.120';
     }
 
@@ -149,10 +191,11 @@ export class DnsFilterProxy {
       this.socket = dgram.createSocket('udp4');
 
       this.socket.on('message', (msg, rinfo) => {
-        const domain = this.extractDomainFromDnsPacket(msg);
+        const query = this.extractQueryFromDnsPacket(msg);
         const policy = this.getPolicy();
 
-        if (domain && policy) {
+        if (query && policy) {
+          const { domain, qtype } = query;
           const result = evaluatePolicy(policy, domain);
 
           if (result.action === 'BLOCK') {
@@ -165,10 +208,19 @@ export class DnsFilterProxy {
           // Check for SafeSearch / YouTube Restricted DNS Rewriting
           const rewriteIp = this.checkSafeSearchRewrite(domain, policy);
           if (rewriteIp) {
-            console.log(`[Windows DNS Filter] 🔒 SAFESEARCH ENFORCED: ${domain} -> Rewriting to ${rewriteIp}`);
-            const safeSearchResp = this.buildARecordResponse(msg, rewriteIp);
-            this.socket?.send(safeSearchResp, rinfo.port, rinfo.address);
-            return;
+            if (qtype === 28) {
+              // AAAA query for SafeSearch domain -> Return NODATA so client falls back to IPv4 VIP
+              console.log(`[Windows DNS Filter] 🔒 SAFESEARCH ENFORCED (AAAA NODATA): ${domain}`);
+              const noDataResp = this.buildNoDataResponse(msg);
+              this.socket?.send(noDataResp, rinfo.port, rinfo.address);
+              return;
+            } else {
+              // A or other query -> Return enforced IPv4 VIP
+              console.log(`[Windows DNS Filter] 🔒 SAFESEARCH ENFORCED (A VIP): ${domain} -> Rewriting to ${rewriteIp}`);
+              const safeSearchResp = this.buildARecordResponse(msg, rewriteIp);
+              this.socket?.send(safeSearchResp, rinfo.port, rinfo.address);
+              return;
+            }
           }
 
           console.log(`[Windows DNS Filter] ✅ ALLOWED: ${domain} -> Forwarding upstream`);

@@ -113,8 +113,9 @@ class SafeBrowseVpnService : VpnService() {
                 val dnsLength = length - dnsOffset
 
                 if (dnsLength > 12) {
-                    val domain = extractDomainFromDns(packet, dnsOffset, length)
-                    if (domain != null) {
+                    val query = extractQueryInfoFromDns(packet, dnsOffset, length)
+                    if (query != null) {
+                        val domain = query.domain
                         val decision = policyManager.evaluate(domain)
 
                         if (decision.action == "BLOCK") {
@@ -123,6 +124,20 @@ class SafeBrowseVpnService : VpnService() {
                             outputStream.write(blockDnsPacket)
                             notifyBlockedAccess(domain)
                             return
+                        } else if (decision.rewriteIp != null) {
+                            if (query.qType == 28) {
+                                // AAAA (IPv6) query: synthesize authoritative NODATA response so client uses IPv4 VIP
+                                Log.i(TAG, "🔒 [VpnService] SAFESEARCH ENFORCED (AAAA NODATA): $domain")
+                                val noDataPacket = buildSyntheticNoData(packet, headerLength, length)
+                                outputStream.write(noDataPacket)
+                                return
+                            } else {
+                                // A (IPv4) query: synthesize authoritative A-record response with VIP
+                                Log.i(TAG, "🔒 [VpnService] SAFESEARCH ENFORCED (A VIP): $domain -> Rewriting to ${decision.rewriteIp}")
+                                val safeSearchPacket = buildSyntheticARecord(packet, headerLength, length, decision.rewriteIp)
+                                outputStream.write(safeSearchPacket)
+                                return
+                            }
                         } else {
                             Log.d(TAG, "✅ [VpnService] ALLOWED: $domain -> Forwarding to protected upstream")
                             forwardAllowedDnsQuery(packet, headerLength, length, outputStream)
@@ -202,6 +217,142 @@ class SafeBrowseVpnService : VpnService() {
             payload = dnsPayload,
             payloadLen = dnsPayload.size
         )
+    }
+
+    /**
+     * Synthesizes an authoritative A-record DNS response (RCODE 0 - NOERROR) pointing to an enforced VIP
+     */
+    fun buildSyntheticARecord(
+        rawPacket: ByteArray,
+        ipHeaderLen: Int,
+        totalLen: Int,
+        ipStr: String
+    ): ByteArray {
+        val dnsOffset = ipHeaderLen + 8
+        val dnsPayload = Arrays.copyOfRange(rawPacket, dnsOffset, totalLen)
+
+        // Ensure valid DNS header (at least 12 bytes)
+        if (dnsPayload.size >= 12) {
+            // Flags: QR=1 (response), AA=1 (authoritative), RA=1 (recursion available), RCODE=0 (no error) -> 0x81, 0x80
+            dnsPayload[2] = 0x81.toByte()
+            dnsPayload[3] = 0x80.toByte()
+
+            // ANCOUNT = 1 (1 Answer Record)
+            dnsPayload[6] = 0x00.toByte()
+            dnsPayload[7] = 0x01.toByte()
+
+            // NSCOUNT = 0
+            dnsPayload[8] = 0x00.toByte()
+            dnsPayload[9] = 0x00.toByte()
+
+            // ARCOUNT = 0
+            dnsPayload[10] = 0x00.toByte()
+            dnsPayload[11] = 0x00.toByte()
+        }
+
+        // Parse target IPv4 address bytes (e.g. 216.239.38.120)
+        val ipParts = ipStr.split('.').map { it.toInt().toByte() }.toByteArray()
+
+        // Construct 16-byte DNS Answer record (A record with 60s TTL)
+        val answer = ByteBuffer.allocate(16).apply {
+            put(0xC0.toByte())
+            put(0x0C.toByte())         // Pointer to offset 12 (start of question QNAME)
+            putShort(0x0001.toShort()) // Type A
+            putShort(0x0001.toShort()) // Class IN
+            putInt(60)                 // TTL 60 seconds
+            putShort(4.toShort())      // Data length 4
+            put(ipParts)               // 4 bytes IP address
+        }.array()
+
+        val fullDnsPayload = ByteBuffer.allocate(dnsPayload.size + answer.size).apply {
+            put(dnsPayload)
+            put(answer)
+        }.array()
+
+        return buildIpUdpPacket(
+            srcIp = Arrays.copyOfRange(rawPacket, 16, 20), // Original Dest IP becomes Src IP
+            dstIp = Arrays.copyOfRange(rawPacket, 12, 16), // Original Src IP becomes Dst IP
+            srcPort = 53,
+            dstPort = ((rawPacket[ipHeaderLen].toInt() and 0xFF) shl 8) or (rawPacket[ipHeaderLen + 1].toInt() and 0xFF),
+            payload = fullDnsPayload,
+            payloadLen = fullDnsPayload.size
+        )
+    }
+
+    /**
+     * Synthesizes an authoritative NODATA (RCODE 0 - NOERROR with ANCOUNT = 0) response.
+     * Informs dual-stack clients that no IPv6 records exist for this domain, compelling them to use the IPv4 VIP.
+     */
+    fun buildSyntheticNoData(rawPacket: ByteArray, ipHeaderLen: Int, totalLen: Int): ByteArray {
+        val dnsOffset = ipHeaderLen + 8
+        val dnsPayload = Arrays.copyOfRange(rawPacket, dnsOffset, totalLen)
+
+        if (dnsPayload.size >= 12) {
+            // Flags: QR=1 (response), AA=1 (authoritative), RA=1 (recursion available), RCODE=0 (NOERROR) -> 0x81, 0x80
+            dnsPayload[2] = 0x81.toByte()
+            dnsPayload[3] = 0x80.toByte()
+
+            // ANCOUNT = 0 (No answer records)
+            dnsPayload[6] = 0x00.toByte()
+            dnsPayload[7] = 0x00.toByte()
+
+            // NSCOUNT = 0
+            dnsPayload[8] = 0x00.toByte()
+            dnsPayload[9] = 0x00.toByte()
+
+            // ARCOUNT = 0
+            dnsPayload[10] = 0x00.toByte()
+            dnsPayload[11] = 0x00.toByte()
+        }
+
+        return buildIpUdpPacket(
+            srcIp = Arrays.copyOfRange(rawPacket, 16, 20), // Original Dest IP becomes Src IP
+            dstIp = Arrays.copyOfRange(rawPacket, 12, 16), // Original Src IP becomes Dst IP
+            srcPort = 53,
+            dstPort = ((rawPacket[ipHeaderLen].toInt() and 0xFF) shl 8) or (rawPacket[ipHeaderLen + 1].toInt() and 0xFF),
+            payload = dnsPayload,
+            payloadLen = dnsPayload.size
+        )
+    }
+
+    data class DnsQuery(val domain: String, val qType: Int)
+
+    private fun extractQueryInfoFromDns(packet: ByteArray, dnsOffset: Int, totalLen: Int): DnsQuery? {
+        try {
+            var offset = dnsOffset + 12
+            val parts = mutableListOf<String>()
+
+            while (offset < totalLen) {
+                val len = packet[offset].toInt() and 0xFF
+                if (len == 0) {
+                    offset += 1
+                    break
+                }
+                if ((len and 0xC0) == 0xC0) {
+                    offset += 2
+                    break
+                }
+                offset += 1
+                if (offset + len > totalLen) break
+                val part = String(packet, offset, len, Charsets.UTF_8)
+                parts.add(part)
+                offset += len
+            }
+
+            if (parts.isEmpty()) return null
+            val domain = parts.joinToString(".")
+            var qType = 1 // Default to Type A
+            if (offset + 2 <= totalLen) {
+                qType = ((packet[offset].toInt() and 0xFF) shl 8) or (packet[offset + 1].toInt() and 0xFF)
+            }
+            return DnsQuery(domain, qType)
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
+    private fun extractDomainFromDns(packet: ByteArray, dnsOffset: Int, totalLen: Int): String? {
+        return extractQueryInfoFromDns(packet, dnsOffset, totalLen)?.domain
     }
 
     private fun buildIpUdpPacket(

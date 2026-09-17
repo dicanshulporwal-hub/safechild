@@ -93,7 +93,7 @@ class PairingActivity : AppCompatActivity() {
         btn.isEnabled = false
         btn.text = "Pairing..."
 
-        val backendUrl = "http://10.0.2.2:4000" // Standard Android emulator loopback to host
+        val backendUrl = com.safebrowse.child.config.AgentConfig.apiBaseUrl
 
         val json = JSONObject().apply {
             put("code", code)
@@ -131,8 +131,9 @@ class PairingActivity : AppCompatActivity() {
                     .putString("device_id", device.getString("id"))
                     .putString("device_token", device.getString("deviceToken"))
                     .putString("child_id", device.getString("childId"))
-                    .putString("backend_url", backendUrl)
                     .apply()
+
+                com.safebrowse.child.config.AgentConfig.setBackendUrl(this@PairingActivity, backendUrl)
 
                 if (policyJson != null) {
                     val policyManager = LocalPolicyManager(this@PairingActivity)

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      Debug and Physical Pilot Build Configuration:
+      Permits cleartext HTTP traffic specifically for private development and mesh network testing.
+      Note: Android's XML network-security-config schema does not support CIDR notation (e.g. 100.64.0.0/10).
+      Specific destination endpoint restrictions (Android emulator 10.0.2.2, localhost/127.0.0.1/[::1],
+      and Tailscale CGNAT 100.64.0.0/10) are enforced programmatically by AgentConfig.validateApiBaseUrl().
+      This configuration applies exclusively to debug/pilot builds and does not affect production release builds.
+    -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

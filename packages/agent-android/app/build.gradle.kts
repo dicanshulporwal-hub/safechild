@@ -7,6 +7,11 @@ android {
     namespace = "com.safebrowse.child"
     compileSdk = 34
 
+    val defaultApiBaseUrl = "http://10.0.2.2:11002"
+    val safebrowseApiBaseUrl: String = (project.findProperty("safebrowseApiBaseUrl") as? String)
+        ?: System.getenv("SAFEBROWSE_API_BASE_URL")
+        ?: defaultApiBaseUrl
+
     defaultConfig {
         applicationId = "com.safebrowse.child"
         minSdk = 26
@@ -15,6 +20,7 @@ android {
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "SAFEBROWSE_API_BASE_URL", "\"$safebrowseApiBaseUrl\"")
     }
 
     buildTypes {
@@ -35,6 +41,7 @@ android {
     }
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
 }
 
@@ -47,4 +54,5 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.code.gson:gson:2.10.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
+    testImplementation("junit:junit:4.13.2")
 }

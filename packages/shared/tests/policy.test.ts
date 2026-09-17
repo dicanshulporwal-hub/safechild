@@ -143,5 +143,43 @@ describe('SafeBrowse Policy Engine & Precedence Tests', () => {
       assert.strictEqual(twitch.action, 'BLOCK');
       assert.strictEqual(twitch.reason, 'STUDY_MODE_ACTIVE');
     });
+
+    it('Level 5: SafeSearch & YouTube Restricted Mode DNS Redirection', () => {
+      const policy: Policy = {
+        id: 'p-safesearch',
+        childId: 'c1',
+        familyId: 'fam-test',
+        version: 5,
+        isPaused: false,
+        rules: [],
+        safeSearch: {
+          googleSafeSearch: true,
+          bingSafeSearch: true,
+          duckDuckGoSafeSearch: true,
+          youtubeRestrictedMode: 'STRICT',
+        },
+        updatedAt: now.toISOString(),
+      };
+
+      const google = evaluatePolicy(policy, 'google.com', now);
+      assert.strictEqual(google.action, 'ALLOW');
+      assert.strictEqual(google.safeSearchRedirect, 'forcesafesearch.google.com');
+
+      const bing = evaluatePolicy(policy, 'bing.com', now);
+      assert.strictEqual(bing.action, 'ALLOW');
+      assert.strictEqual(bing.safeSearchRedirect, 'strict.bing.com');
+
+      const ddg = evaluatePolicy(policy, 'duckduckgo.com', now);
+      assert.strictEqual(ddg.action, 'ALLOW');
+      assert.strictEqual(ddg.safeSearchRedirect, 'safe.duckduckgo.com');
+
+      const yt = evaluatePolicy(policy, 'youtube.com', now);
+      assert.strictEqual(yt.action, 'ALLOW');
+      assert.strictEqual(yt.safeSearchRedirect, 'restrict.youtube.com');
+
+      const wiki = evaluatePolicy(policy, 'wikipedia.org', now);
+      assert.strictEqual(wiki.action, 'ALLOW');
+      assert.strictEqual(wiki.safeSearchRedirect, undefined);
+    });
   });
 });

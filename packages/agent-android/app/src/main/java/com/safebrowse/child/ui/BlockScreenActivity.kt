@@ -99,7 +99,7 @@ class BlockScreenActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("safebrowse_device", MODE_PRIVATE)
         val childId = prefs.getString("child_id", "") ?: ""
         val deviceId = prefs.getString("device_id", "") ?: ""
-        val backendUrl = prefs.getString("backend_url", "http://10.0.2.2:4000") ?: ""
+        val backendUrl = com.safebrowse.child.config.AgentConfig.getBackendUrl(this@BlockScreenActivity)
 
         val json = JSONObject().apply {
             put("childId", childId)
