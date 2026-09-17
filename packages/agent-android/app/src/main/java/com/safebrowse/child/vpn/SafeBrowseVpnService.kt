@@ -390,28 +390,6 @@ class SafeBrowseVpnService : VpnService() {
         return packet.array()
     }
 
-    private fun extractDomainFromDns(packet: ByteArray, dnsOffset: Int, totalLen: Int): String? {
-        try {
-            var offset = dnsOffset + 12
-            val parts = mutableListOf<String>()
-
-            while (offset < totalLen) {
-                val len = packet[offset].toInt() and 0xFF
-                if (len == 0) break
-                if ((len and 0xC0) == 0xC0) break
-                offset += 1
-                if (offset + len > totalLen) break
-                val part = String(packet, offset, len, Charsets.UTF_8)
-                parts.add(part)
-                offset += len
-            }
-
-            return if (parts.isNotEmpty()) parts.joinToString(".") else null
-        } catch (e: Exception) {
-            return null
-        }
-    }
-
     private fun notifyBlockedAccess(domain: String) {
         val intent = Intent(applicationContext, BlockScreenActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP

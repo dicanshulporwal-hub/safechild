@@ -10,6 +10,7 @@ import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import com.safebrowse.child.policy.LocalPolicyManager
+import com.safebrowse.child.sync.SyncWorker
 import com.safebrowse.child.vpn.SafeBrowseVpnService
 
 /**
@@ -91,6 +92,7 @@ class OnboardingActivity : Activity() {
         Log.i("SafeBrowseOnboarding", "Step 5: Starting SafeBrowse VPN Service & Syncing Initial Policy...")
         val serviceIntent = Intent(this, SafeBrowseVpnService::class.java)
         startService(serviceIntent)
+        SyncWorker.schedulePeriodicSync(this)
 
         // Verify protection
         showProtectedScreen()

@@ -53,6 +53,23 @@ class LocalPolicyManager {
         this.inMemoryPolicy = initialPolicy
     }
 
+    /**
+     * Checks if the device has valid persisted credentials (device_id and device_token)
+     * in SharedPreferences ("safebrowse_device").
+     */
+    fun isEnrolled(): Boolean {
+        val ctx = context ?: return false
+        val prefs = ctx.getSharedPreferences("safebrowse_device", Context.MODE_PRIVATE)
+        val deviceId = prefs.getString("device_id", null)
+        val deviceToken = prefs.getString("device_token", null)
+        return !deviceId.isNullOrBlank() && !deviceToken.isNullOrBlank()
+    }
+
+    /**
+     * Alias for isEnrolled() for backward compatibility with onboarding flows.
+     */
+    fun isPaired(): Boolean = isEnrolled()
+
     fun savePolicy(policy: Policy) {
         inMemoryPolicy = policy
         context?.let { ctx ->

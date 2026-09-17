@@ -285,4 +285,11 @@ class LocalPolicyManagerTest {
             com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://100.128.0.1:11002", isDebug = true)
         }
     }
+
+    @Test
+    fun `test isEnrolled and isPaired return false without context or credentials`() {
+        val manager = LocalPolicyManager()
+        assertEquals(false, manager.isEnrolled())
+        assertEquals(false, manager.isPaired())
+    }
 }

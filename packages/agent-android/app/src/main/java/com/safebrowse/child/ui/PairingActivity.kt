@@ -11,6 +11,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.safebrowse.child.policy.LocalPolicyManager
 import com.safebrowse.child.policy.Policy
+import com.safebrowse.child.sync.SyncWorker
 import com.safebrowse.child.vpn.SafeBrowseVpnService
 import com.google.gson.Gson
 import kotlinx.coroutines.CoroutineScope
@@ -32,10 +33,9 @@ class PairingActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val prefs = getSharedPreferences("safebrowse_device", MODE_PRIVATE)
-        val deviceToken = prefs.getString("device_token", null)
-
-        if (deviceToken != null) {
+        val policyManager = LocalPolicyManager(this)
+        if (policyManager.isPaired()) {
+            SyncWorker.schedulePeriodicSync(this)
             // Already paired -> start VPN directly
             requestVpnPermissionAndStart()
             return
@@ -140,6 +140,8 @@ class PairingActivity : AppCompatActivity() {
                     val policy = Gson().fromJson(policyJson.toString(), Policy::class.java)
                     policyManager.savePolicy(policy)
                 }
+
+                SyncWorker.schedulePeriodicSync(this@PairingActivity)
 
                 Toast.makeText(this@PairingActivity, "Successfully paired!", Toast.LENGTH_SHORT).show()
                 requestVpnPermissionAndStart()
