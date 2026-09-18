@@ -46,16 +46,46 @@ jobs:
         run: |
           $cscPath = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
           if (-not (Test-Path $cscPath)) {
-            $cscPath = "csc.exe"
+            $cscCmd = Get-Command csc.exe -ErrorAction SilentlyContinue
+            if ($cscCmd) {
+              $cscPath = $cscCmd.Source
+            } else {
+              $cscPath = "csc.exe"
+            }
           }
-          $sourceFile = "packages/agent-windows/service-host/SafeBrowseServiceHost.cs"
-          $outDir = "packages/agent-windows/dist"
-          if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force }
-          $outputExe = "$outDir/SafeBrowseServiceHost.exe"
-          Write-Host "Compiling $sourceFile with $cscPath..."
-          & $cscPath /target:exe /optimize+ /out:$outputExe /r:System.ServiceProcess.dll $sourceFile
+
+          $relSource = "packages/agent-windows/service-host/SafeBrowseServiceHost.cs"
+          if (-not (Test-Path $relSource)) {
+            Write-Error "Source file does not exist at expected path: $relSource"
+            exit 1
+          }
+
+          $sourceFile = (Resolve-Path $relSource).Path
+          Write-Host "Resolved C# source path: $sourceFile"
+
+          $pkgDir = (Resolve-Path "packages/agent-windows").Path
+          $outDir = Join-Path $pkgDir "dist"
+          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+
+          $outputExe = Join-Path $outDir "SafeBrowseServiceHost.exe"
+          Write-Host "Resolved output executable path: $outputExe"
+          Write-Host "Compiling SafeBrowseServiceHost with $cscPath..."
+
+          & $cscPath `
+            /target:exe `
+            /optimize+ `
+            "/out:$outputExe" `
+            /r:System.ServiceProcess.dll `
+            "$sourceFile"
+
+          $cscExitCode = $LASTEXITCODE
+          if ($cscExitCode -ne 0) {
+            Write-Error "csc.exe compilation failed with exit code $cscExitCode"
+            exit $cscExitCode
+          }
+
           if (-not (Test-Path $outputExe)) {
-            Write-Error "Failed compiling SafeBrowseServiceHost.exe"
+            Write-Error "Compiled executable not found at: $outputExe"
             exit 1
           }
           Write-Host "Compiled SafeBrowseServiceHost.exe successfully."

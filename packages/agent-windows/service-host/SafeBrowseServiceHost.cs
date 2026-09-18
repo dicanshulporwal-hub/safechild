@@ -145,13 +145,17 @@ namespace SafeBrowse
                 if (_childProcess != null && !_childProcess.HasExited)
                 {
                     Log("Terminating child process tree...");
-                    Process.Start(new ProcessStartInfo
+                    Process taskkillProcess = Process.Start(new ProcessStartInfo
                     {
                         FileName = "taskkill",
                         Arguments = string.Format("/PID {0} /T /F", _childProcess.Id),
                         CreateNoWindow = true,
                         UseShellExecute = false
-                    })?.WaitForExit(3000);
+                    });
+                    if (taskkillProcess != null)
+                    {
+                        taskkillProcess.WaitForExit(3000);
+                    }
 
                     if (!_childProcess.HasExited)
                     {
