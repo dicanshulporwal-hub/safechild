@@ -13,18 +13,34 @@ export interface AdapterDnsBackup {
   ServerAddresses: string[];
 }
 
+export type NetworkCommandExecutor = (command: string) => Promise<{ stdout: string; stderr: string }>;
+
 export class WindowsNetworkManager {
   private backupFile: string;
+  private platformOverride: string | null = null;
+  private commandExecutor: NetworkCommandExecutor = execAsync;
 
   constructor(customBackupFile?: string) {
     this.backupFile = customBackupFile || configManager.getNetworkBackupFilePath();
+  }
+
+  public setPlatformForTesting(platform: string | null): void {
+    this.platformOverride = platform;
+  }
+
+  public setCommandExecutorForTesting(executor: NetworkCommandExecutor | null): void {
+    this.commandExecutor = executor || execAsync;
+  }
+
+  public getPlatform(): string {
+    return this.platformOverride || process.platform;
   }
 
   /**
    * Backs up current adapter DNS configuration into ProgramData.
    */
   public async backupCurrentDnsConfig(): Promise<AdapterDnsBackup[]> {
-    if (process.platform !== 'win32') {
+    if (this.getPlatform() !== 'win32') {
       const mockBackup: AdapterDnsBackup[] = [{ InterfaceIndex: 1, ServerAddresses: ['1.1.1.1', '8.8.8.8'] }];
       configManager.ensureDirectories();
       fs.writeFileSync(this.backupFile, JSON.stringify(mockBackup, null, 2), 'utf8');
@@ -39,7 +55,7 @@ export class WindowsNetworkManager {
         Select-Object InterfaceIndex, ServerAddresses |
         ConvertTo-Json
       `;
-      const { stdout } = await execAsync(`powershell -NoProfile -Command "${script.replace(/\r?\n/g, ' ')}"`);
+      const { stdout } = await this.commandExecutor(`powershell -NoProfile -Command "${script.replace(/\r?\n/g, ' ')}"`);
       if (stdout.trim()) {
         const parsed = JSON.parse(stdout.trim());
         const list: AdapterDnsBackup[] = Array.isArray(parsed) ? parsed : [parsed];
@@ -141,7 +157,7 @@ export class WindowsNetworkManager {
     console.log(`[NetworkManager] ✅ Verified: 127.0.0.1:${dnsPort} responded to DNS probe.`);
 
     // 3. Configure network adapters
-    if (process.platform === 'win32') {
+    if (this.getPlatform() === 'win32') {
       try {
         const script = `
           $adapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' }
@@ -150,11 +166,15 @@ export class WindowsNetworkManager {
           }
           Clear-DnsClientCache
         `;
-        await execAsync(`powershell -NoProfile -Command "${script.replace(/\r?\n/g, ' ')}"`);
+        await this.commandExecutor(`powershell -NoProfile -Command "${script.replace(/\r?\n/g, ' ')}"`);
         console.log('[NetworkManager] Active network adapters configured to 127.0.0.1. DNS cache cleared.');
       } catch (err: any) {
         console.error(`[NetworkManager] Error configuring adapter DNS: ${err.message}. Initiating rollback.`);
-        await this.restoreOriginalDns();
+        try {
+          await this.restoreOriginalDns();
+        } catch (rollbackErr: any) {
+          console.error(`[NetworkManager] Rollback also failed: ${rollbackErr.message}`);
+        }
         return { success: false, message: `Failed configuring adapters: ${err.message}` };
       }
     }
@@ -170,17 +190,22 @@ export class WindowsNetworkManager {
 
   /**
    * Cleanly restores original adapter DNS configuration from backup.
+   * Throws on failure to ensure uninstallers and CLI tools detect restoration errors.
    */
   public async restoreOriginalDns(): Promise<void> {
     console.log('[NetworkManager] Restoring network adapters to original DNS settings...');
 
-    if (process.platform !== 'win32') {
+    if (this.getPlatform() !== 'win32') {
       console.log('[NetworkManager] Non-Windows platform: simulation complete.');
       return;
     }
 
     // 1. Remove SafeBrowse firewall rules
-    await firewallEngine.teardown();
+    try {
+      await firewallEngine.teardown();
+    } catch (fwErr: any) {
+      console.warn(`[NetworkManager] Warning tearing down firewall rules: ${fwErr.message}`);
+    }
 
     // 2. Restore DNS
     try {
@@ -192,7 +217,7 @@ export class WindowsNetworkManager {
           for (const item of backupList) {
             if (item.ServerAddresses && item.ServerAddresses.length > 0) {
               const formattedAddresses = item.ServerAddresses.map((ip) => `'${ip}'`).join(',');
-              await execAsync(
+              await this.commandExecutor(
                 `powershell -NoProfile -Command "Set-DnsClientServerAddress -InterfaceIndex ${item.InterfaceIndex} -ServerAddresses @(${formattedAddresses}) -ErrorAction SilentlyContinue"`
               );
               restoredSpecific = true;
@@ -205,16 +230,17 @@ export class WindowsNetworkManager {
 
       // If no specific static addresses were restored or as a safe fallback, reset all adapters to DHCP
       if (!restoredSpecific) {
-        await execAsync(
+        await this.commandExecutor(
           `powershell -NoProfile -Command "Get-NetAdapter | ForEach-Object { Set-DnsClientServerAddress -InterfaceIndex $_.InterfaceIndex -ResetServerAddresses -ErrorAction SilentlyContinue }; Clear-DnsClientCache"`
         );
       } else {
-        await execAsync('powershell -NoProfile -Command "Clear-DnsClientCache"');
+        await this.commandExecutor('powershell -NoProfile -Command "Clear-DnsClientCache"');
       }
 
       console.log('[NetworkManager] ✅ Original DNS configuration cleanly restored and DNS cache flushed.');
     } catch (e: any) {
       console.error(`[NetworkManager] Error during DNS restoration: ${e.message}`);
+      throw e;
     }
   }
 }

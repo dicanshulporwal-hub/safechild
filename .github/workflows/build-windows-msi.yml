@@ -147,12 +147,22 @@ jobs:
       - name: Build SafeBrowseChild-Pilot.msi via WiX Toolset
         shell: pwsh
         run: |
-          $wxsPath = "packages/agent-windows/wix/SafeBrowseChild-Pilot.wxs"
+          $wxsPath = (Resolve-Path "packages/agent-windows/wix/SafeBrowseChild-Pilot.wxs").Path
           $sourceDir = (Resolve-Path "release/windows").Path
-          $msiOutput = "$sourceDir/SafeBrowseChild-Pilot.msi"
+          $msiOutput = Join-Path $sourceDir "SafeBrowseChild-Pilot.msi"
 
           Write-Host "Building MSI package with WiX Toolset v4..."
+          Write-Host "WXS Path: $wxsPath"
+          Write-Host "Source Directory: $sourceDir"
+          Write-Host "MSI Output: $msiOutput"
+
           wix build -arch x64 "$wxsPath" -d SourceDir="$sourceDir" -o "$msiOutput"
+          $wixExitCode = $LASTEXITCODE
+
+          if ($wixExitCode -ne 0) {
+            Write-Error "WiX build failed with exit code $wixExitCode"
+            exit $wixExitCode
+          }
 
           if (-not (Test-Path $msiOutput)) {
             Write-Error "Failed to generate SafeBrowseChild-Pilot.msi"

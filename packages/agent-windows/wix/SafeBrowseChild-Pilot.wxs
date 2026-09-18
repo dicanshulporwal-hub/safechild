@@ -24,11 +24,16 @@
               Id="InstallSafeBrowseService"
               Name="SafeBrowseChildService"
               DisplayName="SafeBrowse Child Protection Service"
-              Description="SafeBrowse kernel DNS proxy and parental policy enforcement engine."
+              Description="SafeBrowse DNS filtering and parental policy enforcement service."
               Type="ownProcess"
-              Start="delayedAuto"
+              Start="auto"
               ErrorControl="normal"
-              Account="LocalSystem" />
+              Account="LocalSystem">
+            <ServiceConfig
+                DelayedAutoStart="yes"
+                OnInstall="yes"
+                OnReinstall="yes" />
+          </ServiceInstall>
           <ServiceControl
               Id="ControlSafeBrowseService"
               Name="SafeBrowseChildService"
@@ -78,7 +83,7 @@
         ExeCommand="&quot;[INSTALLFOLDER]SafeBrowseChild-Pilot.exe&quot; --emergency-restore"
         Execute="deferred"
         Impersonate="no"
-        Return="ignore" />
+        Return="check" />
 
     <InstallExecuteSequence>
       <Custom Action="RestoreDnsOnUninstall" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />

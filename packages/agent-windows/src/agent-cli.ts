@@ -237,9 +237,14 @@ async function main() {
 
   if (args.includes('--emergency-restore') || args.includes('--restore-dns')) {
     console.log('[SafeBrowse] Initiating emergency DNS and firewall restoration...');
-    await networkManager.restoreOriginalDns();
-    console.log('[SafeBrowse] ✅ Emergency restoration complete.');
-    process.exit(0);
+    try {
+      await networkManager.restoreOriginalDns();
+      console.log('[SafeBrowse] ✅ Emergency restoration complete.');
+      process.exit(0);
+    } catch (err: any) {
+      console.error(`[SafeBrowse] ❌ Emergency restoration failed: ${err.message}`);
+      process.exit(1);
+    }
   }
 
   if (args.includes('--status')) {

@@ -150,7 +150,7 @@ export class WindowsInstaller {
         `sc.exe create ${this.serviceName} binPath= "${binPath}" start= delayed-auto DisplayName= "SafeBrowse Child Protection Service"`
       );
       await execAsync(
-        `sc.exe description ${this.serviceName} "SafeBrowse kernel DNS proxy and parental policy enforcement engine."`
+        `sc.exe description ${this.serviceName} "SafeBrowse DNS filtering and parental policy enforcement service."`
       );
     } catch (e: any) {
       console.warn(`[Service Registry] Notice: ${e.message}`);
@@ -159,7 +159,11 @@ export class WindowsInstaller {
 
   public async rollback(): Promise<void> {
     console.log('[Rollback] Restoring network adapters and cleaning up service...');
-    await networkManager.restoreOriginalDns();
+    try {
+      await networkManager.restoreOriginalDns();
+    } catch (e: any) {
+      console.warn(`[Rollback] Warning restoring DNS: ${e.message}`);
+    }
 
     if (process.platform === 'win32') {
       try {
