@@ -3,7 +3,7 @@ import { BlockPageServer } from './block-server';
 import { DnsFilterProxy } from './dns-proxy';
 import { WindowsProcessLimiter } from './process-limiter';
 import { configManager, DeviceConfig, ConfigManager } from './config-manager';
-import { networkManager } from './network-manager';
+import { networkManager, logServiceMessage } from './network-manager';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 
@@ -103,20 +103,26 @@ async function pairDevice(args: string[]): Promise<void> {
 }
 
 async function runServiceMode(): Promise<void> {
-  console.log('==================================================');
-  console.log('🛡️  SafeBrowse Windows Enforcement Service');
-  console.log('==================================================');
+  logServiceMessage('INFO', '==================================================');
+  logServiceMessage('INFO', '🛡️  SafeBrowse Windows Enforcement Service');
+  logServiceMessage('INFO', '==================================================');
 
   // Await valid pairing credentials if not yet paired
   let config = await configManager.loadDeviceConfig();
   while (!config) {
-    console.log('[SafeBrowse Service] Awaiting device pairing. Please run: SafeBrowseChild-Pilot.exe --pair <CODE>');
+    logServiceMessage(
+      'INFO',
+      '[SafeBrowse Service] Awaiting device pairing. Please run: SafeBrowseChild-Pilot.exe --pair <CODE>'
+    );
     await new Promise((r) => setTimeout(r, 5000));
     config = await configManager.loadDeviceConfig();
   }
 
-  console.log(`[SafeBrowse Service] Active configuration loaded for device: ${config.deviceName} (${config.deviceId})`);
-  console.log(`[SafeBrowse Service] Backend: ${config.backendUrl}`);
+  logServiceMessage(
+    'INFO',
+    `[SafeBrowse Service] Active configuration loaded for device: ${config.deviceName} (${config.deviceId})`
+  );
+  logServiceMessage('INFO', `[SafeBrowse Service] Backend: ${config.backendUrl}`);
 
   // 1. Initialize Sync Client
   const syncClient = new PolicySyncClient(config, configManager.getCacheDir());
@@ -131,39 +137,46 @@ async function runServiceMode(): Promise<void> {
   let activeDnsPort = 53;
   try {
     activeDnsPort = await dnsProxy.start(53);
-    console.log(`[SafeBrowse Service] DNS Proxy listening on UDP 127.0.0.1:${activeDnsPort}`);
+    logServiceMessage('INFO', `[SafeBrowse Service] DNS Proxy listening on UDP 127.0.0.1:${activeDnsPort}`);
   } catch (err: any) {
-    console.warn(`[SafeBrowse Service] Port 53 bind notice (${err.message}). Starting on fallback port 5353.`);
+    logServiceMessage('WARN', `[SafeBrowse Service] Port 53 bind notice (${err.message}). Starting on fallback port 5353.`);
     activeDnsPort = await dnsProxy.start(5353);
   }
 
   // 4. Fail-Safe Network DNS Activation
   const netActivation = await networkManager.activateFailSafeDns(activeDnsPort);
   if (!netActivation.success) {
-    console.warn(`[SafeBrowse Service] Warning: Fail-safe DNS activation deferred: ${netActivation.message}`);
+    logServiceMessage('WARN', `[SafeBrowse Service] Warning: Fail-safe DNS activation deferred: ${netActivation.message}`);
   } else {
-    console.log('[SafeBrowse Service] ✅ Network adapter DNS successfully bound to SafeBrowse local resolver.');
+    const ifaceStr =
+      netActivation.interfaceIndexes && netActivation.interfaceIndexes.length > 0
+        ? ` (Adapters: ${netActivation.interfaceIndexes.join(', ')})`
+        : '';
+    logServiceMessage(
+      'INFO',
+      `[SafeBrowse Service] ✅ Network adapter DNS successfully bound to SafeBrowse local resolver${ifaceStr}.`
+    );
   }
 
   // 5. Initialize Windows Application Process Limiter
   const processLimiter = new WindowsProcessLimiter(config, () => syncClient.getActivePolicy());
   processLimiter.start();
 
-  console.log('--------------------------------------------------');
-  console.log('🟢 SafeBrowse Local Protection Engine is ACTIVE.');
-  console.log('--------------------------------------------------');
+  logServiceMessage('INFO', '--------------------------------------------------');
+  logServiceMessage('INFO', '🟢 SafeBrowse Local Protection Engine is ACTIVE.');
+  logServiceMessage('INFO', '--------------------------------------------------');
 
   // Graceful shutdown handling
   let isShuttingDown = false;
   const gracefulShutdown = async (signal: string) => {
     if (isShuttingDown) return;
     isShuttingDown = true;
-    console.log(`\n[SafeBrowse Service] Received ${signal}. Initiating graceful service shutdown...`);
+    logServiceMessage('INFO', `\n[SafeBrowse Service] Received ${signal}. Initiating graceful service shutdown...`);
 
     try {
       await networkManager.restoreOriginalDns();
     } catch (e: any) {
-      console.warn(`[SafeBrowse Service] Warning during DNS restore: ${e.message}`);
+      logServiceMessage('WARN', `[SafeBrowse Service] Warning during DNS restore: ${e.message}`);
     }
 
     try {
@@ -172,10 +185,10 @@ async function runServiceMode(): Promise<void> {
       blockServer.stop();
       syncClient.stop();
     } catch (e: any) {
-      console.warn(`[SafeBrowse Service] Warning during component teardown: ${e.message}`);
+      logServiceMessage('WARN', `[SafeBrowse Service] Warning during component teardown: ${e.message}`);
     }
 
-    console.log('[SafeBrowse Service] Service stopped cleanly.');
+    logServiceMessage('INFO', '[SafeBrowse Service] Service stopped cleanly.');
     process.exit(0);
   };
 
@@ -236,13 +249,13 @@ async function main() {
   }
 
   if (args.includes('--emergency-restore') || args.includes('--restore-dns')) {
-    console.log('[SafeBrowse] Initiating emergency DNS and firewall restoration...');
+    logServiceMessage('INFO', '[SafeBrowse] Initiating emergency DNS and firewall restoration...');
     try {
       await networkManager.restoreOriginalDns();
-      console.log('[SafeBrowse] ✅ Emergency restoration complete.');
+      logServiceMessage('INFO', '[SafeBrowse] ✅ Emergency restoration complete.');
       process.exit(0);
     } catch (err: any) {
-      console.error(`[SafeBrowse] ❌ Emergency restoration failed: ${err.message}`);
+      logServiceMessage('ERROR', `[SafeBrowse] ❌ Emergency restoration failed: ${err.message}`);
       process.exit(1);
     }
   }
