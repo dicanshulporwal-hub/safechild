@@ -1,4 +1,4 @@
-import { describe, it, after } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -35,42 +35,114 @@ function createMockDnsServer(): Promise<{ port: number; close: () => Promise<voi
 }
 
 describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () => {
-  const testTmpFile = path.join(os.tmpdir(), 'sb-test-network-backup-' + Date.now() + '.json');
-  const netManager = new WindowsNetworkManager(testTmpFile);
-
-  after(() => {
-    try {
-      if (fs.existsSync(testTmpFile)) {
-        fs.unlinkSync(testTmpFile);
-      }
-    } catch {}
-  });
-
   it('1. should create DNS backup on call', async () => {
-    const backup = await netManager.backupCurrentDnsConfig();
-    assert.ok(Array.isArray(backup));
-    assert.strictEqual(fs.existsSync(testTmpFile), true);
-    const saved = JSON.parse(fs.readFileSync(testTmpFile, 'utf8'));
-    assert.ok(Array.isArray(saved));
+    const backupPath = path.join(os.tmpdir(), 'sb-test-backup-isolated-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    const mockExecutor = async (script: string) => {
+      if (script.includes('Get-NetIPConfiguration')) {
+        return {
+          stdout: JSON.stringify([
+            { InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Description: 'Intel Wi-Fi Test Adapter' },
+          ]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-DnsClientServerAddress')) {
+        return {
+          stdout: JSON.stringify([
+            { InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['192.168.1.1'] },
+          ]),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      const backup = await net.backupCurrentDnsConfig();
+      assert.ok(Array.isArray(backup));
+      assert.strictEqual(backup.length, 1);
+      assert.strictEqual(backup[0].InterfaceIndex, 6);
+      assert.deepStrictEqual(backup[0].ServerAddresses, ['192.168.1.1']);
+      assert.strictEqual(fs.existsSync(backupPath), true);
+      const saved = JSON.parse(fs.readFileSync(backupPath, 'utf8'));
+      assert.ok(Array.isArray(saved));
+      assert.strictEqual(saved.length, 1);
+      assert.strictEqual(saved[0].InterfaceIndex, 6);
+      assert.deepStrictEqual(saved[0].ServerAddresses, ['192.168.1.1']);
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      try {
+        if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
+      } catch {}
+    }
   });
 
   it('2. should fail probe when DNS proxy is not listening on given port', async () => {
+    const net = new WindowsNetworkManager();
     // Port 54321 is unused in test
-    const isResponding = await netManager.verifyDnsProxyResponding(54321, 300);
+    const isResponding = await net.verifyDnsProxyResponding(54321, 300);
     assert.strictEqual(isResponding, false);
   });
 
   it('3. should abort fail-safe DNS activation if proxy is not responding', async () => {
-    // Use an unassigned port with a short timeout to guarantee probe failure
-    const result = await netManager.activateFailSafeDns(54322);
-    assert.strictEqual(result.success, false);
-    assert.match(result.message, /failed health probe/);
+    const backupPath = path.join(os.tmpdir(), 'sb-test-proxy-fail-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    const executedCommands: string[] = [];
+    const mockExecutor = async (script: string) => {
+      executedCommands.push(script);
+      if (script.includes('Get-NetIPConfiguration')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi' }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-DnsClientServerAddress')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['192.168.1.1'] }]),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      // Use an unassigned port with a short timeout to guarantee probe failure
+      const result = await net.activateFailSafeDns(54322);
+      assert.strictEqual(result.success, false);
+      assert.match(result.message, /failed health probe/);
+      assert.ok(
+        !executedCommands.some(
+          (c) => c.includes('Set-DnsClientServerAddress') && c.includes('127.0.0.1')
+        ),
+        'Must not configure 127.0.0.1 when DNS proxy health check fails'
+      );
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      try {
+        if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
+      } catch {}
+    }
   });
 
   it('4. should run restoreOriginalDns cleanly without throwing on non-Windows platform', async () => {
-    await assert.doesNotReject(async () => {
-      await netManager.restoreOriginalDns();
-    });
+    const net = new WindowsNetworkManager();
+    net.setPlatformForTesting('linux');
+    try {
+      await assert.doesNotReject(async () => {
+        await net.restoreOriginalDns();
+      });
+    } finally {
+      net.setPlatformForTesting(null);
+    }
   });
 
   it('5. should select target adapter with default gateway and exclude tunnel without default gateway', async () => {
@@ -481,22 +553,32 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
   });
 
   it('16. should reject and throw when Windows DNS restoration fails', async () => {
+    const backupPath = path.join(os.tmpdir(), 'sb-test-restore-fail-' + Date.now() + '.json');
+    fs.writeFileSync(
+      backupPath,
+      JSON.stringify([{ InterfaceIndex: 6, ServerAddresses: ['192.168.1.1'], InterfaceAlias: 'Wi-Fi' }]),
+      'utf8'
+    );
+    const net = new WindowsNetworkManager(backupPath);
     const failingExecutor = async () => {
       throw new Error('PowerShell Set-DnsClientServerAddress access denied');
     };
-    netManager.setPlatformForTesting('win32');
-    netManager.setCommandExecutorForTesting(failingExecutor);
+    net.setPlatformForTesting('win32');
+    net.setCommandExecutorForTesting(failingExecutor);
 
     try {
       await assert.rejects(
         async () => {
-          await netManager.restoreOriginalDns();
+          await net.restoreOriginalDns();
         },
         /PowerShell Set-DnsClientServerAddress access denied/
       );
     } finally {
-      netManager.setPlatformForTesting(null);
-      netManager.setCommandExecutorForTesting(null);
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      try {
+        if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
+      } catch {}
     }
   });
 });
