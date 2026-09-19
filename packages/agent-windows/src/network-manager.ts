@@ -11,16 +11,18 @@ const execFileAsync = promisify(execFile);
 /**
  * Appends diagnostic log message to C:\ProgramData\SafeBrowse\logs\agent-service.log
  * in addition to standard console output. Ensures secrets are never logged.
+ * Strips non-ASCII characters to prevent Windows PowerShell 5.1 mojibake.
  */
 export function logServiceMessage(level: 'INFO' | 'WARN' | 'ERROR', message: string): void {
   const timestamp = new Date().toISOString();
-  const formatted = `[${timestamp}] [${level}] ${message}\n`;
+  const cleanMessage = message.replace(/[^\x00-\x7F]/g, '');
+  const formatted = `[${timestamp}] [${level}] ${cleanMessage}\n`;
   if (level === 'ERROR') {
-    console.error(message);
+    console.error(cleanMessage);
   } else if (level === 'WARN') {
-    console.warn(message);
+    console.warn(cleanMessage);
   } else {
-    console.log(message);
+    console.log(cleanMessage);
   }
 
   try {
@@ -45,13 +47,55 @@ export interface TargetAdapterInfo {
   InterfaceIndex: number;
   InterfaceAlias: string;
   Description?: string;
+  Gateway?: string;
+  IpAddresses?: string[];
 }
+
+export type ActivationReasonCode =
+  | 'ELIGIBLE_ADAPTER_FOUND'
+  | 'NO_NETWORK_ROUTE'
+  | 'DISCOVERY_COMMAND_FAILED'
+  | 'DNS_PROXY_HEALTH_CHECK_FAILED'
+  | 'DNS_ASSIGNMENT_FAILED'
+  | 'READBACK_MISMATCH'
+  | 'CRITICAL_ROLLBACK_FAILED';
 
 export interface FailSafeDnsResult {
   success: boolean;
   message: string;
   interfaceIndexes?: number[];
   details?: string;
+  reason?: ActivationReasonCode;
+  discoveryMethod?: 'route-table' | 'net-ip-config' | 'mock';
+}
+
+export interface CandidateEvaluation {
+  interfaceIndex: number;
+  interfaceAlias: string;
+  nextHop?: string;
+  status?: string;
+  ipAddresses?: string[];
+  eligible: boolean;
+  rejectionReason?: string;
+}
+
+export interface AdapterDiscoveryResult {
+  method: 'route-table' | 'net-ip-config' | 'mock';
+  reason: 'ELIGIBLE_ADAPTER_FOUND' | 'NO_NETWORK_ROUTE' | 'DISCOVERY_COMMAND_FAILED';
+  adapters: TargetAdapterInfo[];
+  defaultRouteCount: number;
+  evaluations: CandidateEvaluation[];
+  errorMessage?: string;
+}
+
+export interface ActivationRetryOptions {
+  dnsPort?: number;
+  retryDelaysMs?: number[];
+  isCancelled?: () => boolean;
+  initialResult?: FailSafeDnsResult;
+  onStatusChange?: (status: 'ACTIVE' | 'DEGRADED', reason?: string) => void;
+  onTransition?: (from: 'DEGRADED', to: 'ACTIVE', result: FailSafeDnsResult) => void;
+  onAttempt?: (attempt: number, maxAttempts: number) => void;
 }
 
 export type NetworkCommandExecutor = (script: string) => Promise<{ stdout: string; stderr: string }>;
@@ -77,6 +121,10 @@ export class WindowsNetworkManager {
     return this.platformOverride || process.platform;
   }
 
+  public getBackupFilePath(): string {
+    return this.backupFile;
+  }
+
   private defaultExecutor: NetworkCommandExecutor = async (script: string) => {
     const psPath = configManager.getPowerShellPath();
     const b64 = Buffer.from(script, 'utf16le').toString('base64');
@@ -100,26 +148,261 @@ export class WindowsNetworkManager {
   }
 
   /**
-   * Identifies active IPv4 internet-facing adapters having an IPv4 default gateway.
-   * Excludes tunnels, loopbacks, and virtual adapters (such as Tailscale) without default gateways.
+   * Discovers active IPv4 internet-facing adapters.
+   * PRIMARY: Uses the IPv4 routing table (Get-NetRoute -DestinationPrefix '0.0.0.0/0')
+   * FALLBACK: Get-NetIPConfiguration if primary route discovery returns no eligible adapter.
+   * Distinguishes ELIGIBLE_ADAPTER_FOUND, NO_NETWORK_ROUTE, and DISCOVERY_COMMAND_FAILED.
    */
-  public async getTargetAdapters(): Promise<TargetAdapterInfo[]> {
+  public async discoverTargetAdapters(): Promise<AdapterDiscoveryResult> {
     if (this.getPlatform() !== 'win32') {
       // Simulation for non-Windows test environments
-      return [{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Description: 'Mock Wi-Fi Adapter' }];
+      const mockCandidate: CandidateEvaluation = {
+        interfaceIndex: 6,
+        interfaceAlias: 'Wi-Fi',
+        nextHop: '192.168.1.1',
+        status: 'Up',
+        ipAddresses: ['192.168.1.8'],
+        eligible: true,
+      };
+      const mockAdapter: TargetAdapterInfo = {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Description: 'Mock Wi-Fi Adapter',
+        Gateway: '192.168.1.1',
+        IpAddresses: ['192.168.1.8'],
+      };
+      return {
+        method: 'mock',
+        reason: 'ELIGIBLE_ADAPTER_FOUND',
+        adapters: [mockAdapter],
+        defaultRouteCount: 1,
+        evaluations: [mockCandidate],
+      };
     }
 
+    logServiceMessage('INFO', '[NetworkManager] Starting route-based network adapter discovery...');
+
+    // 1. PRIMARY DISCOVERY: Route Table (IPv4 0.0.0.0/0)
+    let routeScriptError: string | null = null;
+    let primaryEvaluations: CandidateEvaluation[] = [];
+    let primaryRouteCount = 0;
     try {
-      const script = [
+      const primaryScript = [
+        '$ErrorActionPreference = \'Stop\'',
+        'try {',
+        '    $routes = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix \'0.0.0.0/0\' -ErrorAction Stop)',
+        '} catch {',
+        '    if ($_.FullyQualifiedErrorId -match \'NoMatching\' -or $_.Exception.Message -match \'No matching|not found|No MSFT_NetRoute\') {',
+        '        $routes = @()',
+        '    } else {',
+        '        throw',
+        '    }',
+        '}',
+        '$evaluations = @()',
+        '$eligible = @()',
+        '$seenIndexes = @{}',
+        'foreach ($r in $routes) {',
+        '    $idx = [int]$r.InterfaceIndex',
+        '    $nextHop = if ($r.NextHop) { [string]$r.NextHop } else { \'\' }',
+        '    $alias = if ($r.InterfaceAlias) { [string]$r.InterfaceAlias } else { \'\' }',
+        '    $rejectionReason = $null',
+        '    $adapterStatus = \'Unknown\'',
+        '    $ipsList = @()',
+        '    if ([string]::IsNullOrWhiteSpace($nextHop) -or $nextHop -eq \'0.0.0.0\' -or $nextHop -eq \'::\') {',
+        '        $rejectionReason = \'Invalid or zero NextHop\'',
+        '    } else {',
+        '        $adapter = @(Get-NetAdapter -InterfaceIndex $idx -ErrorAction SilentlyContinue)[0]',
+        '        if (-not $adapter) {',
+        '            $rejectionReason = "NetAdapter not found for InterfaceIndex $idx"',
+        '        } else {',
+        '            $adapterStatus = [string]$adapter.Status',
+        '            if ($adapterStatus -ne \'Up\') {',
+        '                $rejectionReason = "Adapter status is \'$adapterStatus\', expected \'Up\'"',
+        '            } else {',
+        '                if (-not $alias) { $alias = [string]$adapter.InterfaceAlias }',
+        '                $rawIps = @(Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue)',
+        '                $usableIps = @()',
+        '                foreach ($ip in $rawIps) {',
+        '                    if ($ip.IPAddress) {',
+        '                        $addr = [string]$ip.IPAddress',
+        '                        $ipsList += $addr',
+        '                        if (-not ($addr.StartsWith(\'169.254.\') -or $addr.StartsWith(\'127.\')) ) {',
+        '                            $usableIps += $addr',
+        '                        }',
+        '                    }',
+        '                }',
+        '                if ($usableIps.Count -eq 0) {',
+        '                    if ($ipsList.Count -gt 0) {',
+        '                        $rejectionReason = \'Adapter has only APIPA or loopback IPv4 addresses\'',
+        '                    } else {',
+        '                        $rejectionReason = \'No IPv4 address assigned to adapter\'',
+        '                    }',
+        '                }',
+        '            }',
+        '        }',
+        '    }',
+        '    $isEligible = ($rejectionReason -eq $null)',
+        '    if ($isEligible -and -not $seenIndexes.ContainsKey($idx)) {',
+        '        $seenIndexes[$idx] = $true',
+        '        $desc = if ($adapter -and $adapter.InterfaceDescription) { [string]$adapter.InterfaceDescription } else { \'\' }',
+        '        $eligible += [PSCustomObject]@{',
+        '            InterfaceIndex = $idx',
+        '            InterfaceAlias = if ($alias) { $alias } else { "Interface $idx" }',
+        '            Description = $desc',
+        '            Gateway = $nextHop',
+        '            IPv4Addresses = $ipsList',
+        '        }',
+        '    }',
+        '    $evaluations += [PSCustomObject]@{',
+        '        InterfaceIndex = $idx',
+        '        InterfaceAlias = $alias',
+        '        NextHop = $nextHop',
+        '        Status = $adapterStatus',
+        '        IPv4Addresses = $ipsList',
+        '        Eligible = $isEligible',
+        '        RejectionReason = if ($rejectionReason) { $rejectionReason } else { \'\' }',
+        '    }',
+        '}',
+        '[PSCustomObject]@{',
+        '    DefaultRouteCount = $routes.Count',
+        '    Eligible = $eligible',
+        '    Evaluations = $evaluations',
+        '} | ConvertTo-Json -Compress -Depth 4',
+      ].join('\n');
+
+      const { stdout } = await this.executePowerShell(primaryScript);
+      const trimmed = stdout.trim();
+      if (trimmed && trimmed !== '[]' && trimmed !== 'null') {
+        const parsed = JSON.parse(trimmed);
+        let defaultRouteCount = 0;
+        let eligibleAdapters: TargetAdapterInfo[] = [];
+        let evaluations: CandidateEvaluation[] = [];
+
+        if (Array.isArray(parsed)) {
+          defaultRouteCount = parsed.length;
+          eligibleAdapters = parsed.map((item: any) => ({
+            InterfaceIndex: Number(item.InterfaceIndex),
+            InterfaceAlias: String(item.InterfaceAlias || `Interface ${item.InterfaceIndex}`),
+            Description: item.Description ? String(item.Description) : undefined,
+            Gateway: item.Gateway || item.NextHop ? String(item.Gateway || item.NextHop) : undefined,
+            IpAddresses: Array.isArray(item.IPv4Addresses) ? item.IPv4Addresses.map(String) : [],
+          }));
+          evaluations = eligibleAdapters.map((a) => ({
+            interfaceIndex: a.InterfaceIndex,
+            interfaceAlias: a.InterfaceAlias,
+            nextHop: a.Gateway,
+            status: 'Up',
+            ipAddresses: a.IpAddresses,
+            eligible: true,
+          }));
+        } else if (parsed && typeof parsed === 'object') {
+          defaultRouteCount = Number(parsed.DefaultRouteCount || 0);
+          const rawEvals = Array.isArray(parsed.Evaluations)
+            ? parsed.Evaluations
+            : parsed.Evaluations
+            ? [parsed.Evaluations]
+            : [];
+          const rawEligible = Array.isArray(parsed.Eligible)
+            ? parsed.Eligible
+            : parsed.Eligible
+            ? [parsed.Eligible]
+            : [];
+
+          evaluations = rawEvals.map((e: any) => ({
+            interfaceIndex: Number(e.InterfaceIndex),
+            interfaceAlias: String(e.InterfaceAlias || `Interface ${e.InterfaceIndex}`),
+            nextHop: e.NextHop ? String(e.NextHop) : undefined,
+            status: e.Status ? String(e.Status) : undefined,
+            ipAddresses: Array.isArray(e.IPv4Addresses) ? e.IPv4Addresses.map(String) : [],
+            eligible: Boolean(e.Eligible),
+            rejectionReason: e.RejectionReason ? String(e.RejectionReason) : undefined,
+          }));
+
+          eligibleAdapters = rawEligible.map((item: any) => ({
+            InterfaceIndex: Number(item.InterfaceIndex),
+            InterfaceAlias: String(item.InterfaceAlias || `Interface ${item.InterfaceIndex}`),
+            Description: item.Description ? String(item.Description) : undefined,
+            Gateway: item.Gateway || item.NextHop ? String(item.Gateway || item.NextHop) : undefined,
+            IpAddresses: Array.isArray(item.IPv4Addresses) ? item.IPv4Addresses.map(String) : [],
+          }));
+        }
+
+        primaryEvaluations = evaluations;
+        primaryRouteCount = defaultRouteCount;
+
+        logServiceMessage('INFO', '[NetworkManager] Discovery method: route-table');
+        logServiceMessage(
+          'INFO',
+          `[NetworkManager] Route discovery found ${defaultRouteCount} default IPv4 route(s).`
+        );
+
+        for (const ev of evaluations) {
+          if (ev.eligible) {
+            logServiceMessage(
+              'INFO',
+              `[NetworkManager] Candidate: InterfaceIndex ${ev.interfaceIndex} (${ev.interfaceAlias}), NextHop: ${ev.nextHop || 'N/A'}, Status: ${ev.status || 'Up'}, IP: ${ev.ipAddresses?.join(', ') || 'none'} - Eligible`
+            );
+          } else {
+            logServiceMessage(
+              'INFO',
+              `[NetworkManager] Candidate: InterfaceIndex ${ev.interfaceIndex} (${ev.interfaceAlias}), NextHop: ${ev.nextHop || 'none'}, Status: ${ev.status || 'unknown'} - Excluded: ${ev.rejectionReason}`
+            );
+          }
+        }
+
+        if (eligibleAdapters.length > 0) {
+          for (const a of eligibleAdapters) {
+            logServiceMessage(
+              'INFO',
+              `[NetworkManager] [OK] Selected adapter: ${a.InterfaceAlias} (Index ${a.InterfaceIndex}), Gateway: ${a.Gateway || 'N/A'}`
+            );
+          }
+          logServiceMessage(
+            'INFO',
+            `[NetworkManager] Discovery result: ELIGIBLE_ADAPTER_FOUND (${eligibleAdapters.length} adapter(s) selected)`
+          );
+          return {
+            method: 'route-table',
+            reason: 'ELIGIBLE_ADAPTER_FOUND',
+            adapters: eligibleAdapters,
+            defaultRouteCount,
+            evaluations,
+          };
+        }
+
+        logServiceMessage(
+          'INFO',
+          '[NetworkManager] Route discovery found no eligible routes; attempting fallback.'
+        );
+      } else {
+        logServiceMessage(
+          'INFO',
+          '[NetworkManager] Route discovery returned empty output; attempting fallback.'
+        );
+      }
+    } catch (routeErr: any) {
+      routeScriptError = routeErr.message;
+      logServiceMessage(
+        'WARN',
+        `[NetworkManager] [WARN] Route discovery command failed: ${routeErr.message}. Attempting fallback.`
+      );
+    }
+
+    // 2. FALLBACK DISCOVERY: Get-NetIPConfiguration
+    logServiceMessage('INFO', '[NetworkManager] Discovery method: net-ip-config fallback');
+    try {
+      const fallbackScript = [
         '$ErrorActionPreference = \'Stop\'',
         '$configs = @(Get-NetIPConfiguration | Where-Object {',
         '    $_.NetAdapter.Status -eq \'Up\' -and $_.IPv4DefaultGateway -ne $null',
         '})',
         '$result = foreach ($c in $configs) {',
+        '    $gw = if ($c.IPv4DefaultGateway.NextHop) { [string]$c.IPv4DefaultGateway.NextHop } else { \'\' }',
         '    [PSCustomObject]@{',
-        '        InterfaceIndex = $c.InterfaceIndex',
-        '        InterfaceAlias = $c.InterfaceAlias',
-        '        Description = $c.InterfaceDescription',
+        '        InterfaceIndex = [int]$c.InterfaceIndex',
+        '        InterfaceAlias = [string]$c.InterfaceAlias',
+        '        Description = if ($c.InterfaceDescription) { [string]$c.InterfaceDescription } else { \'\' }',
+        '        Gateway = $gw',
         '    }',
         '}',
         'if ($result.Count -gt 0) {',
@@ -129,67 +412,186 @@ export class WindowsNetworkManager {
         '}',
       ].join('\n');
 
-      const { stdout } = await this.executePowerShell(script);
+      const { stdout } = await this.executePowerShell(fallbackScript);
       const trimmed = stdout.trim();
-      if (!trimmed || trimmed === '[]' || trimmed === 'null') {
-        return [];
+      if (trimmed && trimmed !== '[]' && trimmed !== 'null') {
+        const parsed = JSON.parse(trimmed);
+        const rawList = Array.isArray(parsed) ? parsed : [parsed];
+        const seen = new Set<number>();
+        const validFallback: TargetAdapterInfo[] = [];
+
+        for (const item of rawList) {
+          if (!item || typeof item.InterfaceIndex === 'undefined') continue;
+          const idx = Number(item.InterfaceIndex);
+          const gw = item.Gateway ? String(item.Gateway).trim() : '';
+          if (gw === '0.0.0.0' || gw === '::') continue;
+          if (!seen.has(idx)) {
+            seen.add(idx);
+            validFallback.push({
+              InterfaceIndex: idx,
+              InterfaceAlias: String(item.InterfaceAlias || `Interface ${idx}`),
+              Description: item.Description ? String(item.Description) : undefined,
+              Gateway: gw || undefined,
+            });
+          }
+        }
+
+        if (validFallback.length > 0) {
+          for (const a of validFallback) {
+            logServiceMessage(
+              'INFO',
+              `[NetworkManager] [OK] Fallback selected adapter: ${a.InterfaceAlias} (Index ${a.InterfaceIndex}), Gateway: ${a.Gateway || 'N/A'}`
+            );
+          }
+          logServiceMessage(
+            'INFO',
+            `[NetworkManager] Discovery result: ELIGIBLE_ADAPTER_FOUND (via net-ip-config fallback, ${validFallback.length} adapter(s))`
+          );
+          return {
+            method: 'net-ip-config',
+            reason: 'ELIGIBLE_ADAPTER_FOUND',
+            adapters: validFallback,
+            defaultRouteCount: validFallback.length,
+            evaluations: validFallback.map((a) => ({
+              interfaceIndex: a.InterfaceIndex,
+              interfaceAlias: a.InterfaceAlias,
+              nextHop: a.Gateway,
+              status: 'Up',
+              eligible: true,
+            })),
+          };
+        }
       }
 
-      const parsed = JSON.parse(trimmed);
-      const rawList = Array.isArray(parsed) ? parsed : [parsed];
-      return rawList
-        .filter((item) => item && typeof item.InterfaceIndex !== 'undefined')
-        .map((item) => ({
-          InterfaceIndex: Number(item.InterfaceIndex),
-          InterfaceAlias: String(item.InterfaceAlias || `Interface ${item.InterfaceIndex}`),
-          Description: item.Description ? String(item.Description) : undefined,
-        }));
-    } catch (err: any) {
-      logServiceMessage('ERROR', `[NetworkManager] Failed identifying target adapters: ${err.message}`);
-      return [];
+      logServiceMessage(
+        'WARN',
+        '[NetworkManager] Fallback discovery found no eligible adapters with default gateway.'
+      );
+
+      if (routeScriptError) {
+        logServiceMessage(
+          'ERROR',
+          `[NetworkManager] [ERROR] Discovery failed: Primary route discovery failed (${routeScriptError}) and fallback found no routes.`
+        );
+        return {
+          method: 'net-ip-config',
+          reason: 'DISCOVERY_COMMAND_FAILED',
+          adapters: [],
+          defaultRouteCount: primaryRouteCount,
+          evaluations: primaryEvaluations,
+          errorMessage: routeScriptError,
+        };
+      }
+
+      logServiceMessage(
+        'WARN',
+        '[NetworkManager] Discovery result: NO_NETWORK_ROUTE (no active IPv4 default routes found).'
+      );
+      return {
+        method: 'net-ip-config',
+        reason: 'NO_NETWORK_ROUTE',
+        adapters: [],
+        defaultRouteCount: primaryRouteCount,
+        evaluations: primaryEvaluations,
+      };
+    } catch (fallbackErr: any) {
+      logServiceMessage(
+        'ERROR',
+        `[NetworkManager] [ERROR] Fallback discovery command failed: ${fallbackErr.message}`
+      );
+      return {
+        method: 'net-ip-config',
+        reason: 'DISCOVERY_COMMAND_FAILED',
+        adapters: [],
+        defaultRouteCount: primaryRouteCount,
+        evaluations: primaryEvaluations,
+        errorMessage: routeScriptError
+          ? `Primary: ${routeScriptError}; Fallback: ${fallbackErr.message}`
+          : fallbackErr.message,
+      };
     }
   }
 
   /**
+   * Identifies active IPv4 internet-facing adapters.
+   * Returns list of TargetAdapterInfo for callers.
+   */
+  public async getTargetAdapters(): Promise<TargetAdapterInfo[]> {
+    const res = await this.discoverTargetAdapters();
+    return res.adapters;
+  }
+
+  /**
    * Backs up target adapter DNS configuration into ProgramData before modification.
-   * Preserves existing valid non-127.0.0.1 backup and avoids backing up local loopback addresses.
+   * Merges newly discovered adapters into existing backup while preserving valid historical records.
+   * Never records 127.0.0.1 or ::1 as original DNS.
    */
   public async backupCurrentDnsConfig(targetAdapters?: TargetAdapterInfo[]): Promise<AdapterDnsBackup[]> {
     if (this.getPlatform() !== 'win32') {
-      const mockBackup: AdapterDnsBackup[] = [
-        { InterfaceIndex: 6, ServerAddresses: ['192.168.1.1'], InterfaceAlias: 'Wi-Fi' },
-      ];
       configManager.ensureDirectories();
-      if (!fs.existsSync(this.backupFile)) {
-        fs.writeFileSync(this.backupFile, JSON.stringify(mockBackup, null, 2), 'utf8');
+      let existingList: AdapterDnsBackup[] = [];
+      if (fs.existsSync(this.backupFile)) {
+        try {
+          const raw = fs.readFileSync(this.backupFile, 'utf8');
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) existingList = parsed;
+        } catch {}
       }
-      return mockBackup;
+
+      const existingMap = new Map<number, AdapterDnsBackup>();
+      for (const b of existingList) {
+        if (!b.ServerAddresses || !b.ServerAddresses.every((ip) => ip.includes('127.0.0.1'))) {
+          existingMap.set(b.InterfaceIndex, b);
+        }
+      }
+
+      const targets: TargetAdapterInfo[] =
+        targetAdapters && targetAdapters.length > 0
+          ? targetAdapters
+          : existingMap.size > 0
+          ? []
+          : [{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', IpAddresses: ['192.168.1.8'], Gateway: '192.168.1.1' }];
+
+      for (const t of targets) {
+        if (!existingMap.has(t.InterfaceIndex)) {
+          existingMap.set(t.InterfaceIndex, {
+            InterfaceIndex: t.InterfaceIndex,
+            InterfaceAlias: t.InterfaceAlias,
+            ServerAddresses: t.Gateway ? [t.Gateway] : ['192.168.1.1'],
+            DhcpEnabled: false,
+          });
+        }
+      }
+
+      const merged = Array.from(existingMap.values());
+      fs.writeFileSync(this.backupFile, JSON.stringify(merged, null, 2), 'utf8');
+      return merged;
     }
 
     try {
       configManager.ensureDirectories();
 
-      // Check if a valid original backup already exists on disk
+      let existingList: AdapterDnsBackup[] = [];
       if (fs.existsSync(this.backupFile)) {
         try {
           const raw = fs.readFileSync(this.backupFile, 'utf8');
-          const existingList: AdapterDnsBackup[] = JSON.parse(raw);
-          if (Array.isArray(existingList) && existingList.length > 0) {
-            // Verify it does not contain 127.0.0.1
-            const hasOnlyLoopback = existingList.every(
+          const parsed: AdapterDnsBackup[] = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            existingList = parsed.filter(
               (b) =>
-                b.ServerAddresses &&
-                b.ServerAddresses.length > 0 &&
-                b.ServerAddresses.every((ip) => ip.includes('127.0.0.1'))
+                !b.ServerAddresses ||
+                b.ServerAddresses.length === 0 ||
+                !b.ServerAddresses.every((ip) => ip.includes('127.0.0.1'))
             );
-            if (!hasOnlyLoopback) {
-              logServiceMessage('INFO', `[NetworkManager] Preserving existing valid DNS backup at ${this.backupFile}`);
-              return existingList;
-            }
           }
         } catch {
           // If unparseable, fall through to re-create
         }
+      }
+
+      const existingMap = new Map<number, AdapterDnsBackup>();
+      for (const b of existingList) {
+        existingMap.set(b.InterfaceIndex, b);
       }
 
       // Determine target adapters to query
@@ -197,21 +599,57 @@ export class WindowsNetworkManager {
         targetAdapters && targetAdapters.length > 0 ? targetAdapters : await this.getTargetAdapters();
 
       if (targets.length === 0) {
+        if (existingMap.size > 0) {
+          return Array.from(existingMap.values());
+        }
         logServiceMessage('WARN', '[NetworkManager] No target adapters found to back up.');
         return [];
       }
 
-      const indexes = targets.map((t) => t.InterfaceIndex);
+      // Check which target adapters are not yet in the existing backup
+      const missingTargets = targets.filter((t) => !existingMap.has(t.InterfaceIndex));
+
+      if (missingTargets.length === 0) {
+        logServiceMessage(
+          'INFO',
+          `[NetworkManager] Preserving existing valid DNS backup at ${this.backupFile} (all ${targets.length} target adapter(s) already recorded).`
+        );
+        return Array.from(existingMap.values());
+      }
+
+      logServiceMessage(
+        'INFO',
+        `[NetworkManager] Found ${missingTargets.length} newly discovered adapter(s) needing backup: [${missingTargets
+          .map((t) => `${t.InterfaceAlias} (${t.InterfaceIndex})`)
+          .join(', ')}]. Merging with existing backup...`
+      );
+
+      const indexes = missingTargets.map((t) => t.InterfaceIndex);
       const script = [
         '$ErrorActionPreference = \'Stop\'',
         `$indexes = @(${indexes.join(',')})`,
         '$configs = Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction Stop |',
         '    Where-Object { $indexes -contains $_.InterfaceIndex }',
         '$result = foreach ($c in $configs) {',
+        '    $idx = $c.InterfaceIndex',
+        '    $isDhcp = $true',
+        '    try {',
+        '        $adapter = Get-NetAdapter -InterfaceIndex $idx -ErrorAction SilentlyContinue',
+        '        if ($adapter -and $adapter.InterfaceGuid) {',
+        '            $regKey = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\$($adapter.InterfaceGuid)"',
+        '            if (Test-Path $regKey) {',
+        '                $ns = (Get-ItemProperty -Path $regKey -Name "NameServer" -ErrorAction SilentlyContinue).NameServer',
+        '                if (-not [string]::IsNullOrWhiteSpace($ns)) {',
+        '                    $isDhcp = $false',
+        '                }',
+        '            }',
+        '        }',
+        '    } catch {}',
         '    [PSCustomObject]@{',
         '        InterfaceIndex = $c.InterfaceIndex',
         '        InterfaceAlias = $c.InterfaceAlias',
         '        ServerAddresses = @($c.ServerAddresses)',
+        '        DhcpEnabled = $isDhcp',
         '    }',
         '}',
         'if ($result.Count -gt 0) {',
@@ -226,7 +664,7 @@ export class WindowsNetworkManager {
       if (trimmed && trimmed !== '[]' && trimmed !== 'null') {
         const parsed = JSON.parse(trimmed);
         const rawList = Array.isArray(parsed) ? parsed : [parsed];
-        const backupList: AdapterDnsBackup[] = rawList.map((item: any) => {
+        for (const item of rawList) {
           const addrs: string[] = Array.isArray(item.ServerAddresses)
             ? item.ServerAddresses
             : item.ServerAddresses
@@ -234,21 +672,38 @@ export class WindowsNetworkManager {
             : [];
           // Never backup 127.0.0.1 or ::1 as original DNS
           const cleanAddrs = addrs.filter((ip) => ip && !ip.includes('127.0.0.1') && !ip.includes('::1'));
-          return {
-            InterfaceIndex: Number(item.InterfaceIndex),
-            InterfaceAlias: item.InterfaceAlias || `Interface ${item.InterfaceIndex}`,
-            ServerAddresses: cleanAddrs,
-            DhcpEnabled: cleanAddrs.length === 0,
-          };
-        });
-
-        fs.writeFileSync(this.backupFile, JSON.stringify(backupList, null, 2), 'utf8');
-        logServiceMessage(
-          'INFO',
-          `[NetworkManager] Network adapter DNS backup saved to ${this.backupFile}: ${JSON.stringify(backupList)}`
-        );
-        return backupList;
+          const idx = Number(item.InterfaceIndex);
+          const isDhcp = typeof item.DhcpEnabled === 'boolean' ? item.DhcpEnabled : cleanAddrs.length === 0;
+          if (!existingMap.has(idx)) {
+            existingMap.set(idx, {
+              InterfaceIndex: idx,
+              InterfaceAlias: item.InterfaceAlias || `Interface ${idx}`,
+              ServerAddresses: cleanAddrs,
+              DhcpEnabled: isDhcp,
+            });
+          }
+        }
+      } else {
+        // Fallback for missing adapters that had no static DNS returned: mark as DHCP or use gateway
+        for (const mt of missingTargets) {
+          if (!existingMap.has(mt.InterfaceIndex)) {
+            existingMap.set(mt.InterfaceIndex, {
+              InterfaceIndex: mt.InterfaceIndex,
+              InterfaceAlias: mt.InterfaceAlias || `Interface ${mt.InterfaceIndex}`,
+              ServerAddresses: mt.Gateway ? [mt.Gateway] : [],
+              DhcpEnabled: true,
+            });
+          }
+        }
       }
+
+      const mergedList = Array.from(existingMap.values());
+      fs.writeFileSync(this.backupFile, JSON.stringify(mergedList, null, 2), 'utf8');
+      logServiceMessage(
+        'INFO',
+        `[NetworkManager] Network adapter DNS backup saved to ${this.backupFile} (${mergedList.length} total adapter(s)): ${JSON.stringify(mergedList)}`
+      );
+      return mergedList;
     } catch (e: any) {
       logServiceMessage('WARN', `[NetworkManager] Warning backing up network config: ${e.message}`);
     }
@@ -358,18 +813,26 @@ export class WindowsNetworkManager {
    * Activates local DNS proxy strictly AFTER verifying target adapters and confirming 127.0.0.1:53 is operational.
    * Performs read-back verification and atomic rollback if any step fails.
    */
-  public async activateFailSafeDns(dnsPort: number = 53): Promise<FailSafeDnsResult> {
-    logServiceMessage('INFO', '[NetworkManager] Initiating fail-safe network activation...');
+  public async activateFailSafeDns(dnsPort: number = 53, attempt: number = 1): Promise<FailSafeDnsResult> {
+    logServiceMessage('INFO', `[NetworkManager] Initiating fail-safe network activation (attempt ${attempt})...`);
 
     // 1. Identify target internet-facing adapters having an IPv4 default gateway
-    const targetAdapters = await this.getTargetAdapters();
+    const discovery = await this.discoverTargetAdapters();
+    const targetAdapters = discovery.adapters;
     if (targetAdapters.length === 0) {
-      const msg = 'No active IPv4 internet-facing adapters with default gateway found. Network DNS untouched.';
-      logServiceMessage('WARN', `[NetworkManager] ⚠️ ${msg}`);
+      const reason = discovery.reason;
+      const msg =
+        reason === 'DISCOVERY_COMMAND_FAILED'
+          ? `Adapter discovery command failed: ${discovery.errorMessage || 'PowerShell execution error'}. Network DNS untouched.`
+          : 'No active IPv4 internet-facing adapters with default gateway found. Network DNS untouched.';
+      logServiceMessage('WARN', `[NetworkManager] [WARN] ${msg}`);
       return {
         success: false,
         message: msg,
         interfaceIndexes: [],
+        reason: reason,
+        details: discovery.errorMessage,
+        discoveryMethod: discovery.method,
       };
     }
 
@@ -391,15 +854,17 @@ export class WindowsNetworkManager {
     const isResponding = await this.verifyDnsProxyResponding(dnsPort);
     if (!isResponding) {
       const errReason = `Local DNS proxy on port ${dnsPort} failed health probe. Original network DNS untouched.`;
-      logServiceMessage('ERROR', `[NetworkManager] ❌ Fail-safe abort: 127.0.0.1:${dnsPort} is NOT answering DNS queries.`);
+      logServiceMessage('ERROR', `[NetworkManager] [ERROR] Fail-safe abort: 127.0.0.1:${dnsPort} is NOT answering DNS queries.`);
       logServiceMessage('ERROR', '[NetworkManager] Preserving original network adapter DNS to prevent connectivity loss.');
       return {
         success: false,
         message: errReason,
         interfaceIndexes: targetAdapters.map((a) => a.InterfaceIndex),
+        reason: 'DNS_PROXY_HEALTH_CHECK_FAILED',
+        discoveryMethod: discovery.method,
       };
     }
-    logServiceMessage('INFO', `[NetworkManager] ✅ Verified: 127.0.0.1:${dnsPort} responded to DNS probe.`);
+    logServiceMessage('INFO', `[NetworkManager] [OK] Verified: 127.0.0.1:${dnsPort} responded to DNS probe.`);
 
     // 4. Apply 127.0.0.1 and read-back verify each adapter on Windows
     if (this.getPlatform() === 'win32') {
@@ -443,7 +908,7 @@ export class WindowsNetworkManager {
               `Read-back verification failed for adapter ${adapter.InterfaceIndex}: expected [127.0.0.1], got [${servers.join(', ')}]`
             );
           }
-          logServiceMessage('INFO', `[NetworkManager] ✅ Adapter ${adapter.InterfaceIndex} verified configured to 127.0.0.1.`);
+          logServiceMessage('INFO', `[NetworkManager] [OK] Adapter ${adapter.InterfaceIndex} verified configured to 127.0.0.1.`);
         }
 
         // 5. Post-assignment resolver check
@@ -452,7 +917,7 @@ export class WindowsNetworkManager {
         if (!postCheck) {
           throw new Error(`DNS proxy on 127.0.0.1:${dnsPort} stopped responding after adapter configuration.`);
         }
-        logServiceMessage('INFO', `[NetworkManager] ✅ Post-assignment resolver check passed.`);
+        logServiceMessage('INFO', '[NetworkManager] [OK] Post-assignment resolver check passed.');
 
         // 6. Clear DNS cache
         const flushScript = '$ErrorActionPreference = \'SilentlyContinue\'; Clear-DnsClientCache';
@@ -461,25 +926,32 @@ export class WindowsNetworkManager {
       } catch (applyErr: any) {
         logServiceMessage(
           'ERROR',
-          `[NetworkManager] ❌ DNS configuration or verification failed: ${applyErr.message}. Initiating immediate rollback.`
+          `[NetworkManager] [ERROR] DNS configuration or verification failed: ${applyErr.message}. Initiating immediate rollback.`
         );
         try {
           await this.restoreOriginalDns();
-          logServiceMessage('INFO', '[NetworkManager] 🔄 Original DNS restored after activation failure.');
+          logServiceMessage('INFO', '[NetworkManager] Original DNS restored after activation failure.');
+          const reasonCode: ActivationReasonCode = applyErr.message.includes('Read-back verification failed')
+            ? 'READBACK_MISMATCH'
+            : 'DNS_ASSIGNMENT_FAILED';
           return {
             success: false,
             message: `Activation failed: ${applyErr.message}. Original DNS restored.`,
             interfaceIndexes: targetAdapters.map((a) => a.InterfaceIndex),
             details: applyErr.message,
+            reason: reasonCode,
+            discoveryMethod: discovery.method,
           };
         } catch (rollbackErr: any) {
           const criticalMsg = `CRITICAL: DNS activation failed (${applyErr.message}) AND rollback failed (${rollbackErr.message}). Network configuration may be in an inconsistent state.`;
-          logServiceMessage('ERROR', `[NetworkManager] 🚨 ${criticalMsg}`);
+          logServiceMessage('ERROR', `[NetworkManager] [ERROR] ${criticalMsg}`);
           return {
             success: false,
             message: criticalMsg,
             interfaceIndexes: targetAdapters.map((a) => a.InterfaceIndex),
             details: `Activation Error: ${applyErr.message}; Rollback Error: ${rollbackErr.message}`,
+            reason: 'CRITICAL_ROLLBACK_FAILED',
+            discoveryMethod: discovery.method,
           };
         }
       }
@@ -487,13 +959,111 @@ export class WindowsNetworkManager {
 
     // 7. Install DoT / DoH blocking firewall rules
     await firewallEngine.initialize();
-    logServiceMessage('INFO', '[NetworkManager] ✅ Fail-safe DNS and firewall enforcement successfully activated and verified.');
+    logServiceMessage('INFO', '[NetworkManager] [OK] Fail-safe DNS and firewall enforcement successfully activated and verified.');
 
     return {
       success: true,
       message: 'Fail-safe DNS successfully activated and verified.',
       interfaceIndexes: targetAdapters.map((a) => a.InterfaceIndex),
+      reason: 'ELIGIBLE_ADAPTER_FOUND',
+      discoveryMethod: discovery.method,
     };
+  }
+
+  /**
+   * Controlled retry of DNS activation when starting before an eligible network route exists.
+   * Only retries if reason is NO_NETWORK_ROUTE.
+   * Does NOT retry critical failures (DNS assignment permission failure, readback mismatch, rollback failure).
+   * Backoff delays default to: [5000, 10000, 15000, 30000, 30000].
+   * Responsive to shutdown cancellation.
+   */
+  public async activateFailSafeDnsWithRetry(options: ActivationRetryOptions = {}): Promise<FailSafeDnsResult> {
+    const dnsPort = options.dnsPort || 53;
+    const delays = options.retryDelaysMs || [5000, 10000, 15000, 30000, 30000];
+    const isCancelled = options.isCancelled || (() => false);
+
+    let result: FailSafeDnsResult;
+    if (options.initialResult) {
+      result = options.initialResult;
+    } else {
+      if (options.onAttempt) options.onAttempt(1, delays.length + 1);
+      result = await this.activateFailSafeDns(dnsPort, 1);
+    }
+
+    if (result.success) {
+      if (options.onStatusChange) options.onStatusChange('ACTIVE');
+      return result;
+    }
+
+    if (options.onStatusChange) options.onStatusChange('DEGRADED', result.message);
+
+    // Only retry if the failure reason is NO_NETWORK_ROUTE
+    if (result.reason !== 'NO_NETWORK_ROUTE') {
+      logServiceMessage(
+        'WARN',
+        `[NetworkManager] [WARN] Non-network activation failure (${result.reason || 'UNKNOWN'}). Bounded retry will not run.`
+      );
+      return result;
+    }
+
+    logServiceMessage(
+      'INFO',
+      `[NetworkManager] Starting network-arrival retry sequence (up to ${delays.length} retry attempts)...`
+    );
+
+    for (let i = 0; i < delays.length; i++) {
+      const delay = delays[i];
+      const nextAttempt = i + 2;
+
+      // Sleep with cancellation checks
+      const start = Date.now();
+      while (Date.now() - start < delay) {
+        if (isCancelled()) {
+          logServiceMessage('INFO', '[NetworkManager] Activation retry cancelled by shutdown signal.');
+          return result;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+
+      if (isCancelled()) {
+        logServiceMessage('INFO', '[NetworkManager] Activation retry cancelled by shutdown signal.');
+        return result;
+      }
+
+      logServiceMessage(
+        'INFO',
+        `[NetworkManager] Activation retry attempt ${i + 1} of ${delays.length} (total attempt ${nextAttempt})...`
+      );
+      if (options.onAttempt) options.onAttempt(nextAttempt, delays.length + 1);
+
+      result = await this.activateFailSafeDns(dnsPort, nextAttempt);
+
+      if (result.success) {
+        logServiceMessage('INFO', '[NetworkManager] [OK] Network activation succeeded on retry!');
+        if (options.onTransition) {
+          options.onTransition('DEGRADED', 'ACTIVE', result);
+        }
+        if (options.onStatusChange) {
+          options.onStatusChange('ACTIVE');
+        }
+        return result;
+      }
+
+      // If failure reason changed to a non-network failure (e.g. DNS apply error), abort retry
+      if (result.reason !== 'NO_NETWORK_ROUTE') {
+        logServiceMessage(
+          'ERROR',
+          `[NetworkManager] [ERROR] Retry aborted due to critical non-network error: ${result.reason} - ${result.message}`
+        );
+        return result;
+      }
+    }
+
+    logServiceMessage(
+      'WARN',
+      `[NetworkManager] [WARN] Network activation retry limit reached (${delays.length} retries exhausted). Remaining in DEGRADED state.`
+    );
+    return result;
   }
 
   /**
@@ -535,9 +1105,21 @@ export class WindowsNetworkManager {
 
       if (backupList.length > 0) {
         for (const item of backupList) {
-          if (item.ServerAddresses && item.ServerAddresses.length > 0) {
+          // Never restore 127.0.0.1 or ::1 as original DNS
+          const cleanAddrs = (item.ServerAddresses || []).filter(
+            (ip) => ip && !ip.includes('127.0.0.1') && !ip.includes('::1')
+          );
+          if (item.DhcpEnabled) {
+            // Original adapter was configured for DHCP (automatic DNS) -> reset to DHCP
+            const script = [
+              '$ErrorActionPreference = \'Stop\'',
+              `Set-DnsClientServerAddress -InterfaceIndex ${item.InterfaceIndex} -ResetServerAddresses -ErrorAction Stop`,
+            ].join('\n');
+            await this.executePowerShell(script);
+            logServiceMessage('INFO', `[NetworkManager] Reset adapter ${item.InterfaceIndex} to DHCP.`);
+          } else if (cleanAddrs.length > 0) {
             // Restore original static DNS addresses
-            const formattedAddresses = item.ServerAddresses.map((ip) => `'${ip}'`).join(',');
+            const formattedAddresses = cleanAddrs.map((ip) => `'${ip}'`).join(',');
             const script = [
               '$ErrorActionPreference = \'Stop\'',
               `Set-DnsClientServerAddress -InterfaceIndex ${item.InterfaceIndex} -ServerAddresses @(${formattedAddresses}) -ErrorAction Stop`,
@@ -545,10 +1127,10 @@ export class WindowsNetworkManager {
             await this.executePowerShell(script);
             logServiceMessage(
               'INFO',
-              `[NetworkManager] Restored static DNS for adapter ${item.InterfaceIndex} to [${item.ServerAddresses.join(', ')}].`
+              `[NetworkManager] Restored static DNS for adapter ${item.InterfaceIndex} to [${cleanAddrs.join(', ')}].`
             );
           } else {
-            // Restore adapter to DHCP
+            // Fallback to DHCP if no static addresses are available
             const script = [
               '$ErrorActionPreference = \'Stop\'',
               `Set-DnsClientServerAddress -InterfaceIndex ${item.InterfaceIndex} -ResetServerAddresses -ErrorAction Stop`,
@@ -559,29 +1141,42 @@ export class WindowsNetworkManager {
         }
       } else {
         // If no adapters were restored from backup (e.g. backup missing or corrupt),
-        // reset ONLY internet-facing adapters with default gateway to DHCP (never touch Tailscale or tunnels!)
+        // reset ONLY adapters that are currently set to 127.0.0.1 AND have an active default gateway to DHCP
+        // Never touch Tailscale or tunnels!
         logServiceMessage(
           'INFO',
-          '[NetworkManager] No backup records found; falling back to resetting internet-facing adapters with default gateway to DHCP...'
+          '[NetworkManager] No backup records found; falling back to resetting internet-facing adapters currently configured to 127.0.0.1 to DHCP...'
         );
         const script = [
-          '$ErrorActionPreference = \'Stop\'',
-          '$configs = @(Get-NetIPConfiguration | Where-Object {',
-          '    $_.NetAdapter.Status -eq \'Up\' -and $_.IPv4DefaultGateway -ne $null',
-          '})',
-          'foreach ($c in $configs) {',
-          '    Set-DnsClientServerAddress -InterfaceIndex $c.InterfaceIndex -ResetServerAddresses -ErrorAction Stop',
+          '$ErrorActionPreference = \'SilentlyContinue\'',
+          '$trapped = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.ServerAddresses -contains \'127.0.0.1\' })',
+          '$routes = @(Get-NetRoute -DestinationPrefix \'0.0.0.0/0\' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -ne \'0.0.0.0\' })',
+          'if ($routes.Count -gt 0) {',
+          '    $routeIndexes = @($routes | ForEach-Object { $_.InterfaceIndex })',
+          '    foreach ($t in $trapped) {',
+          '        if ($routeIndexes -contains $t.InterfaceIndex) {',
+          '            Set-DnsClientServerAddress -InterfaceIndex $t.InterfaceIndex -ResetServerAddresses -ErrorAction SilentlyContinue',
+          '        }',
+          '    }',
+          '} else {',
+          '    $configs = @(Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object { $_.NetAdapter.Status -eq \'Up\' -and $_.IPv4DefaultGateway -ne $null })',
+          '    $configIndexes = @($configs | ForEach-Object { [int]$_.InterfaceIndex })',
+          '    foreach ($t in $trapped) {',
+          '        if ($configIndexes -contains $t.InterfaceIndex) {',
+          '            Set-DnsClientServerAddress -InterfaceIndex $t.InterfaceIndex -ResetServerAddresses -ErrorAction SilentlyContinue',
+          '        }',
+          '    }',
           '}',
         ].join('\n');
         await this.executePowerShell(script);
-        logServiceMessage('INFO', '[NetworkManager] Internet-facing adapters reset to DHCP.');
+        logServiceMessage('INFO', '[NetworkManager] Trapped internet-facing adapters reset to DHCP.');
       }
 
       // Flush DNS client cache
       const flushScript = '$ErrorActionPreference = \'SilentlyContinue\'; Clear-DnsClientCache';
       await this.executePowerShell(flushScript);
 
-      logServiceMessage('INFO', '[NetworkManager] ✅ Original DNS configuration cleanly restored and DNS cache flushed.');
+      logServiceMessage('INFO', '[NetworkManager] [OK] Original DNS configuration cleanly restored and DNS cache flushed.');
     } catch (e: any) {
       logServiceMessage('ERROR', `[NetworkManager] Error during DNS restoration: ${e.message}`);
       throw e;

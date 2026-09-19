@@ -43,6 +43,7 @@ describe('SafeBrowse Stage 11 Step 4: Windows Device Policy Authentication & Syn
   let deviceId: string;
   let deviceToken: string;
 
+  let otherParentToken: string;
   let otherChildId: string;
   let otherDeviceId: string;
   let otherDeviceToken: string;
@@ -121,6 +122,8 @@ describe('SafeBrowse Stage 11 Step 4: Windows Device Policy Authentication & Syn
     const otherParentEmail = `other-parent-${nanoid(6).toLowerCase()}@safebrowse.io`;
     const otherReg = await authService.register(otherParentEmail, testPassword, 'Other Parent');
     await authService.activateAccount(getActivationToken(otherParentEmail));
+    const otherLogin = await authService.login(otherParentEmail, testPassword);
+    otherParentToken = otherLogin.token!;
     const otherFamily = await familyService.getOrCreateUserFamily(otherReg.user.id);
     const otherChildRes = await childService.createChild(otherReg.user.id, 'Other Child', 14, undefined, otherFamily.id);
     otherChildId = otherChildRes.child.id;
@@ -367,5 +370,86 @@ describe('SafeBrowse Stage 11 Step 4: Windows Device Policy Authentication & Syn
     const initialPolicy = await freshClient.fetchLatestPolicy();
     assert.ok(initialPolicy, 'Initial policy should be returned without 401');
     assert.strictEqual(initialPolicy.childId, childId);
+  });
+
+  it('11. should strictly isolate child profiles within the same family (Rahul vs Priya)', async () => {
+    // 1. Create second child (Priya) in the same family as Rahul (childId)
+    const priyaRes = await childService.createChild(parentUserId, 'Priya', 10, undefined, familyId);
+    const priyaChildId = priyaRes.child.id;
+    assert.ok(priyaChildId);
+    assert.notStrictEqual(priyaChildId, childId, 'Priya must have a distinct child ID from Rahul');
+
+    // 2. Generate pairing code for Priya
+    const priyaPairing = await deviceService.generatePairingCode(parentUserId, priyaChildId);
+    assert.strictEqual(priyaPairing.childId, priyaChildId);
+    assert.strictEqual(priyaPairing.familyId, familyId);
+
+    // 3. Pair device specifically for Priya
+    const priyaPairRes = await api('POST', '/api/devices/pair', undefined, {
+      code: priyaPairing.code,
+      deviceName: "Priya's Windows Laptop",
+      platform: 'windows',
+    });
+    assert.strictEqual(priyaPairRes.status, 200);
+    const priyaDeviceId = priyaPairRes.data.device.id;
+    const priyaDeviceToken = priyaPairRes.data.device.deviceToken;
+    assert.strictEqual(priyaPairRes.data.device.childId, priyaChildId);
+
+    // 4. Add independent policies to Rahul and Priya
+    await policyService.addRule(childId, 'roblox-for-rahul-only.com', 'BLOCK', 'Rule for Rahul');
+    await policyService.addRule(priyaChildId, 'minecraft-for-priya-only.com', 'BLOCK', 'Rule for Priya');
+
+    // 5. Fetch Rahul's policy via Rahul's device credentials
+    const rahulPolicyRes = await api('GET', `/api/policies/device/${encodeURIComponent(deviceId)}`, {
+      'x-device-id': deviceId,
+      'x-device-token': deviceToken,
+    });
+    assert.strictEqual(rahulPolicyRes.status, 200);
+    const rahulRules = rahulPolicyRes.data.policy.rules.map((r: any) => r.domain);
+    assert.ok(rahulRules.includes('roblox-for-rahul-only.com'), "Rahul's policy must include Rahul's rule");
+    assert.strictEqual(
+      rahulRules.includes('minecraft-for-priya-only.com'),
+      false,
+      "Rahul's policy must NOT include Priya's rule"
+    );
+
+    // 6. Fetch Priya's policy via Priya's device credentials
+    const priyaPolicyRes = await api('GET', `/api/policies/device/${encodeURIComponent(priyaDeviceId)}`, {
+      'x-device-id': priyaDeviceId,
+      'x-device-token': priyaDeviceToken,
+    });
+    assert.strictEqual(priyaPolicyRes.status, 200);
+    const priyaRules = priyaPolicyRes.data.policy.rules.map((r: any) => r.domain);
+    assert.ok(priyaRules.includes('minecraft-for-priya-only.com'), "Priya's policy must include Priya's rule");
+    assert.strictEqual(
+      priyaRules.includes('roblox-for-rahul-only.com'),
+      false,
+      "Priya's policy must NOT include Rahul's rule"
+    );
+
+    // 7. Sibling credential cross-fetch: Rahul's device token querying Priya's device endpoint -> 401
+    const siblingCrossFetch = await api('GET', `/api/policies/device/${encodeURIComponent(priyaDeviceId)}`, {
+      'x-device-id': priyaDeviceId,
+      'x-device-token': deviceToken, // Rahul's token with Priya's device ID
+    });
+    assert.strictEqual(siblingCrossFetch.status, 401);
+
+    // 8. Stale UI / unauthorized childId substitution: Unrelated parent attempts to generate pairing code for Rahul
+    const unauthorizedPairingRes = await api(
+      'POST',
+      '/api/devices/pairing-code',
+      { Authorization: `Bearer ${otherParentToken}`, 'Content-Type': 'application/json' },
+      { childId }
+    );
+    assert.strictEqual(unauthorizedPairingRes.status, 403, 'Cross-family pairing code generation must return 403');
+
+    // 9. Unauthorized policy mutation: Unrelated parent attempts to add rule to Rahul
+    const unauthorizedPolicyRes = await api(
+      'POST',
+      `/api/policies/child/${childId}/rules`,
+      { Authorization: `Bearer ${otherParentToken}`, 'Content-Type': 'application/json' },
+      { domain: 'unauthorized-attack.com', action: 'BLOCK' }
+    );
+    assert.strictEqual(unauthorizedPolicyRes.status, 403, 'Cross-family policy mutation must return 403');
   });
 });

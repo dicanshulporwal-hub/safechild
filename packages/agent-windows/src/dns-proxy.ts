@@ -199,7 +199,7 @@ export class DnsFilterProxy {
           const result = evaluatePolicy(policy, domain);
 
           if (result.action === 'BLOCK') {
-            console.log(`[Windows DNS Filter] 🚫 BLOCKED: ${domain} (Reason: ${result.reason}) -> Returning NXDOMAIN`);
+            console.log(`[Windows DNS Filter] [BLOCK] BLOCKED: ${domain} (Reason: ${result.reason}) -> Returning NXDOMAIN`);
             const blockResp = this.buildNxDomainResponse(msg);
             this.socket?.send(blockResp, rinfo.port, rinfo.address);
             return;
@@ -210,20 +210,22 @@ export class DnsFilterProxy {
           if (rewriteIp) {
             if (qtype === 28) {
               // AAAA query for SafeSearch domain -> Return NODATA so client falls back to IPv4 VIP
-              console.log(`[Windows DNS Filter] 🔒 SAFESEARCH ENFORCED (AAAA NODATA): ${domain}`);
+              console.log(`[Windows DNS Filter] [SAFESEARCH] SAFESEARCH ENFORCED (AAAA NODATA): ${domain}`);
               const noDataResp = this.buildNoDataResponse(msg);
               this.socket?.send(noDataResp, rinfo.port, rinfo.address);
               return;
             } else {
               // A or other query -> Return enforced IPv4 VIP
-              console.log(`[Windows DNS Filter] 🔒 SAFESEARCH ENFORCED (A VIP): ${domain} -> Rewriting to ${rewriteIp}`);
+              console.log(`[Windows DNS Filter] [SAFESEARCH] SAFESEARCH ENFORCED (A VIP): ${domain} -> Rewriting to ${rewriteIp}`);
               const safeSearchResp = this.buildARecordResponse(msg, rewriteIp);
               this.socket?.send(safeSearchResp, rinfo.port, rinfo.address);
               return;
             }
           }
 
-          console.log(`[Windows DNS Filter] ✅ ALLOWED: ${domain} -> Forwarding upstream`);
+          console.log(`[Windows DNS Filter] [ALLOWED] ALLOWED: ${domain} -> Forwarding upstream`);
+        } else if (query && !policy) {
+          console.log(`[Windows DNS Filter] [WARN] [DEGRADED_POLICY_UNAVAILABLE] No active policy available. Forwarding ${query.domain} to upstream DNS.`);
         }
 
         // Forward allowed queries to upstream DNS (e.g. 1.1.1.1)
@@ -261,8 +263,9 @@ export class DnsFilterProxy {
       });
 
       this.socket.bind(port, '127.0.0.1', () => {
-        console.log(`[Windows DNS Filter] SafeBrowse DNS Interception Proxy listening on 127.0.0.1:${port}`);
-        resolve(port);
+        const boundPort = this.socket ? this.socket.address().port : port;
+        console.log(`[Windows DNS Filter] SafeBrowse DNS Interception Proxy listening on 127.0.0.1:${boundPort}`);
+        resolve(boundPort);
       });
     });
   }

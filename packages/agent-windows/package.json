@@ -6,7 +6,7 @@
     "build": "tsc",
     "start": "node dist/agent-cli.js",
     "dev": "ts-node src/agent-cli.ts",
-    "test": "ts-node tests/config-manager.test.ts && ts-node tests/dns-proxy.test.ts && ts-node tests/network-manager.test.ts && ts-node tests/process-limiter.test.ts"
+    "test": "ts-node tests/config-manager.test.ts && ts-node tests/dns-proxy.test.ts && ts-node tests/network-manager.test.ts && ts-node tests/process-limiter.test.ts && ts-node tests/recovery-and-hardening.test.ts"
   },
   "dependencies": {
     "@safebrowse/shared": "^1.0.0",

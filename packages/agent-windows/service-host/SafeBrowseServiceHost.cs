@@ -53,19 +53,185 @@ namespace SafeBrowse
 
         protected override void OnStop()
         {
-            Log("SafeBrowse Service Host stop requested.");
+            Log("[INFO] SafeBrowse Service Host stop requested.");
             _stopping = true;
+
+            // 1. Restore network DNS to original state before terminating child process
+            Log("[INFO] Initiating pre-termination network DNS restoration...");
+            bool restored = RunEmergencyRestore(2, 15000);
+            if (!restored)
+            {
+                Log("[CRITICAL] Service stop: DNS restoration could not be confirmed after retries.");
+            }
+
+            // 2. Terminate child process
             StopChildProcess();
+
+            // 3. Await monitor thread completion
             if (_monitorThread != null && _monitorThread.IsAlive)
             {
                 _monitorThread.Join(5000);
             }
-            Log("SafeBrowse Service Host stopped.");
+            Log("[OK] SafeBrowse Service Host stopped cleanly.");
         }
 
         protected override void OnShutdown()
         {
+            Log("[INFO] System shutdown detected. Performing emergency DNS restore...");
             OnStop();
+        }
+
+        public bool RunEmergencyRestore(int maxRetries = 2, int timeoutMs = 15000)
+        {
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            string targetExe = Path.Combine(baseDir, "SafeBrowseChild-Pilot.exe");
+
+            for (int attempt = 1; attempt <= maxRetries; attempt++)
+            {
+                try
+                {
+                    if (!File.Exists(targetExe))
+                    {
+                        Log(string.Format("[WARN] Cannot run emergency restore: executable not found at {0}", targetExe));
+                        return FallbackPowerShellRestore();
+                    }
+
+                    Log(string.Format("[INFO] Executing emergency restore (attempt {0}/{1}): {2} --emergency-restore", attempt, maxRetries, targetExe));
+                    ProcessStartInfo psi = new ProcessStartInfo
+                    {
+                        FileName = targetExe,
+                        Arguments = "--emergency-restore",
+                        WorkingDirectory = baseDir,
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
+                    };
+
+                    using (Process proc = Process.Start(psi))
+                    {
+                        if (proc == null)
+                        {
+                            Log(string.Format("[WARN] Failed to start emergency restore process (attempt {0}).", attempt));
+                            continue;
+                        }
+
+                        bool finished = proc.WaitForExit(timeoutMs);
+                        if (!finished)
+                        {
+                            Log(string.Format("[WARN] Emergency restore timed out after {0}ms (attempt {1}).", timeoutMs, attempt));
+                            try { proc.Kill(); } catch { }
+                            continue;
+                        }
+
+                        int exitCode = proc.ExitCode;
+                        string stdout = "";
+                        try { stdout = proc.StandardOutput.ReadToEnd(); } catch { }
+                        string stderr = "";
+                        try { stderr = proc.StandardError.ReadToEnd(); } catch { }
+
+                        if (exitCode == 0)
+                        {
+                            Log("[OK] Emergency network and DNS restore succeeded.");
+                            return true;
+                        }
+                        else
+                        {
+                            Log(string.Format("[WARN] Emergency restore exited with code {0}. Output: {1} Error: {2}", exitCode, stdout.Trim(), stderr.Trim()));
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log(string.Format("[WARN] Exception invoking emergency restore (attempt {0}): {1}", attempt, ex.Message));
+                }
+
+                if (attempt < maxRetries)
+                {
+                    Thread.Sleep(2000);
+                }
+            }
+
+            Log("[CRITICAL] Emergency restore via SafeBrowseChild-Pilot.exe failed after retries. Invoking native PowerShell fallback...");
+            return FallbackPowerShellRestore();
+        }
+
+        public bool FallbackPowerShellRestore()
+        {
+            try
+            {
+                Log("[INFO] Attempting native PowerShell DNS restore fallback...");
+                string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+                string backupPath = Path.Combine(programData, "SafeBrowse", "network-backup.json");
+
+                if (File.Exists(backupPath))
+                {
+                    Log(string.Format("[INFO] Fallback restore: found network-backup.json at {0}. Restoring exact adapter configuration...", backupPath));
+                }
+                else
+                {
+                    Log("[WARN] [LAST_RESORT] Fallback restore: network-backup.json missing. Using restricted emergency continuity heuristic for adapters trapped on 127.0.0.1.");
+                }
+
+                string psScript =
+                    "$ErrorActionPreference = 'SilentlyContinue'; " +
+                    "$backupPath = Join-Path $env:ProgramData 'SafeBrowse\\network-backup.json'; " +
+                    "$restoredAny = $false; " +
+                    "$rules = @('SafeBrowse_Block_DoT_853_TCP', 'SafeBrowse_Block_DoT_853_UDP', 'SafeBrowse_Block_DoH_Bootstrap'); " +
+                    "foreach ($r in $rules) { netsh advfirewall firewall delete rule name=$r | Out-Null }; " +
+                    "if (Test-Path $backupPath) { " +
+                    "    try { " +
+                    "        $raw = Get-Content $backupPath -Raw -ErrorAction Stop; " +
+                    "        $records = ConvertFrom-Json $raw -ErrorAction Stop; " +
+                    "        $items = @($records); " +
+                    "        foreach ($rec in $items) { " +
+                    "            if ($rec.InterfaceIndex) { " +
+                    "                $idx = [int]$rec.InterfaceIndex; " +
+                    "                $cleanAddrs = @($rec.ServerAddresses) | Where-Object { $_ -and $_ -notlike '*127.0.0.1*' -and $_ -notlike '*::1*' }; " +
+                    "                if ($rec.DhcpEnabled -eq $true -or $cleanAddrs.Count -eq 0) { " +
+                    "                    Set-DnsClientServerAddress -InterfaceIndex $idx -ResetServerAddresses -ErrorAction SilentlyContinue; " +
+                    "                } else { " +
+                    "                    Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses $cleanAddrs -ErrorAction SilentlyContinue; " +
+                    "                }; " +
+                    "                $restoredAny = $true; " +
+                    "            } " +
+                    "        } " +
+                    "    } catch {} " +
+                    "}; " +
+                    "if (-not $restoredAny) { " +
+                    "    $trapped = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.ServerAddresses -contains '127.0.0.1' }); " +
+                    "    $validRoutes = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -ne '0.0.0.0' }); " +
+                    "    $routeIndexes = @($validRoutes | ForEach-Object { $_.InterfaceIndex }); " +
+                    "    foreach ($t in $trapped) { " +
+                    "        if ($routeIndexes -contains $t.InterfaceIndex) { " +
+                    "            Set-DnsClientServerAddress -InterfaceIndex $t.InterfaceIndex -ResetServerAddresses -ErrorAction SilentlyContinue; " +
+                    "        } " +
+                    "    } " +
+                    "}; " +
+                    "Clear-DnsClientCache -ErrorAction SilentlyContinue;";
+
+                ProcessStartInfo psi = new ProcessStartInfo
+                {
+                    FileName = "powershell.exe",
+                    Arguments = "-NoProfile -ExecutionPolicy Bypass -Command \"" + psScript + "\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using (Process proc = Process.Start(psi))
+                {
+                    if (proc != null && proc.WaitForExit(10000) && proc.ExitCode == 0)
+                    {
+                        Log("[OK] Native PowerShell DNS restore fallback succeeded.");
+                        return true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("[ERROR] Native PowerShell DNS restore fallback failed: {0}", ex.Message));
+            }
+            return false;
         }
 
         private void WorkerLoop()
@@ -115,6 +281,11 @@ namespace SafeBrowse
                 }
 
                 if (_stopping) break;
+
+                // Child process crashed or exited unexpectedly while service is supposed to be running!
+                // Restore network state to prevent internet loss while backing off for restart.
+                Log("[WARN] Unexpected child process termination detected. Restoring network DNS before restart delay...");
+                RunEmergencyRestore(1, 10000);
 
                 // If child ran for more than 60 seconds, reset restart count
                 if ((DateTime.UtcNow - lastStartTime).TotalSeconds > 60)

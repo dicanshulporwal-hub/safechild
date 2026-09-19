@@ -4,6 +4,8 @@ import { DnsFilterProxy } from './dns-proxy';
 import { WindowsProcessLimiter } from './process-limiter';
 import { configManager, DeviceConfig, ConfigManager } from './config-manager';
 import { networkManager, logServiceMessage } from './network-manager';
+import * as fs from 'fs';
+import * as path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 
@@ -34,7 +36,7 @@ async function pairDevice(args: string[]): Promise<void> {
   }
 
   console.log('==================================================');
-  console.log('🛡️  SafeBrowse Windows Device Pairing');
+  console.log('[Pairing] SafeBrowse Windows Device Pairing');
   console.log('==================================================');
   console.log(`[Pairing] Claiming device with code: ${code}`);
   console.log(`[Pairing] Target Backend: ${backendUrl}`);
@@ -102,77 +104,75 @@ async function pairDevice(args: string[]): Promise<void> {
   }
 }
 
+export type EngineOperationalStatus =
+  | 'ACTIVE'
+  | 'DEGRADED_NO_NETWORK'
+  | 'DEGRADED_POLICY_UNAVAILABLE'
+  | 'DEGRADED_DNS_NOT_ENFORCED'
+  | 'OFFLINE_BACKEND_CACHED_POLICY'
+  | 'STOPPING'
+  | 'RESTORING_NETWORK';
+
+export function computeEngineStatus(
+  netSuccess: boolean,
+  netReason: string | undefined,
+  policyStatus: 'POLICY_LIVE' | 'POLICY_CACHED' | 'POLICY_UNAVAILABLE'
+): EngineOperationalStatus {
+  if (!netSuccess) {
+    if (netReason === 'NO_NETWORK_ROUTE') {
+      return 'DEGRADED_NO_NETWORK';
+    }
+    return 'DEGRADED_DNS_NOT_ENFORCED';
+  }
+  if (policyStatus === 'POLICY_UNAVAILABLE') {
+    return 'DEGRADED_POLICY_UNAVAILABLE';
+  }
+  if (policyStatus === 'POLICY_CACHED') {
+    return 'OFFLINE_BACKEND_CACHED_POLICY';
+  }
+  return 'ACTIVE';
+}
+
+export function isEnforcementActive(
+  engineStatus: EngineOperationalStatus,
+  hasUsablePolicy: boolean
+): boolean {
+  if (engineStatus === 'STOPPING' || engineStatus === 'RESTORING_NETWORK') {
+    return false;
+  }
+  if (
+    engineStatus === 'DEGRADED_NO_NETWORK' ||
+    engineStatus === 'DEGRADED_DNS_NOT_ENFORCED' ||
+    engineStatus === 'DEGRADED_POLICY_UNAVAILABLE'
+  ) {
+    return false;
+  }
+  if (!hasUsablePolicy) {
+    return false;
+  }
+  return engineStatus === 'ACTIVE' || engineStatus === 'OFFLINE_BACKEND_CACHED_POLICY';
+}
+
 async function runServiceMode(): Promise<void> {
   logServiceMessage('INFO', '==================================================');
-  logServiceMessage('INFO', '🛡️  SafeBrowse Windows Enforcement Service');
+  logServiceMessage('INFO', '[SafeBrowse Service] SafeBrowse Windows Enforcement Service');
   logServiceMessage('INFO', '==================================================');
-
-  // Await valid pairing credentials if not yet paired
-  let config = await configManager.loadDeviceConfig();
-  while (!config) {
-    logServiceMessage(
-      'INFO',
-      '[SafeBrowse Service] Awaiting device pairing. Please run: SafeBrowseChild-Pilot.exe --pair <CODE>'
-    );
-    await new Promise((r) => setTimeout(r, 5000));
-    config = await configManager.loadDeviceConfig();
-  }
-
-  logServiceMessage(
-    'INFO',
-    `[SafeBrowse Service] Active configuration loaded for device: ${config.deviceName} (${config.deviceId})`
-  );
-  logServiceMessage('INFO', `[SafeBrowse Service] Backend: ${config.backendUrl}`);
-
-  // 1. Initialize Sync Client
-  const syncClient = new PolicySyncClient(config, configManager.getCacheDir());
-  syncClient.start();
-
-  // 2. Initialize Block Page Server
-  const blockServer = new BlockPageServer(config.backendUrl, config.childId, config.deviceId);
-  await blockServer.start(8880);
-
-  // 3. Initialize DNS Filter Proxy on port 53
-  const dnsProxy = new DnsFilterProxy(() => syncClient.getActivePolicy(), '1.1.1.1', 53);
-  let activeDnsPort = 53;
-  try {
-    activeDnsPort = await dnsProxy.start(53);
-    logServiceMessage('INFO', `[SafeBrowse Service] DNS Proxy listening on UDP 127.0.0.1:${activeDnsPort}`);
-  } catch (err: any) {
-    logServiceMessage('WARN', `[SafeBrowse Service] Port 53 bind notice (${err.message}). Starting on fallback port 5353.`);
-    activeDnsPort = await dnsProxy.start(5353);
-  }
-
-  // 4. Fail-Safe Network DNS Activation
-  const netActivation = await networkManager.activateFailSafeDns(activeDnsPort);
-  if (!netActivation.success) {
-    logServiceMessage('WARN', `[SafeBrowse Service] Warning: Fail-safe DNS activation deferred: ${netActivation.message}`);
-  } else {
-    const ifaceStr =
-      netActivation.interfaceIndexes && netActivation.interfaceIndexes.length > 0
-        ? ` (Adapters: ${netActivation.interfaceIndexes.join(', ')})`
-        : '';
-    logServiceMessage(
-      'INFO',
-      `[SafeBrowse Service] ✅ Network adapter DNS successfully bound to SafeBrowse local resolver${ifaceStr}.`
-    );
-  }
-
-  // 5. Initialize Windows Application Process Limiter
-  const processLimiter = new WindowsProcessLimiter(config, () => syncClient.getActivePolicy());
-  processLimiter.start();
-
-  logServiceMessage('INFO', '--------------------------------------------------');
-  logServiceMessage('INFO', '🟢 SafeBrowse Local Protection Engine is ACTIVE.');
-  logServiceMessage('INFO', '--------------------------------------------------');
 
   // Graceful shutdown handling
   let isShuttingDown = false;
+  let currentEngineStatus: EngineOperationalStatus = 'DEGRADED_DNS_NOT_ENFORCED';
+  let syncClient: PolicySyncClient | null = null;
+  let blockServer: BlockPageServer | null = null;
+  let dnsProxy: DnsFilterProxy | null = null;
+  let processLimiter: WindowsProcessLimiter | null = null;
+
   const gracefulShutdown = async (signal: string) => {
     if (isShuttingDown) return;
     isShuttingDown = true;
+    currentEngineStatus = 'STOPPING';
     logServiceMessage('INFO', `\n[SafeBrowse Service] Received ${signal}. Initiating graceful service shutdown...`);
 
+    currentEngineStatus = 'RESTORING_NETWORK';
     try {
       await networkManager.restoreOriginalDns();
     } catch (e: any) {
@@ -180,10 +180,10 @@ async function runServiceMode(): Promise<void> {
     }
 
     try {
-      processLimiter.stop();
-      dnsProxy.stop();
-      blockServer.stop();
-      syncClient.stop();
+      if (processLimiter) processLimiter.stop();
+      if (dnsProxy) dnsProxy.stop();
+      if (blockServer) blockServer.stop();
+      if (syncClient) syncClient.stop();
     } catch (e: any) {
       logServiceMessage('WARN', `[SafeBrowse Service] Warning during component teardown: ${e.message}`);
     }
@@ -199,11 +199,125 @@ async function runServiceMode(): Promise<void> {
       if (msg === 'shutdown') gracefulShutdown('shutdown');
     });
   }
+
+  // Await valid pairing credentials if not yet paired
+  let config = await configManager.loadDeviceConfig();
+  while (!config) {
+    if (isShuttingDown) return;
+    logServiceMessage(
+      'INFO',
+      '[SafeBrowse Service] Awaiting device pairing. Please run: SafeBrowseChild-Pilot.exe --pair <CODE>'
+    );
+    await new Promise((r) => setTimeout(r, 5000));
+    config = await configManager.loadDeviceConfig();
+  }
+
+  logServiceMessage(
+    'INFO',
+    `[SafeBrowse Service] Active configuration loaded for device: ${config.deviceName} (${config.deviceId})`
+  );
+  logServiceMessage('INFO', `[SafeBrowse Service] Backend: ${config.backendUrl}`);
+
+  // 1. Initialize Sync Client
+  syncClient = new PolicySyncClient(
+    config,
+    configManager.getCacheDir(),
+    () => isEnforcementActive(currentEngineStatus, syncClient?.getActivePolicy() !== null)
+  );
+  syncClient.start();
+
+  // 2. Initialize Block Page Server
+  blockServer = new BlockPageServer(config.backendUrl, config.childId, config.deviceId);
+  await blockServer.start(8880);
+
+  // 3. Initialize DNS Filter Proxy on port 53
+  dnsProxy = new DnsFilterProxy(() => syncClient!.getActivePolicy(), '1.1.1.1', 53);
+  let activeDnsPort = 53;
+  try {
+    activeDnsPort = await dnsProxy.start(53);
+    logServiceMessage('INFO', `[SafeBrowse Service] DNS Proxy listening on UDP 127.0.0.1:${activeDnsPort}`);
+  } catch (err: any) {
+    logServiceMessage('WARN', `[SafeBrowse Service] Port 53 bind notice (${err.message}). Starting on fallback port 5353.`);
+    activeDnsPort = await dnsProxy.start(5353);
+  }
+
+  // 4. Fail-Safe Network DNS Activation (Initial Attempt)
+  const policyStatus = syncClient.getPolicyStatus();
+  const netActivation = await networkManager.activateFailSafeDns(activeDnsPort, 1);
+  currentEngineStatus = computeEngineStatus(netActivation.success, netActivation.reason, policyStatus);
+
+  if (netActivation.success) {
+    const ifaceStr =
+      netActivation.interfaceIndexes && netActivation.interfaceIndexes.length > 0
+        ? ` (Adapters: ${netActivation.interfaceIndexes.join(', ')})`
+        : '';
+    logServiceMessage(
+      'INFO',
+      `[SafeBrowse Service] [OK] Network adapter DNS successfully bound to SafeBrowse local resolver${ifaceStr}.`
+    );
+  } else {
+    logServiceMessage(
+      'WARN',
+      `[SafeBrowse Service] [${currentEngineStatus}] Warning: Fail-safe DNS activation deferred: ${netActivation.message}`
+    );
+  }
+
+  // 5. Initialize Windows Application Process Limiter
+  processLimiter = new WindowsProcessLimiter(config, () => syncClient!.getActivePolicy());
+  processLimiter.start();
+
+  logServiceMessage('INFO', '--------------------------------------------------');
+  if (currentEngineStatus === 'ACTIVE') {
+    logServiceMessage('INFO', '[SafeBrowse Service] [OK] SafeBrowse Protection Engine is ACTIVE');
+  } else if (currentEngineStatus === 'OFFLINE_BACKEND_CACHED_POLICY') {
+    logServiceMessage(
+      'INFO',
+      `[SafeBrowse Service] [OK] SafeBrowse Protection Engine is OFFLINE_BACKEND_CACHED_POLICY (Backend unreachable; enforcing cached policy v${syncClient.getActivePolicy()?.version})`
+    );
+  } else if (currentEngineStatus === 'DEGRADED_POLICY_UNAVAILABLE') {
+    logServiceMessage(
+      'WARN',
+      '[SafeBrowse Service] [DEGRADED_POLICY_UNAVAILABLE] SafeBrowse Protection Engine is DEGRADED_POLICY_UNAVAILABLE (Awaiting initial policy from cloud; standard upstream browsing permitted)'
+    );
+  } else {
+    logServiceMessage(
+      'WARN',
+      `[SafeBrowse Service] [${currentEngineStatus}] SafeBrowse Protection Engine is ${currentEngineStatus}`
+    );
+    logServiceMessage('WARN', '[SafeBrowse Service] Local DNS proxy is running, but system DNS enforcement is not active.');
+  }
+  logServiceMessage('INFO', '--------------------------------------------------');
+
+  // 6. Network-Arrival Retry Loop (bounded backoff: 5s, 10s, 15s, 30s, 30s)
+  if (!netActivation.success && netActivation.reason === 'NO_NETWORK_ROUTE') {
+    const retryDelays = [5000, 10000, 15000, 30000, 30000];
+    networkManager
+      .activateFailSafeDnsWithRetry({
+        dnsPort: activeDnsPort,
+        retryDelaysMs: retryDelays,
+        isCancelled: () => isShuttingDown,
+        initialResult: netActivation,
+        onTransition: (from, to) => {
+          const currentPolStatus = syncClient ? syncClient.getPolicyStatus() : 'POLICY_UNAVAILABLE';
+          currentEngineStatus = computeEngineStatus(true, undefined, currentPolStatus);
+          logServiceMessage('INFO', '--------------------------------------------------');
+          logServiceMessage('INFO', `[SafeBrowse Service] [OK] Transition: ${from} -> ${currentEngineStatus}`);
+          logServiceMessage('INFO', `[SafeBrowse Service] [OK] SafeBrowse Protection Engine is ${currentEngineStatus}`);
+          logServiceMessage('INFO', '--------------------------------------------------');
+        },
+      })
+      .catch((err) => {
+        logServiceMessage(
+          'ERROR',
+          `[SafeBrowse Service] [ERROR] Unhandled error during activation retry: ${err.message}`
+        );
+      });
+  }
 }
 
 async function showStatus(): Promise<void> {
   console.log('==================================================');
-  console.log('🛡️  SafeBrowse Windows Agent Status');
+  console.log('[SafeBrowse] SafeBrowse Windows Agent Status');
   console.log('==================================================');
   console.log(`Data Directory:  ${configManager.getBaseDir()}`);
   console.log(`Config File:     ${configManager.getConfigFilePath()}`);
@@ -218,13 +332,45 @@ async function showStatus(): Promise<void> {
     console.log(`  Child ID:      ${config.childId}`);
     console.log(`  Backend URL:   ${config.backendUrl}`);
     console.log(`  Paired At:     ${config.pairedAt || 'N/A'}`);
+
+    const cacheFile = path.join(configManager.getCacheDir(), `policy-${config.deviceId}.json`);
+    let cachedPolicyVer: number | null = null;
+    if (fs.existsSync(cacheFile)) {
+      try {
+        const raw = fs.readFileSync(cacheFile, 'utf8');
+        const p = JSON.parse(raw);
+        if (p && typeof p.version === 'number') cachedPolicyVer = p.version;
+      } catch {}
+    }
+    console.log(`  Policy Cache:  ${cachedPolicyVer !== null ? `v${cachedPolicyVer} (PRESENT)` : 'NONE (POLICY_UNAVAILABLE)'}`);
   } else {
     console.log('\n[Device Configuration]');
     console.log(`  Paired:        NO`);
     console.log('  To pair this laptop, run: SafeBrowseChild-Pilot.exe --pair <PAIRING_CODE>');
   }
 
+  const backupFile = networkManager.getBackupFilePath();
+  const hasBackup = fs.existsSync(backupFile);
+  console.log(`\n[Network Protection State]`);
+  console.log(`  DNS Backup:    ${hasBackup ? `ACTIVE (${backupFile})` : 'NONE'}`);
+
   if (process.platform === 'win32') {
+    try {
+      const { stdout } = await execAsync(
+        'powershell -NoProfile -Command "Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object { $_.ServerAddresses -contains \'127.0.0.1\' } | Select-Object -ExpandProperty InterfaceAlias"'
+      );
+      const redirected = stdout.trim();
+      if (redirected) {
+        console.log(`  DNS Redirect:  ENFORCED (127.0.0.1 on: ${redirected})`);
+        console.log(`  Parent Status: Protected`);
+      } else {
+        console.log(`  DNS Redirect:  NOT ACTIVE (System DNS pointing to default gateway/DHCP)`);
+        console.log(`  Parent Status: Temporarily limited (DNS Not Redirected)`);
+      }
+    } catch {
+      console.log(`  DNS Redirect:  Status query failed`);
+    }
+
     try {
       const { stdout } = await execAsync('sc.exe query SafeBrowseChildService');
       console.log('\n[Windows Service Status]');
@@ -252,10 +398,10 @@ async function main() {
     logServiceMessage('INFO', '[SafeBrowse] Initiating emergency DNS and firewall restoration...');
     try {
       await networkManager.restoreOriginalDns();
-      logServiceMessage('INFO', '[SafeBrowse] ✅ Emergency restoration complete.');
+      logServiceMessage('INFO', '[SafeBrowse] [OK] Emergency restoration complete.');
       process.exit(0);
     } catch (err: any) {
-      logServiceMessage('ERROR', `[SafeBrowse] ❌ Emergency restoration failed: ${err.message}`);
+      logServiceMessage('ERROR', `[SafeBrowse] [ERROR] Emergency restoration failed: ${err.message}`);
       process.exit(1);
     }
   }

@@ -76,7 +76,7 @@
       </Directory>
     </StandardDirectory>
 
-    <!-- 3. Fail-Safe Uninstall Custom Action: Restores original DNS before removing files -->
+    <!-- 3. Fail-Safe Uninstall Custom Action: Restores original DNS before stopping service and removing files -->
     <CustomAction
         Id="RestoreDnsOnUninstall"
         Directory="INSTALLFOLDER"
@@ -86,7 +86,7 @@
         Return="check" />
 
     <InstallExecuteSequence>
-      <Custom Action="RestoreDnsOnUninstall" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="RestoreDnsOnUninstall" Before="StopServices" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
 
     <!-- 4. Feature Set -->

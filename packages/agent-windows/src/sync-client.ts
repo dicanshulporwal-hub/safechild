@@ -5,6 +5,8 @@ import WebSocket from 'ws';
 
 import { configManager } from './config-manager';
 
+export type PolicyStatus = 'POLICY_LIVE' | 'POLICY_CACHED' | 'POLICY_UNAVAILABLE';
+
 export interface DeviceConfig {
   deviceId: string;
   deviceToken: string;
@@ -17,12 +19,16 @@ export interface DeviceConfig {
 export class PolicySyncClient {
   private config: DeviceConfig;
   private currentPolicy: Policy | null = null;
+  private policyStatus: PolicyStatus = 'POLICY_UNAVAILABLE';
   private cacheFilePath: string;
   private ws: WebSocket | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private wsReconnectTimer: NodeJS.Timeout | null = null;
+  private enforcementActiveProvider?: () => boolean;
 
-  constructor(config: DeviceConfig, cacheDir?: string) {
+  constructor(config: DeviceConfig, cacheDir?: string, enforcementActiveProvider?: () => boolean) {
     this.config = config;
+    this.enforcementActiveProvider = enforcementActiveProvider;
     const dir = cacheDir || configManager.getCacheDir();
     if (!fs.existsSync(dir)) {
       try {
@@ -33,29 +39,44 @@ export class PolicySyncClient {
     this.loadCachedPolicy();
   }
 
+  public setEnforcementActiveProvider(provider: () => boolean): void {
+    this.enforcementActiveProvider = provider;
+  }
+
   public getActivePolicy(): Policy | null {
     return this.currentPolicy;
+  }
+
+  public getPolicyStatus(): PolicyStatus {
+    return this.policyStatus;
   }
 
   private loadCachedPolicy() {
     try {
       if (fs.existsSync(this.cacheFilePath)) {
         const raw = fs.readFileSync(this.cacheFilePath, 'utf-8');
-        this.currentPolicy = JSON.parse(raw);
-        console.log(`[Agent] Loaded cached local policy v${this.currentPolicy?.version}`);
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && typeof parsed.version === 'number') {
+          this.currentPolicy = parsed;
+          this.policyStatus = 'POLICY_CACHED';
+          console.log(`[Agent] Loaded cached local policy v${this.currentPolicy?.version} (${this.policyStatus})`);
+          return;
+        }
       }
-    } catch (e) {
-      console.warn('[Agent] Could not load cached policy:', e);
+    } catch (e: any) {
+      console.warn('[Agent] Could not load cached policy:', e.message);
     }
+    this.policyStatus = 'POLICY_UNAVAILABLE';
   }
 
   private saveCachedPolicy(policy: Policy) {
     this.currentPolicy = policy;
+    this.policyStatus = 'POLICY_LIVE';
     try {
       fs.writeFileSync(this.cacheFilePath, JSON.stringify(policy, null, 2), 'utf-8');
-      console.log(`[Agent] Synchronized & cached active policy v${policy.version}`);
-    } catch (e) {
-      console.warn('[Agent] Failed to write local policy cache:', e);
+      console.log(`[Agent] Synchronized & cached active policy v${policy.version} (${this.policyStatus})`);
+    } catch (e: any) {
+      console.warn('[Agent] Failed to write local policy cache:', e.message);
     }
   }
 
@@ -86,21 +107,42 @@ export class PolicySyncClient {
         return policy;
       } else {
         console.warn('[Agent] Received invalid policy payload from cloud. Retaining local cache.');
+        if (this.currentPolicy) {
+          this.policyStatus = 'POLICY_CACHED';
+        } else {
+          this.policyStatus = 'POLICY_UNAVAILABLE';
+        }
         return this.currentPolicy;
       }
     } catch (e: any) {
-      console.warn(`[Agent] Failed to fetch latest policy from cloud. Running on local cache. Error: ${e.message}`);
+      if (this.currentPolicy) {
+        this.policyStatus = 'POLICY_CACHED';
+        console.warn(`[Agent] Failed to fetch latest policy from cloud (${e.message}). Running on local cache v${this.currentPolicy.version} (POLICY_CACHED).`);
+      } else {
+        this.policyStatus = 'POLICY_UNAVAILABLE';
+        console.warn(`[Agent] Failed to fetch latest policy from cloud (${e.message}) and no local cache exists (POLICY_UNAVAILABLE).`);
+      }
       return this.currentPolicy;
     }
   }
 
-  public async sendHeartbeat(enforcementActive: boolean = true): Promise<HeartbeatResponse | null> {
+  public async sendHeartbeat(enforcementActive?: boolean): Promise<HeartbeatResponse | null> {
     try {
+      let isEnforcing = enforcementActive;
+      if (isEnforcing === undefined) {
+        isEnforcing = this.enforcementActiveProvider ? this.enforcementActiveProvider() : Boolean(this.currentPolicy);
+      }
+
+      // Invariant: If no usable policy exists, enforcementActive MUST NOT be true
+      if (!this.currentPolicy) {
+        isEnforcing = false;
+      }
+
       const payload: HeartbeatPayload = {
         deviceId: this.config.deviceId,
         deviceToken: this.config.deviceToken,
         activePolicyVersion: this.currentPolicy?.version || 1,
-        enforcementActive,
+        enforcementActive: isEnforcing,
         platform: 'windows',
         agentVersion: '1.0.0',
       };
@@ -117,11 +159,18 @@ export class PolicySyncClient {
       if (data.policyChanged) {
         console.log('[Agent] Server indicates newer policy version available. Fetching...');
         await this.fetchLatestPolicy();
+      } else {
+        if (this.currentPolicy) {
+          this.policyStatus = 'POLICY_LIVE';
+        }
       }
 
       return data;
     } catch (e) {
-      // Offline heartbeat failure
+      // Offline heartbeat failure: preserve cached policy safely
+      if (this.currentPolicy) {
+        this.policyStatus = 'POLICY_CACHED';
+      }
       return null;
     }
   }
@@ -133,6 +182,9 @@ export class PolicySyncClient {
 
       this.ws.on('open', () => {
         console.log('[Agent] Real-time policy sync connected via authenticated WebSocket.');
+        if (this.currentPolicy) {
+          this.policyStatus = 'POLICY_LIVE';
+        }
         this.ws?.send(
           JSON.stringify({
             type: 'AUTH_DEVICE',
@@ -158,21 +210,45 @@ export class PolicySyncClient {
       });
 
       this.ws.on('close', () => {
-        setTimeout(() => this.connectWebSocket(), 5000); // Reconnect
+        if (this.currentPolicy) {
+          this.policyStatus = 'POLICY_CACHED';
+        }
+        if (this.wsReconnectTimer) clearTimeout(this.wsReconnectTimer);
+        this.wsReconnectTimer = setTimeout(() => this.connectWebSocket(), 5000);
+      });
+
+      this.ws.on('error', () => {
+        if (this.currentPolicy) {
+          this.policyStatus = 'POLICY_CACHED';
+        }
       });
     } catch (e) {
-      setTimeout(() => this.connectWebSocket(), 5000);
+      if (this.wsReconnectTimer) clearTimeout(this.wsReconnectTimer);
+      this.wsReconnectTimer = setTimeout(() => this.connectWebSocket(), 5000);
     }
   }
 
   public start() {
     this.fetchLatestPolicy();
     this.connectWebSocket();
-    this.heartbeatTimer = setInterval(() => this.sendHeartbeat(true), 30000);
+    this.heartbeatTimer = setInterval(() => this.sendHeartbeat(), 30000);
   }
 
   public stop() {
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    this.ws?.close();
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    if (this.wsReconnectTimer) {
+      clearTimeout(this.wsReconnectTimer);
+      this.wsReconnectTimer = null;
+    }
+    if (this.ws) {
+      this.ws.removeAllListeners();
+      try {
+        this.ws.close();
+      } catch (e) {}
+      this.ws = null;
+    }
   }
 }

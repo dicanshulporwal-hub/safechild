@@ -42,9 +42,12 @@ export class BlockPageServer {
                 res.writeHead(400, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Failed to submit request' }));
               }
-            } catch (e) {
-              res.writeHead(500, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: 'Internal server error' }));
+            } catch (e: any) {
+              res.writeHead(503, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({
+                error: 'SafeBrowse cloud service is temporarily unreachable. Please ask your parent directly.',
+                offline: true,
+              }));
             }
           });
           return;
@@ -196,12 +199,15 @@ export class BlockPageServer {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ domain, reason })
         });
+        const respData = await res.json().catch(function() { return {}; });
         if (res.ok) {
           document.getElementById('askForm').style.display = 'none';
           document.getElementById('successMsg').style.display = 'block';
+        } else {
+          alert(respData.error || 'SafeBrowse service is temporarily unreachable. Please ask your parent directly.');
         }
       } catch (e) {
-        alert('Could not submit request');
+        alert('SafeBrowse service is temporarily unreachable. Please ask your parent directly.');
       }
     }
   </script>

@@ -581,4 +581,819 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       } catch {}
     }
   });
+
+  it('17. should select WiFi via route-table discovery with InterfaceIndex 6 and NextHop 192.168.1.1', async () => {
+    const net = new WindowsNetworkManager();
+    net.setPlatformForTesting('win32');
+
+    const mockExecutor = async (script: string) => {
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify({
+            DefaultRouteCount: 1,
+            Eligible: [
+              {
+                InterfaceIndex: 6,
+                InterfaceAlias: 'WiFi',
+                Description: 'Intel Wi-Fi 6 AX201 160MHz',
+                Gateway: '192.168.1.1',
+                IPv4Addresses: ['192.168.1.8'],
+              },
+            ],
+            Evaluations: [
+              {
+                InterfaceIndex: 6,
+                InterfaceAlias: 'WiFi',
+                NextHop: '192.168.1.1',
+                Status: 'Up',
+                IPv4Addresses: ['192.168.1.8'],
+                Eligible: true,
+                RejectionReason: '',
+              },
+            ],
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      const discovery = await net.discoverTargetAdapters();
+      assert.strictEqual(discovery.method, 'route-table');
+      assert.strictEqual(discovery.reason, 'ELIGIBLE_ADAPTER_FOUND');
+      assert.strictEqual(discovery.defaultRouteCount, 1);
+      assert.strictEqual(discovery.adapters.length, 1);
+      assert.strictEqual(discovery.adapters[0].InterfaceIndex, 6);
+      assert.strictEqual(discovery.adapters[0].InterfaceAlias, 'WiFi');
+      assert.strictEqual(discovery.adapters[0].Gateway, '192.168.1.1');
+      assert.deepStrictEqual(discovery.adapters[0].IpAddresses, ['192.168.1.8']);
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+    }
+  });
+
+  it('18. should exclude Tailscale-like virtual interface with no usable physical gateway', async () => {
+    const net = new WindowsNetworkManager();
+    net.setPlatformForTesting('win32');
+
+    const mockExecutor = async (script: string) => {
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify({
+            DefaultRouteCount: 1,
+            Eligible: [],
+            Evaluations: [
+              {
+                InterfaceIndex: 11,
+                InterfaceAlias: 'Tailscale',
+                NextHop: '',
+                Status: 'Up',
+                IPv4Addresses: ['100.98.155.122'],
+                Eligible: false,
+                RejectionReason: 'Invalid or zero NextHop',
+              },
+            ],
+          }),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetIPConfiguration')) {
+        return { stdout: '[]', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      const discovery = await net.discoverTargetAdapters();
+      assert.strictEqual(discovery.adapters.length, 0);
+      assert.strictEqual(discovery.reason, 'NO_NETWORK_ROUTE');
+      assert.ok(
+        discovery.evaluations.some(
+          (e) => e.interfaceIndex === 11 && e.eligible === false && e.rejectionReason?.includes('NextHop')
+        )
+      );
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+    }
+  });
+
+  it('19. should exclude route with NextHop 0.0.0.0', async () => {
+    const net = new WindowsNetworkManager();
+    net.setPlatformForTesting('win32');
+
+    const mockExecutor = async (script: string) => {
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify({
+            DefaultRouteCount: 2,
+            Eligible: [
+              {
+                InterfaceIndex: 6,
+                InterfaceAlias: 'WiFi',
+                Gateway: '192.168.1.1',
+                IPv4Addresses: ['192.168.1.8'],
+              },
+            ],
+            Evaluations: [
+              {
+                InterfaceIndex: 11,
+                InterfaceAlias: 'Tailscale',
+                NextHop: '0.0.0.0',
+                Status: 'Up',
+                IPv4Addresses: ['100.98.155.122'],
+                Eligible: false,
+                RejectionReason: 'Invalid or zero NextHop',
+              },
+              {
+                InterfaceIndex: 6,
+                InterfaceAlias: 'WiFi',
+                NextHop: '192.168.1.1',
+                Status: 'Up',
+                IPv4Addresses: ['192.168.1.8'],
+                Eligible: true,
+                RejectionReason: '',
+              },
+            ],
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      const discovery = await net.discoverTargetAdapters();
+      assert.strictEqual(discovery.adapters.length, 1);
+      assert.strictEqual(discovery.adapters[0].InterfaceIndex, 6);
+      assert.ok(
+        discovery.evaluations.some(
+          (e) => e.interfaceIndex === 11 && e.nextHop === '0.0.0.0' && e.eligible === false
+        )
+      );
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+    }
+  });
+
+  it('20. should exclude disconnected adapter from route discovery', async () => {
+    const net = new WindowsNetworkManager();
+    net.setPlatformForTesting('win32');
+
+    const mockExecutor = async (script: string) => {
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify({
+            DefaultRouteCount: 1,
+            Eligible: [],
+            Evaluations: [
+              {
+                InterfaceIndex: 7,
+                InterfaceAlias: 'Ethernet',
+                NextHop: '192.168.2.1',
+                Status: 'Disconnected',
+                IPv4Addresses: [],
+                Eligible: false,
+                RejectionReason: "Adapter status is 'Disconnected', expected 'Up'",
+              },
+            ],
+          }),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetIPConfiguration')) {
+        return { stdout: '[]', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      const discovery = await net.discoverTargetAdapters();
+      assert.strictEqual(discovery.adapters.length, 0);
+      assert.ok(
+        discovery.evaluations.some(
+          (e) => e.interfaceIndex === 7 && e.status === 'Disconnected' && e.eligible === false
+        )
+      );
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+    }
+  });
+
+  it('21. should exclude APIPA-only adapter from route discovery', async () => {
+    const net = new WindowsNetworkManager();
+    net.setPlatformForTesting('win32');
+
+    const mockExecutor = async (script: string) => {
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify({
+            DefaultRouteCount: 1,
+            Eligible: [],
+            Evaluations: [
+              {
+                InterfaceIndex: 8,
+                InterfaceAlias: 'VirtualBox Host-Only',
+                NextHop: '169.254.1.1',
+                Status: 'Up',
+                IPv4Addresses: ['169.254.50.2'],
+                Eligible: false,
+                RejectionReason: 'Adapter has only APIPA or loopback IPv4 addresses',
+              },
+            ],
+          }),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetIPConfiguration')) {
+        return { stdout: '[]', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      const discovery = await net.discoverTargetAdapters();
+      assert.strictEqual(discovery.adapters.length, 0);
+      assert.ok(
+        discovery.evaluations.some(
+          (e) => e.interfaceIndex === 8 && e.rejectionReason?.includes('APIPA')
+        )
+      );
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+    }
+  });
+
+  it('22. should deduplicate multiple valid physical default routes for the same adapter', async () => {
+    const net = new WindowsNetworkManager();
+    net.setPlatformForTesting('win32');
+
+    const mockExecutor = async (script: string) => {
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify({
+            DefaultRouteCount: 3,
+            Eligible: [
+              {
+                InterfaceIndex: 6,
+                InterfaceAlias: 'WiFi',
+                Gateway: '192.168.1.1',
+                IPv4Addresses: ['192.168.1.8'],
+              },
+              {
+                InterfaceIndex: 12,
+                InterfaceAlias: 'Ethernet',
+                Gateway: '10.0.0.1',
+                IPv4Addresses: ['10.0.0.50'],
+              },
+            ],
+            Evaluations: [
+              {
+                InterfaceIndex: 6,
+                InterfaceAlias: 'WiFi',
+                NextHop: '192.168.1.1',
+                Status: 'Up',
+                Eligible: true,
+              },
+              {
+                InterfaceIndex: 6,
+                InterfaceAlias: 'WiFi',
+                NextHop: '192.168.1.1',
+                Status: 'Up',
+                Eligible: true,
+              },
+              {
+                InterfaceIndex: 12,
+                InterfaceAlias: 'Ethernet',
+                NextHop: '10.0.0.1',
+                Status: 'Up',
+                Eligible: true,
+              },
+            ],
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      const discovery = await net.discoverTargetAdapters();
+      assert.strictEqual(discovery.adapters.length, 2);
+      const indexes = discovery.adapters.map((a) => a.InterfaceIndex);
+      assert.deepStrictEqual(indexes, [6, 12]);
+      assert.strictEqual(new Set(indexes).size, 2);
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+    }
+  });
+
+  it('23. should distinguish route discovery PowerShell failure from no routes', async () => {
+    const net = new WindowsNetworkManager();
+    net.setPlatformForTesting('win32');
+
+    let failMode = true;
+    const mockExecutor = async (script: string) => {
+      if (failMode) {
+        throw new Error('PowerShell CIM query error: Access is denied');
+      } else {
+        if (script.includes('Get-NetRoute')) {
+          return {
+            stdout: JSON.stringify({
+              DefaultRouteCount: 0,
+              Eligible: [],
+              Evaluations: [],
+            }),
+            stderr: '',
+          };
+        }
+        if (script.includes('Get-NetIPConfiguration')) {
+          return { stdout: '[]', stderr: '' };
+        }
+        return { stdout: '', stderr: '' };
+      }
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      // With failMode = true: DISCOVERY_COMMAND_FAILED
+      const failureResult = await net.discoverTargetAdapters();
+      assert.strictEqual(failureResult.reason, 'DISCOVERY_COMMAND_FAILED');
+      assert.strictEqual(failureResult.adapters.length, 0);
+      assert.match(failureResult.errorMessage || '', /Access is denied/);
+
+      // With failMode = false: NO_NETWORK_ROUTE
+      failMode = false;
+      const noRouteResult = await net.discoverTargetAdapters();
+      assert.strictEqual(noRouteResult.reason, 'NO_NETWORK_ROUTE');
+      assert.strictEqual(noRouteResult.adapters.length, 0);
+      assert.strictEqual(noRouteResult.errorMessage, undefined);
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+    }
+  });
+
+  it('24. should fall back to Get-NetIPConfiguration if primary route discovery returns none', async () => {
+    const net = new WindowsNetworkManager();
+    net.setPlatformForTesting('win32');
+
+    const executedScripts: string[] = [];
+    const mockExecutor = async (script: string) => {
+      executedScripts.push(script);
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify({
+            DefaultRouteCount: 0,
+            Eligible: [],
+            Evaluations: [],
+          }),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetIPConfiguration')) {
+        return {
+          stdout: JSON.stringify([
+            {
+              InterfaceIndex: 6,
+              InterfaceAlias: 'Wi-Fi',
+              Description: 'Intel Wi-Fi Adapter',
+              Gateway: '192.168.1.1',
+            },
+          ]),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      const discovery = await net.discoverTargetAdapters();
+      assert.strictEqual(discovery.method, 'net-ip-config');
+      assert.strictEqual(discovery.reason, 'ELIGIBLE_ADAPTER_FOUND');
+      assert.strictEqual(discovery.adapters.length, 1);
+      assert.strictEqual(discovery.adapters[0].InterfaceIndex, 6);
+      assert.strictEqual(discovery.adapters[0].Gateway, '192.168.1.1');
+      assert.ok(executedScripts.some((s) => s.includes('Get-NetRoute')));
+      assert.ok(executedScripts.some((s) => s.includes('Get-NetIPConfiguration')));
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+    }
+  });
+
+  it('25. should produce NO_NETWORK_ROUTE when neither primary nor fallback has default routes', async () => {
+    const net = new WindowsNetworkManager();
+    net.setPlatformForTesting('win32');
+
+    const mockExecutor = async (script: string) => {
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify({
+            DefaultRouteCount: 0,
+            Eligible: [],
+            Evaluations: [],
+          }),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetIPConfiguration')) {
+        return { stdout: '[]', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      const discovery = await net.discoverTargetAdapters();
+      assert.strictEqual(discovery.reason, 'NO_NETWORK_ROUTE');
+      assert.strictEqual(discovery.adapters.length, 0);
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+    }
+  });
+
+  it('26. should retry activation for NO_NETWORK_ROUTE and succeed upon network arrival', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupPath = path.join(os.tmpdir(), 'sb-test-retry-arrival-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    let attemptCount = 0;
+    const mockExecutor = async (script: string) => {
+      if (script.includes('Get-NetRoute')) {
+        attemptCount++;
+        if (attemptCount === 1) {
+          // Attempt 1: Offline / booting (no default route yet)
+          return {
+            stdout: JSON.stringify({ DefaultRouteCount: 0, Eligible: [], Evaluations: [] }),
+            stderr: '',
+          };
+        } else {
+          // Attempt 2: Wi-Fi connected!
+          return {
+            stdout: JSON.stringify({
+              DefaultRouteCount: 1,
+              Eligible: [
+                {
+                  InterfaceIndex: 6,
+                  InterfaceAlias: 'Wi-Fi',
+                  Gateway: '192.168.1.1',
+                  IPv4Addresses: ['192.168.1.8'],
+                },
+              ],
+              Evaluations: [
+                {
+                  InterfaceIndex: 6,
+                  InterfaceAlias: 'Wi-Fi',
+                  NextHop: '192.168.1.1',
+                  Status: 'Up',
+                  IPv4Addresses: ['192.168.1.8'],
+                  Eligible: true,
+                },
+              ],
+            }),
+            stderr: '',
+          };
+        }
+      }
+      if (script.includes('Get-NetIPConfiguration')) {
+        return { stdout: '[]', stderr: '' };
+      }
+      if (script.includes('Get-DnsClientServerAddress') && script.includes('Select-Object InterfaceIndex, ServerAddresses')) {
+        return {
+          stdout: JSON.stringify({ InterfaceIndex: 6, ServerAddresses: ['127.0.0.1'] }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      const attemptsRecorded: number[] = [];
+      const result = await net.activateFailSafeDnsWithRetry({
+        dnsPort: dnsServer.port,
+        retryDelaysMs: [10, 10],
+        onAttempt: (att) => attemptsRecorded.push(att),
+      });
+
+      assert.strictEqual(result.success, true);
+      assert.deepStrictEqual(result.interfaceIndexes, [6]);
+      assert.strictEqual(attemptCount, 2);
+      assert.ok(attemptsRecorded.includes(2));
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      await dnsServer.close();
+      try {
+        if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
+      } catch {}
+    }
+  });
+
+  it('27. should not retry indefinitely and stop once retry limit is reached', async () => {
+    const dnsServer = await createMockDnsServer();
+    const net = new WindowsNetworkManager();
+    net.setPlatformForTesting('win32');
+
+    let attemptCount = 0;
+    const mockExecutor = async (script: string) => {
+      if (script.includes('Get-NetRoute')) {
+        attemptCount++;
+        return {
+          stdout: JSON.stringify({ DefaultRouteCount: 0, Eligible: [], Evaluations: [] }),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetIPConfiguration')) {
+        return { stdout: '[]', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      const delays = [5, 5, 5]; // 3 retries (total 4 attempts)
+      const attemptsRecorded: number[] = [];
+      const result = await net.activateFailSafeDnsWithRetry({
+        dnsPort: dnsServer.port,
+        retryDelaysMs: delays,
+        onAttempt: (att) => attemptsRecorded.push(att),
+      });
+
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(result.reason, 'NO_NETWORK_ROUTE');
+      assert.strictEqual(attemptCount, 4);
+      assert.strictEqual(attemptsRecorded.length, 4);
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      await dnsServer.close();
+    }
+  });
+
+  it('28. should not enter network-arrival retry when failure is critical DNS apply error', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupPath = path.join(os.tmpdir(), 'sb-test-no-retry-crit-' + Date.now() + '.json');
+    fs.writeFileSync(
+      backupPath,
+      JSON.stringify([{ InterfaceIndex: 6, ServerAddresses: ['192.168.1.1'], InterfaceAlias: 'Wi-Fi' }]),
+      'utf8'
+    );
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    let attemptCount = 0;
+    const mockExecutor = async (script: string) => {
+      if (script.includes('Get-NetRoute')) {
+        attemptCount++;
+        return {
+          stdout: JSON.stringify({
+            DefaultRouteCount: 1,
+            Eligible: [
+              {
+                InterfaceIndex: 6,
+                InterfaceAlias: 'Wi-Fi',
+                Gateway: '192.168.1.1',
+                IPv4Addresses: ['192.168.1.8'],
+              },
+            ],
+            Evaluations: [],
+          }),
+          stderr: '',
+        };
+      }
+      if (script.includes('Set-DnsClientServerAddress') && script.includes('127.0.0.1')) {
+        throw new Error('PowerShell access denied setting 127.0.0.1');
+      }
+      return { stdout: '', stderr: '' };
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      const attemptsRecorded: number[] = [];
+      const result = await net.activateFailSafeDnsWithRetry({
+        dnsPort: dnsServer.port,
+        retryDelaysMs: [10, 10, 10],
+        onAttempt: (att) => attemptsRecorded.push(att),
+      });
+
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(result.reason, 'DNS_ASSIGNMENT_FAILED');
+      assert.strictEqual(attemptCount, 1);
+      assert.strictEqual(attemptsRecorded.length, 1);
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      await dnsServer.close();
+      try {
+        if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
+      } catch {}
+    }
+  });
+
+  it('29. should trigger DEGRADED to ACTIVE transition callback upon retry success', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupPath = path.join(os.tmpdir(), 'sb-test-transition-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    let attempt = 0;
+    const mockExecutor = async (script: string) => {
+      if (script.includes('Get-NetRoute')) {
+        attempt++;
+        if (attempt === 1) {
+          return { stdout: JSON.stringify({ DefaultRouteCount: 0, Eligible: [], Evaluations: [] }), stderr: '' };
+        } else {
+          return {
+            stdout: JSON.stringify({
+              DefaultRouteCount: 1,
+              Eligible: [{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Gateway: '192.168.1.1' }],
+              Evaluations: [],
+            }),
+            stderr: '',
+          };
+        }
+      }
+      if (script.includes('Get-NetIPConfiguration')) {
+        return { stdout: '[]', stderr: '' };
+      }
+      if (script.includes('Get-DnsClientServerAddress') && script.includes('Select-Object InterfaceIndex, ServerAddresses')) {
+        return {
+          stdout: JSON.stringify({ InterfaceIndex: 6, ServerAddresses: ['127.0.0.1'] }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      const transitions: Array<{ from: string; to: string }> = [];
+      const statuses: string[] = [];
+
+      const result = await net.activateFailSafeDnsWithRetry({
+        dnsPort: dnsServer.port,
+        retryDelaysMs: [10],
+        onStatusChange: (status) => statuses.push(status),
+        onTransition: (from, to) => transitions.push({ from, to }),
+      });
+
+      assert.strictEqual(result.success, true);
+      assert.deepStrictEqual(transitions, [{ from: 'DEGRADED', to: 'ACTIVE' }]);
+      assert.ok(statuses.includes('DEGRADED'));
+      assert.ok(statuses.includes('ACTIVE'));
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      await dnsServer.close();
+      try {
+        if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
+      } catch {}
+    }
+  });
+
+  it('30. should enforce read-back verification during route-based activation', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupPath = path.join(os.tmpdir(), 'sb-test-rb-verify-' + Date.now() + '.json');
+    fs.writeFileSync(
+      backupPath,
+      JSON.stringify([{ InterfaceIndex: 6, ServerAddresses: ['192.168.1.1'], InterfaceAlias: 'Wi-Fi' }]),
+      'utf8'
+    );
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    const executedCommands: string[] = [];
+    const mockExecutor = async (script: string) => {
+      executedCommands.push(script);
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify({
+            DefaultRouteCount: 1,
+            Eligible: [{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Gateway: '192.168.1.1' }],
+            Evaluations: [],
+          }),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-DnsClientServerAddress') && script.includes('Select-Object InterfaceIndex, ServerAddresses')) {
+        return {
+          stdout: JSON.stringify({ InterfaceIndex: 6, ServerAddresses: ['192.168.1.1'] }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      const result = await net.activateFailSafeDns(dnsServer.port);
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(result.reason, 'READBACK_MISMATCH');
+      assert.match(result.message, /Read-back verification failed/);
+      assert.ok(executedCommands.some((c) => c.includes('192.168.1.1')));
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      await dnsServer.close();
+      try {
+        if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
+      } catch {}
+    }
+  });
+
+  it('31. should guarantee Tailscale virtual adapter is untouched during discovery, activation, and rollback', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupPath = path.join(os.tmpdir(), 'sb-test-ts-untouched-' + Date.now() + '.json');
+    fs.writeFileSync(
+      backupPath,
+      JSON.stringify([{ InterfaceIndex: 6, ServerAddresses: ['192.168.1.1'], InterfaceAlias: 'Wi-Fi' }]),
+      'utf8'
+    );
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    const executedCommands: string[] = [];
+    const mockExecutor = async (script: string) => {
+      executedCommands.push(script);
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify({
+            DefaultRouteCount: 2,
+            Eligible: [{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Gateway: '192.168.1.1' }],
+            Evaluations: [
+              {
+                InterfaceIndex: 11,
+                InterfaceAlias: 'Tailscale',
+                NextHop: '0.0.0.0',
+                Status: 'Up',
+                IPv4Addresses: ['100.98.155.122'],
+                Eligible: false,
+                RejectionReason: 'Invalid or zero NextHop',
+              },
+              {
+                InterfaceIndex: 6,
+                InterfaceAlias: 'Wi-Fi',
+                NextHop: '192.168.1.1',
+                Status: 'Up',
+                IPv4Addresses: ['192.168.1.8'],
+                Eligible: true,
+              },
+            ],
+          }),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-DnsClientServerAddress') && script.includes('Select-Object InterfaceIndex, ServerAddresses')) {
+        return {
+          stdout: JSON.stringify({ InterfaceIndex: 6, ServerAddresses: ['127.0.0.1'] }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      const result = await net.activateFailSafeDns(dnsServer.port);
+      assert.strictEqual(result.success, true);
+      assert.deepStrictEqual(result.interfaceIndexes, [6]);
+
+      // Verify that InterfaceIndex 11 (Tailscale) was NEVER modified
+      const tsModifications = executedCommands.filter(
+        (c) => c.includes('InterfaceIndex 11') && c.includes('Set-DnsClientServerAddress')
+      );
+      assert.strictEqual(tsModifications.length, 0, 'Tailscale adapter must never be modified by Set-DnsClientServerAddress');
+
+      // Now test rollback
+      await net.restoreOriginalDns();
+      const tsRollback = executedCommands.filter(
+        (c) => c.includes('InterfaceIndex 11') && c.includes('Set-DnsClientServerAddress')
+      );
+      assert.strictEqual(tsRollback.length, 0, 'Tailscale adapter must never be modified during rollback');
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      await dnsServer.close();
+      try {
+        if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
+      } catch {}
+    }
+  });
 });

@@ -37,12 +37,25 @@ export class WindowsFirewallEngine {
   constructor(private options: FirewallEngineOptions = { enableDoTBlocking: true, enableDoHBlocking: true }) {}
 
   /**
+   * Deterministic SafeBrowse-owned rule names.
+   * SafeBrowse teardown strictly touches ONLY these rules.
+   */
+  public static readonly SAFEBROWSE_RULE_NAMES = [
+    'SafeBrowse_Block_DoT_853_TCP',
+    'SafeBrowse_Block_DoT_853_UDP',
+    'SafeBrowse_Block_DoH_Bootstrap',
+  ];
+
+  /**
    * Initialize and install Windows Firewall rules
    */
   public async initialize(): Promise<{ success: boolean; ruleCount: number; warning?: string }> {
     if (process.platform !== 'win32') {
       return { success: true, ruleCount: 0, warning: 'Non-Windows platform detected; Firewall simulation active.' };
     }
+
+    // Pre-clean any existing stale SafeBrowse rules before adding
+    await this.teardown();
 
     try {
       // 1. Install Rule: Block Outbound TCP/UDP Port 853 (DoT - DNS over TLS)
@@ -63,28 +76,37 @@ export class WindowsFirewallEngine {
       }
 
       this.isRunning = true;
-      console.log(`[Firewall Engine] 🛡️ Successfully installed ${this.activeRules.length} Windows Firewall rules.`);
+      console.log(`[Firewall Engine] [OK] Successfully installed ${this.activeRules.length} Windows Firewall rules.`);
       return { success: true, ruleCount: this.activeRules.length };
     } catch (e: any) {
-      console.warn(`[Firewall Engine] Note: Elevated rule installation requires Administrator privileges (${e.message}). Proceeding with Local DNS filtering.`);
+      console.warn(`[Firewall Engine] [WARN] Elevated rule installation requires Administrator privileges (${e.message}). Proceeding with Local DNS filtering.`);
       return { success: false, ruleCount: 0, warning: e.message };
     }
   }
 
   /**
-   * Cleanly teardown and remove all installed firewall rules
+   * Cleanly teardown and remove all installed firewall rules.
+   * Strictly deletes ONLY SafeBrowse-owned deterministic rule names.
+   * Safe to call repeatedly and from separate CLI processes (such as --emergency-restore).
    */
   public async teardown(): Promise<void> {
     if (process.platform !== 'win32') return;
 
-    for (const rule of this.activeRules) {
+    const rulesToDelete = Array.from(new Set([
+      ...this.activeRules,
+      ...WindowsFirewallEngine.SAFEBROWSE_RULE_NAMES,
+    ]));
+
+    for (const rule of rulesToDelete) {
       try {
         await execAsync(`netsh advfirewall firewall delete rule name="${rule}"`);
-      } catch (e) {}
+      } catch (e) {
+        // Silently ignore if rule does not exist - ensures full idempotency
+      }
     }
     this.activeRules = [];
     this.isRunning = false;
-    console.log('[Firewall Engine] 🔄 Windows Firewall rules cleanly removed.');
+    console.log('[Firewall Engine] [OK] Windows Firewall rules cleanly removed.');
   }
 
   public getStatus() {
