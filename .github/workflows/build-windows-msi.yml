@@ -39,6 +39,7 @@ jobs:
         run: npm run build:windows
 
       - name: Run Windows agent automated tests
+        timeout-minutes: 10
         run: npm run test --workspace=@safebrowse/agent-windows
 
       - name: Compile Windows Service Host Wrapper (SafeBrowseServiceHost.exe)

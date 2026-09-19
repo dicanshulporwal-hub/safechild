@@ -1329,6 +1329,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const dnsServer = await createMockDnsServer();
     const backupFile = path.join(tmpDir, 'backup-test-36.json');
     const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux'); // CI isolation: mock adapter path regardless of host OS
 
     try {
       const adapters: MockAdapterState[] = [
@@ -1377,6 +1378,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const dnsServer = await createMockDnsServer();
     const backupFile = path.join(tmpDir, 'backup-test-37.json');
     const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux'); // CI isolation: prevents real PowerShell spawns in reconciliation loop on Windows runner
 
     try {
       const adapters: MockAdapterState[] = [
@@ -1561,6 +1563,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const dnsServer = await createMockDnsServer();
     const backupFile = path.join(tmpDir, 'backup-test-41.json');
     const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux'); // CI isolation: mock adapter path regardless of host OS
 
     try {
       const adapters: MockAdapterState[] = [
@@ -1610,6 +1613,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const dnsServer = await createMockDnsServer();
     const backupFile = path.join(tmpDir, 'backup-test-42.json');
     const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux'); // CI isolation: mock adapter path regardless of host OS
 
     try {
       const adapters: MockAdapterState[] = [
@@ -1668,6 +1672,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const dnsServer = await createMockDnsServer();
     const backupFile = path.join(tmpDir, 'backup-test-43.json');
     const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux'); // CI isolation: mock adapter path regardless of host OS
 
     try {
       const adapters: MockAdapterState[] = [
@@ -1712,6 +1717,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const dnsServer = await createMockDnsServer();
     const backupFile = path.join(tmpDir, 'backup-test-44.json');
     const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux'); // CI isolation: mock adapter path regardless of host OS
 
     try {
       const adapters: MockAdapterState[] = [
@@ -1756,6 +1762,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const dnsServer = await createMockDnsServer();
     const backupFile = path.join(tmpDir, 'backup-test-45.json');
     const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux'); // CI isolation: mock adapter path regardless of host OS
 
     try {
       const adapters: MockAdapterState[] = [
@@ -1832,6 +1839,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const dnsServer = await createMockDnsServer();
     const backupFile = path.join(tmpDir, 'backup-test-47.json');
     const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux'); // CI isolation: mock adapter path regardless of host OS
 
     try {
       const adapters: MockAdapterState[] = [
@@ -1871,6 +1879,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const dnsServer = await createMockDnsServer();
     const backupFile = path.join(tmpDir, 'backup-test-48.json');
     const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux'); // CI isolation: mock adapter path regardless of host OS
 
     try {
       const adapters: MockAdapterState[] = [
@@ -1901,6 +1910,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const dnsServer = await createMockDnsServer();
     const backupFile = path.join(tmpDir, 'backup-test-49.json');
     const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux'); // CI isolation: mock adapter path regardless of host OS
 
     try {
       const adapters: MockAdapterState[] = [
@@ -1932,6 +1942,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const dnsServer = await createMockDnsServer();
     const backupFile = path.join(tmpDir, 'backup-test-50.json');
     const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux'); // CI isolation: mock adapter path regardless of host OS
 
     try {
       const adapters: MockAdapterState[] = [
@@ -1964,6 +1975,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
   it('51. status accuracy: disconnected adapter with 127.0.0.1 and active adapter with external DNS reports NOT protected', async () => {
     const backupFile = path.join(tmpDir, 'backup-test-51.json');
     const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux'); // CI isolation: mock adapter path regardless of host OS
 
     const adapters: MockAdapterState[] = [
       {
@@ -2001,6 +2013,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
   it('52. status accuracy: all active default-route adapters with 127.0.0.1 reports Protected', async () => {
     const backupFile = path.join(tmpDir, 'backup-test-52.json');
     const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux'); // CI isolation: mock adapter path regardless of host OS
 
     const adapters: MockAdapterState[] = [
       {
@@ -2145,42 +2158,55 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
   it('54. timer and reconciliation lifecycle: duplicate start, stop, shutdown cancellation, unref, and error containment', async () => {
     const backupFile = path.join(tmpDir, 'backup-test-54.json');
     const nm = new WindowsNetworkManager(backupFile);
-
-    // 1. Calling start creates a timer
-    nm.startReconciliationLoop(53, 100);
-    const timer1 = nm.getReconcileTimerForTesting();
-    assert.ok(timer1 !== null, 'Reconciliation timer must exist after start');
-
-    // 2. Calling start twice replaces previous timer (at most one active timer exists)
-    nm.startReconciliationLoop(53, 200);
-    const timer2 = nm.getReconcileTimerForTesting();
-    assert.ok(timer2 !== null, 'Second timer must exist');
-    assert.notStrictEqual(timer1, timer2, 'Previous timer must be cleared and replaced on duplicate start');
-
-    // 3. stop clears and nulls timer
-    nm.stopReconciliationLoop();
-    assert.strictEqual(nm.getReconcileTimerForTesting(), null, 'Timer must be null after stopReconciliationLoop');
-
-    // 4. setShuttingDown clears and nulls timer
-    nm.startReconciliationLoop(53, 100);
-    assert.ok(nm.getReconcileTimerForTesting() !== null);
-    nm.setShuttingDown(true);
-    assert.strictEqual(nm.getReconcileTimerForTesting(), null, 'Timer must be cleared and nulled by setShuttingDown(true)');
-    nm.setShuttingDown(false);
-
-    // 5. Error containment: exceptions in reconcileAdapters do not crash service or leave isReconciling true
-    const failingExecutor = async () => {
-      throw new Error('Simulated WMI/PowerShell engine failure');
-    };
-    nm.setPlatformForTesting('win32');
-    nm.setCommandExecutorForTesting(failingExecutor);
+    // CI isolation: keep platform as linux throughout so timer ticks use mock path,
+    // never spawning real PowerShell child processes on a Windows runner.
+    nm.setPlatformForTesting('linux');
 
     try {
-      await nm.reconcileAdapters(53);
-    } catch {
-      // Expected to fail or return error status
+      // 1. Calling start creates a timer
+      nm.startReconciliationLoop(53, 100);
+      const timer1 = nm.getReconcileTimerForTesting();
+      assert.ok(timer1 !== null, 'Reconciliation timer must exist after start');
+
+      // 2. Calling start twice replaces previous timer (at most one active timer exists)
+      nm.startReconciliationLoop(53, 200);
+      const timer2 = nm.getReconcileTimerForTesting();
+      assert.ok(timer2 !== null, 'Second timer must exist');
+      assert.notStrictEqual(timer1, timer2, 'Previous timer must be cleared and replaced on duplicate start');
+
+      // 3. stop clears and nulls timer
+      nm.stopReconciliationLoop();
+      assert.strictEqual(nm.getReconcileTimerForTesting(), null, 'Timer must be null after stopReconciliationLoop');
+
+      // 4. setShuttingDown clears and nulls timer
+      nm.startReconciliationLoop(53, 100);
+      assert.ok(nm.getReconcileTimerForTesting() !== null);
+      nm.setShuttingDown(true);
+      assert.strictEqual(nm.getReconcileTimerForTesting(), null, 'Timer must be cleared and nulled by setShuttingDown(true)');
+      nm.setShuttingDown(false);
+
+      // 5. Error containment: exceptions in reconcileAdapters do not crash service or leave isReconciling true.
+      // Use a failing command executor with win32 platform override to exercise the win32 PowerShell path.
+      // The injected executor throws immediately so no real child process is spawned.
+      const failingExecutor = async () => {
+        throw new Error('Simulated WMI/PowerShell engine failure');
+      };
+      nm.setPlatformForTesting('win32');
+      nm.setCommandExecutorForTesting(failingExecutor);
+
+      try {
+        await nm.reconcileAdapters(53);
+      } catch {
+        // Expected to fail or return error status
+      }
+      assert.strictEqual(nm.isReconcilingState(), false, 'isReconciling must be reset in finally even on error');
+    } finally {
+      // Guarantee no timer survives this test regardless of assertion failures
+      nm.stopReconciliationLoop();
+      nm.setShuttingDown(false);
+      nm.setCommandExecutorForTesting(null);
+      nm.setPlatformForTesting('linux');
     }
-    assert.strictEqual(nm.isReconcilingState(), false, 'isReconciling must be reset in finally even on error');
   });
 
   // ----------------------------------------------------
@@ -2190,6 +2216,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const dnsServer = await createMockDnsServer();
     const backupFile = path.join(tmpDir, 'backup-test-55.json');
     const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux'); // CI isolation: mock adapter path regardless of host OS
 
     try {
       const adapters: MockAdapterState[] = [
