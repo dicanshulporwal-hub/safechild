@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as dgram from 'dgram';
-import { WindowsNetworkManager } from '../src/network-manager';
+import { WindowsNetworkManager, TargetAdapterInfo } from '../src/network-manager';
 
 /**
  * Helper to spin up a local UDP server that immediately echoes standard DNS query responses.
@@ -395,7 +395,13 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
     net.setPlatformForTesting('win32');
 
     try {
-      const backup = await net.backupCurrentDnsConfig();
+      const explicitTarget: TargetAdapterInfo = {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        IpAddresses: ['192.168.1.8'],
+        Gateway: '192.168.1.1',
+      };
+      const backup = await net.backupCurrentDnsConfig([explicitTarget]);
       assert.strictEqual(backup.length, 1);
       assert.deepStrictEqual(backup[0].ServerAddresses, ['192.168.1.1']);
       // File on disk must remain untouched
