@@ -35,6 +35,29 @@ function makeMockPolicy(overrides: Partial<Policy> = {}): Policy {
   };
 }
 
+/**
+ * Extracts the exact method declaration and body from C# source using brace-depth matching.
+ */
+function extractCsMethod(source: string, signature: string): string {
+  const sigIdx = source.indexOf(signature);
+  assert.ok(sigIdx !== -1, `Method signature "${signature}" must be present`);
+  const openBraceIdx = source.indexOf('{', sigIdx);
+  assert.ok(openBraceIdx !== -1, `Opening brace for "${signature}" must be present`);
+
+  let depth = 0;
+  for (let i = openBraceIdx; i < source.length; i++) {
+    if (source[i] === '{') {
+      depth++;
+    } else if (source[i] === '}') {
+      depth--;
+      if (depth === 0) {
+        return source.substring(sigIdx, i + 1);
+      }
+    }
+  }
+  assert.fail(`Matching closing brace for "${signature}" not found`);
+}
+
 describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
   const tmpDir = path.join(os.tmpdir(), `sb-recovery-tests-${Date.now()}`);
   before(() => {
@@ -55,15 +78,17 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     assert.strictEqual(fs.existsSync(csPath), true, 'SafeBrowseServiceHost.cs must exist');
     const csContent = fs.readFileSync(csPath, 'utf8');
 
-    // OnStop must call RunEmergencyRestore before StopChildProcess
-    const onStopIdx = csContent.indexOf('protected override void OnStop()');
-    assert.ok(onStopIdx !== -1, 'OnStop method must be present');
-    const onStopBody = csContent.substring(onStopIdx, onStopIdx + 600);
+    // Extract exact OnStop method body deterministically using brace-depth matching
+    const onStopBody = extractCsMethod(csContent, 'protected override void OnStop()');
 
+    const stoppingIdx = onStopBody.indexOf('_stopping = true');
     const restoreIdx = onStopBody.indexOf('RunEmergencyRestore');
     const stopChildIdx = onStopBody.indexOf('StopChildProcess');
+
+    assert.ok(stoppingIdx !== -1, '_stopping = true must be set in OnStop');
     assert.ok(restoreIdx !== -1, 'RunEmergencyRestore must be invoked in OnStop');
     assert.ok(stopChildIdx !== -1, 'StopChildProcess must be invoked in OnStop');
+    assert.ok(stoppingIdx < restoreIdx, '_stopping = true must occur before RunEmergencyRestore');
     assert.ok(restoreIdx < stopChildIdx, 'RunEmergencyRestore must precede StopChildProcess');
   });
 
@@ -74,9 +99,8 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const csPath = path.resolve(__dirname, '../service-host/SafeBrowseServiceHost.cs');
     const csContent = fs.readFileSync(csPath, 'utf8');
 
-    const onShutdownIdx = csContent.indexOf('protected override void OnShutdown()');
-    assert.ok(onShutdownIdx !== -1, 'OnShutdown method must be present');
-    const onShutdownBody = csContent.substring(onShutdownIdx, onShutdownIdx + 250);
+    // Extract exact OnShutdown method body deterministically using brace-depth matching
+    const onShutdownBody = extractCsMethod(csContent, 'protected override void OnShutdown()');
 
     assert.ok(
       onShutdownBody.includes('OnStop()') || onShutdownBody.includes('RunEmergencyRestore'),
@@ -523,8 +547,10 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const wxsContent = fs.readFileSync(wxsPath, 'utf8');
 
     const caIndex = wxsContent.indexOf('Id="RestoreDnsOnUninstall"');
-    assert.ok(caIndex !== -1);
-    const caBlock = wxsContent.substring(caIndex, caIndex + 400);
+    assert.ok(caIndex !== -1, 'RestoreDnsOnUninstall custom action must be present');
+    const caEnd = wxsContent.indexOf('/>', caIndex);
+    assert.ok(caEnd !== -1, 'CustomAction tag closing delimiter must be found');
+    const caBlock = wxsContent.substring(caIndex, caEnd);
 
     assert.ok(
       caBlock.includes('Return="check"'),
