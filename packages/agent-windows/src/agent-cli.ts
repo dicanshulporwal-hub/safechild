@@ -161,10 +161,31 @@ async function runServiceMode(): Promise<void> {
   // Graceful shutdown handling
   let isShuttingDown = false;
   let currentEngineStatus: EngineOperationalStatus = 'DEGRADED_DNS_NOT_ENFORCED';
+  let lastNetSuccess = false;
+  let lastNetReason: string | undefined = 'DNS_NOT_ENFORCED';
   let syncClient: PolicySyncClient | null = null;
   let blockServer: BlockPageServer | null = null;
   let dnsProxy: DnsFilterProxy | null = null;
   let processLimiter: WindowsProcessLimiter | null = null;
+
+  const recomputeAndApplyEngineStatus = (reason: string): EngineOperationalStatus => {
+    if (isShuttingDown) return currentEngineStatus;
+    const currentPolStatus = syncClient ? syncClient.getPolicyStatus() : 'POLICY_UNAVAILABLE';
+    const newStatus = computeEngineStatus(lastNetSuccess, lastNetReason, currentPolStatus);
+
+    if (newStatus !== currentEngineStatus) {
+      const oldStatus = currentEngineStatus;
+      currentEngineStatus = newStatus;
+      logServiceMessage('INFO', '--------------------------------------------------');
+      logServiceMessage(
+        'INFO',
+        `[SafeBrowse Service] [OK] Transition: ${oldStatus} -> ${newStatus} (${reason})`
+      );
+      logServiceMessage('INFO', `[SafeBrowse Service] [OK] SafeBrowse Protection Engine is ${newStatus}`);
+      logServiceMessage('INFO', '--------------------------------------------------');
+    }
+    return currentEngineStatus;
+  };
 
   const gracefulShutdown = async (signal: string) => {
     if (isShuttingDown) return;
@@ -224,7 +245,13 @@ async function runServiceMode(): Promise<void> {
     configManager.getCacheDir(),
     () => isEnforcementActive(currentEngineStatus, syncClient?.getActivePolicy() !== null)
   );
-  syncClient.start();
+
+  syncClient.setOnPolicyStatusChange((newStatus, prevStatus) => {
+    recomputeAndApplyEngineStatus(`Policy status changed: ${prevStatus} -> ${newStatus}`);
+  });
+
+  // Await bounded initial policy synchronization (max 5s) before computing initial engine status
+  await syncClient.start(5000);
 
   // 2. Initialize Block Page Server
   blockServer = new BlockPageServer(config.backendUrl, config.childId, config.deviceId);
@@ -242,9 +269,10 @@ async function runServiceMode(): Promise<void> {
   }
 
   // 4. Fail-Safe Network DNS Activation (Initial Attempt)
-  const policyStatus = syncClient.getPolicyStatus();
   const netActivation = await networkManager.activateFailSafeDns(activeDnsPort, 1);
-  currentEngineStatus = computeEngineStatus(netActivation.success, netActivation.reason, policyStatus);
+  lastNetSuccess = netActivation.success;
+  lastNetReason = netActivation.reason;
+  currentEngineStatus = computeEngineStatus(lastNetSuccess, lastNetReason, syncClient.getPolicyStatus());
 
   if (netActivation.success) {
     const ifaceStr =
@@ -298,12 +326,9 @@ async function runServiceMode(): Promise<void> {
         isCancelled: () => isShuttingDown,
         initialResult: netActivation,
         onTransition: (from, to) => {
-          const currentPolStatus = syncClient ? syncClient.getPolicyStatus() : 'POLICY_UNAVAILABLE';
-          currentEngineStatus = computeEngineStatus(true, undefined, currentPolStatus);
-          logServiceMessage('INFO', '--------------------------------------------------');
-          logServiceMessage('INFO', `[SafeBrowse Service] [OK] Transition: ${from} -> ${currentEngineStatus}`);
-          logServiceMessage('INFO', `[SafeBrowse Service] [OK] SafeBrowse Protection Engine is ${currentEngineStatus}`);
-          logServiceMessage('INFO', '--------------------------------------------------');
+          lastNetSuccess = true;
+          lastNetReason = undefined;
+          recomputeAndApplyEngineStatus(`Network arrival: ${from} -> ${to}`);
         },
       })
       .catch((err) => {
@@ -323,36 +348,57 @@ async function showStatus(): Promise<void> {
   console.log(`Config File:     ${configManager.getConfigFilePath()}`);
   console.log(`Logs Directory:  ${configManager.getLogsDir()}`);
 
-  const config = await configManager.loadDeviceConfig();
-  if (config) {
-    console.log('\n[Device Configuration]');
-    console.log(`  Paired:        YES`);
-    console.log(`  Device ID:     ${config.deviceId}`);
-    console.log(`  Device Name:   ${config.deviceName}`);
-    console.log(`  Child ID:      ${config.childId}`);
-    console.log(`  Backend URL:   ${config.backendUrl}`);
-    console.log(`  Paired At:     ${config.pairedAt || 'N/A'}`);
+  const accessState = configManager.checkConfigAccess();
 
-    const cacheFile = path.join(configManager.getCacheDir(), `policy-${config.deviceId}.json`);
-    let cachedPolicyVer: number | null = null;
-    if (fs.existsSync(cacheFile)) {
-      try {
-        const raw = fs.readFileSync(cacheFile, 'utf8');
-        const p = JSON.parse(raw);
-        if (p && typeof p.version === 'number') cachedPolicyVer = p.version;
-      } catch {}
-    }
-    console.log(`  Policy Cache:  ${cachedPolicyVer !== null ? `v${cachedPolicyVer} (PRESENT)` : 'NONE (POLICY_UNAVAILABLE)'}`);
-  } else {
+  if (accessState === 'ACCESS_DENIED') {
     console.log('\n[Device Configuration]');
-    console.log(`  Paired:        NO`);
-    console.log('  To pair this laptop, run: SafeBrowseChild-Pilot.exe --pair <PAIRING_CODE>');
+    console.log('  Device configuration: Protected / administrator access required');
+    console.log('  Note:          Configuration is secured by Windows ACLs. Run from an Administrator prompt to inspect details.');
+  } else {
+    const config = await configManager.loadDeviceConfig();
+    if (config) {
+      console.log('\n[Device Configuration]');
+      console.log(`  Paired:        YES`);
+      console.log(`  Device ID:     ${config.deviceId}`);
+      console.log(`  Device Name:   ${config.deviceName}`);
+      console.log(`  Child ID:      ${config.childId}`);
+      console.log(`  Backend URL:   ${config.backendUrl}`);
+      console.log(`  Paired At:     ${config.pairedAt || 'N/A'}`);
+
+      const cacheFile = path.join(configManager.getCacheDir(), `policy-${config.deviceId}.json`);
+      let cachedPolicyVer: number | null = null;
+      if (fs.existsSync(cacheFile)) {
+        try {
+          const raw = fs.readFileSync(cacheFile, 'utf8');
+          const p = JSON.parse(raw);
+          if (p && typeof p.version === 'number') cachedPolicyVer = p.version;
+        } catch {}
+      }
+      console.log(`  Policy Cache:  ${cachedPolicyVer !== null ? `v${cachedPolicyVer} (PRESENT)` : 'NONE (POLICY_UNAVAILABLE)'}`);
+    } else {
+      console.log('\n[Device Configuration]');
+      console.log(`  Paired:        NO`);
+      console.log('  To pair this laptop, run: SafeBrowseChild-Pilot.exe --pair <PAIRING_CODE>');
+    }
   }
 
   const backupFile = networkManager.getBackupFilePath();
-  const hasBackup = fs.existsSync(backupFile);
+  let backupStatus = 'NONE';
+  if (accessState === 'ACCESS_DENIED') {
+    backupStatus = 'Protected / administrator access required';
+  } else {
+    try {
+      if (fs.existsSync(backupFile)) {
+        backupStatus = `ACTIVE (${backupFile})`;
+      }
+    } catch (err: any) {
+      if (err.code === 'EACCES' || err.code === 'EPERM') {
+        backupStatus = 'Protected / administrator access required';
+      }
+    }
+  }
   console.log(`\n[Network Protection State]`);
-  console.log(`  DNS Backup:    ${hasBackup ? `ACTIVE (${backupFile})` : 'NONE'}`);
+  console.log(`  DNS Backup:    ${backupStatus}`);
 
   if (process.platform === 'win32') {
     try {

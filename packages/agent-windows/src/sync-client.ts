@@ -25,6 +25,7 @@ export class PolicySyncClient {
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private wsReconnectTimer: NodeJS.Timeout | null = null;
   private enforcementActiveProvider?: () => boolean;
+  private onPolicyStatusChangeCallback?: (newStatus: PolicyStatus, previousStatus: PolicyStatus) => void;
 
   constructor(config: DeviceConfig, cacheDir?: string, enforcementActiveProvider?: () => boolean) {
     this.config = config;
@@ -43,6 +44,22 @@ export class PolicySyncClient {
     this.enforcementActiveProvider = provider;
   }
 
+  public setOnPolicyStatusChange(cb: (newStatus: PolicyStatus, previousStatus: PolicyStatus) => void): void {
+    this.onPolicyStatusChangeCallback = cb;
+  }
+
+  private setPolicyStatus(newStatus: PolicyStatus): void {
+    const prev = this.policyStatus;
+    this.policyStatus = newStatus;
+    if (prev !== newStatus && this.onPolicyStatusChangeCallback) {
+      try {
+        this.onPolicyStatusChangeCallback(newStatus, prev);
+      } catch (e: any) {
+        console.warn('[PolicySyncClient] Error in onPolicyStatusChange callback:', e.message);
+      }
+    }
+  }
+
   public getActivePolicy(): Policy | null {
     return this.currentPolicy;
   }
@@ -58,7 +75,7 @@ export class PolicySyncClient {
         const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === 'object' && typeof parsed.version === 'number') {
           this.currentPolicy = parsed;
-          this.policyStatus = 'POLICY_CACHED';
+          this.setPolicyStatus('POLICY_CACHED');
           console.log(`[Agent] Loaded cached local policy v${this.currentPolicy?.version} (${this.policyStatus})`);
           return;
         }
@@ -66,12 +83,12 @@ export class PolicySyncClient {
     } catch (e: any) {
       console.warn('[Agent] Could not load cached policy:', e.message);
     }
-    this.policyStatus = 'POLICY_UNAVAILABLE';
+    this.setPolicyStatus('POLICY_UNAVAILABLE');
   }
 
   private saveCachedPolicy(policy: Policy) {
     this.currentPolicy = policy;
-    this.policyStatus = 'POLICY_LIVE';
+    this.setPolicyStatus('POLICY_LIVE');
     try {
       fs.writeFileSync(this.cacheFilePath, JSON.stringify(policy, null, 2), 'utf-8');
       console.log(`[Agent] Synchronized & cached active policy v${policy.version} (${this.policyStatus})`);
@@ -80,11 +97,14 @@ export class PolicySyncClient {
     }
   }
 
-  public async fetchLatestPolicy(): Promise<Policy | null> {
+  public async fetchLatestPolicy(timeoutMs: number = 5000): Promise<Policy | null> {
     if (!this.config?.deviceId || !this.config?.deviceToken || !this.config.deviceId.trim() || !this.config.deviceToken.trim()) {
       console.warn('[Agent] Cannot fetch policy: deviceId or deviceToken is missing or blank.');
       return this.currentPolicy;
     }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const res = await fetch(`${this.config.backendUrl}/api/policies/device/${encodeURIComponent(this.config.deviceId)}`, {
@@ -93,7 +113,8 @@ export class PolicySyncClient {
           'x-device-id': this.config.deviceId,
           'x-device-token': this.config.deviceToken,
         },
-      });
+        signal: controller.signal,
+      }).finally(() => clearTimeout(timeoutId));
 
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
@@ -108,18 +129,18 @@ export class PolicySyncClient {
       } else {
         console.warn('[Agent] Received invalid policy payload from cloud. Retaining local cache.');
         if (this.currentPolicy) {
-          this.policyStatus = 'POLICY_CACHED';
+          this.setPolicyStatus('POLICY_CACHED');
         } else {
-          this.policyStatus = 'POLICY_UNAVAILABLE';
+          this.setPolicyStatus('POLICY_UNAVAILABLE');
         }
         return this.currentPolicy;
       }
     } catch (e: any) {
       if (this.currentPolicy) {
-        this.policyStatus = 'POLICY_CACHED';
+        this.setPolicyStatus('POLICY_CACHED');
         console.warn(`[Agent] Failed to fetch latest policy from cloud (${e.message}). Running on local cache v${this.currentPolicy.version} (POLICY_CACHED).`);
       } else {
-        this.policyStatus = 'POLICY_UNAVAILABLE';
+        this.setPolicyStatus('POLICY_UNAVAILABLE');
         console.warn(`[Agent] Failed to fetch latest policy from cloud (${e.message}) and no local cache exists (POLICY_UNAVAILABLE).`);
       }
       return this.currentPolicy;
@@ -161,7 +182,7 @@ export class PolicySyncClient {
         await this.fetchLatestPolicy();
       } else {
         if (this.currentPolicy) {
-          this.policyStatus = 'POLICY_LIVE';
+          this.setPolicyStatus('POLICY_LIVE');
         }
       }
 
@@ -169,7 +190,7 @@ export class PolicySyncClient {
     } catch (e) {
       // Offline heartbeat failure: preserve cached policy safely
       if (this.currentPolicy) {
-        this.policyStatus = 'POLICY_CACHED';
+        this.setPolicyStatus('POLICY_CACHED');
       }
       return null;
     }
@@ -183,7 +204,7 @@ export class PolicySyncClient {
       this.ws.on('open', () => {
         console.log('[Agent] Real-time policy sync connected via authenticated WebSocket.');
         if (this.currentPolicy) {
-          this.policyStatus = 'POLICY_LIVE';
+          this.setPolicyStatus('POLICY_LIVE');
         }
         this.ws?.send(
           JSON.stringify({
@@ -211,7 +232,7 @@ export class PolicySyncClient {
 
       this.ws.on('close', () => {
         if (this.currentPolicy) {
-          this.policyStatus = 'POLICY_CACHED';
+          this.setPolicyStatus('POLICY_CACHED');
         }
         if (this.wsReconnectTimer) clearTimeout(this.wsReconnectTimer);
         this.wsReconnectTimer = setTimeout(() => this.connectWebSocket(), 5000);
@@ -219,7 +240,7 @@ export class PolicySyncClient {
 
       this.ws.on('error', () => {
         if (this.currentPolicy) {
-          this.policyStatus = 'POLICY_CACHED';
+          this.setPolicyStatus('POLICY_CACHED');
         }
       });
     } catch (e) {
@@ -228,10 +249,13 @@ export class PolicySyncClient {
     }
   }
 
-  public start() {
-    this.fetchLatestPolicy();
+  public async start(timeoutMs: number = 5000): Promise<PolicyStatus> {
+    try {
+      await this.fetchLatestPolicy(timeoutMs);
+    } catch (e) {}
     this.connectWebSocket();
     this.heartbeatTimer = setInterval(() => this.sendHeartbeat(), 30000);
+    return this.policyStatus;
   }
 
   public stop() {
@@ -244,11 +268,13 @@ export class PolicySyncClient {
       this.wsReconnectTimer = null;
     }
     if (this.ws) {
-      this.ws.removeAllListeners();
-      try {
-        this.ws.close();
-      } catch (e) {}
+      const wsInstance = this.ws;
       this.ws = null;
+      wsInstance.removeAllListeners();
+      wsInstance.on('error', () => {});
+      try {
+        wsInstance.terminate();
+      } catch (e) {}
     }
   }
 }

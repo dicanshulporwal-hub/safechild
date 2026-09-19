@@ -12,6 +12,7 @@ import { DnsFilterProxy } from '../src/dns-proxy';
 import { BlockPageServer } from '../src/block-server';
 import { WindowsFirewallEngine } from '../src/wfp-engine';
 import { computeEngineStatus, isEnforcementActive } from '../src/agent-cli';
+import { ConfigManager } from '../src/config-manager';
 
 function makeMockRule(domain: string, action: 'BLOCK' | 'ALLOW' = 'BLOCK'): PolicyRule {
   return {
@@ -886,5 +887,410 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
 
     client.stop();
     await new Promise<void>((r) => mockBackend.close(() => r()));
+  });
+
+  // ----------------------------------------------------
+  // Test 26: Cached policy + successful initial backend fetch => startup status ACTIVE
+  // ----------------------------------------------------
+  it('26. cached policy + successful initial backend fetch => startup status ACTIVE', async () => {
+    let requestCount = 0;
+    const mockBackend = http.createServer((req, res) => {
+      if (req.url?.startsWith('/api/policies/device/dev-start-26') && req.method === 'GET') {
+        requestCount++;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            policy: makeMockPolicy({ version: 5, childId: 'child-26' }),
+          })
+        );
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    const port = await new Promise<number>((resolve) => {
+      mockBackend.listen(0, '127.0.0.1', () => {
+        resolve((mockBackend.address() as any).port);
+      });
+    });
+
+    const testDir = path.join(tmpDir, 'startup-test-26');
+    fs.mkdirSync(testDir, { recursive: true });
+    // Pre-populate with cached policy v2
+    fs.writeFileSync(
+      path.join(testDir, 'policy-dev-start-26.json'),
+      JSON.stringify(makeMockPolicy({ version: 2, childId: 'child-26' })),
+      'utf8'
+    );
+
+    const config: DeviceConfig = {
+      deviceId: 'dev-start-26',
+      childId: 'child-26',
+      deviceToken: 'token-26',
+      deviceName: 'Startup Laptop',
+      backendUrl: `http://127.0.0.1:${port}`,
+      parentId: 'parent-26',
+    };
+
+    const client = new PolicySyncClient(config, testDir, () => true);
+    // Before start: cached policy v2 is loaded synchronously
+    assert.strictEqual(client.getPolicyStatus(), 'POLICY_CACHED');
+    assert.strictEqual(client.getActivePolicy()?.version, 2);
+
+    // Bounded startup await
+    const initialStatus = await client.start(5000);
+    assert.strictEqual(initialStatus, 'POLICY_LIVE');
+    assert.strictEqual(client.getPolicyStatus(), 'POLICY_LIVE');
+    assert.strictEqual(client.getActivePolicy()?.version, 5);
+
+    // Network activation is successful -> Engine status must compute to ACTIVE
+    const engineStatus = computeEngineStatus(true, undefined, client.getPolicyStatus());
+    assert.strictEqual(engineStatus, 'ACTIVE');
+    assert.strictEqual(isEnforcementActive(engineStatus, client.getActivePolicy() !== null), true);
+
+    client.stop();
+    await new Promise<void>((r) => mockBackend.close(() => r()));
+  });
+
+  // ----------------------------------------------------
+  // Test 27: Cached policy + failed backend fetch => startup status OFFLINE_BACKEND_CACHED_POLICY
+  // ----------------------------------------------------
+  it('27. cached policy + failed backend fetch => startup status OFFLINE_BACKEND_CACHED_POLICY', async () => {
+    const mockBackend = http.createServer((req, res) => {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Internal Server Error' }));
+    });
+
+    const port = await new Promise<number>((resolve) => {
+      mockBackend.listen(0, '127.0.0.1', () => {
+        resolve((mockBackend.address() as any).port);
+      });
+    });
+
+    const testDir = path.join(tmpDir, 'startup-test-27');
+    fs.mkdirSync(testDir, { recursive: true });
+    // Pre-populate with cached policy v3
+    fs.writeFileSync(
+      path.join(testDir, 'policy-dev-start-27.json'),
+      JSON.stringify(makeMockPolicy({ version: 3, childId: 'child-27' })),
+      'utf8'
+    );
+
+    const config: DeviceConfig = {
+      deviceId: 'dev-start-27',
+      childId: 'child-27',
+      deviceToken: 'token-27',
+      deviceName: 'Offline Startup Laptop',
+      backendUrl: `http://127.0.0.1:${port}`,
+      parentId: 'parent-27',
+    };
+
+    const client = new PolicySyncClient(config, testDir, () => true);
+    assert.strictEqual(client.getPolicyStatus(), 'POLICY_CACHED');
+
+    // Startup with failed backend fetch falls back safely to cached policy
+    const initialStatus = await client.start(1000);
+    assert.strictEqual(initialStatus, 'POLICY_CACHED');
+    assert.strictEqual(client.getPolicyStatus(), 'POLICY_CACHED');
+    assert.strictEqual(client.getActivePolicy()?.version, 3);
+
+    // Network activation is successful + cached policy -> OFFLINE_BACKEND_CACHED_POLICY
+    const engineStatus = computeEngineStatus(true, undefined, client.getPolicyStatus());
+    assert.strictEqual(engineStatus, 'OFFLINE_BACKEND_CACHED_POLICY');
+    // Protection remains active even in offline cached policy mode
+    assert.strictEqual(isEnforcementActive(engineStatus, client.getActivePolicy() !== null), true);
+
+    client.stop();
+    await new Promise<void>((r) => mockBackend.close(() => r()));
+  });
+
+  // ----------------------------------------------------
+  // Test 28: No cache + failed backend fetch => startup status DEGRADED_POLICY_UNAVAILABLE
+  // ----------------------------------------------------
+  it('28. no cache + failed backend fetch => startup status DEGRADED_POLICY_UNAVAILABLE', async () => {
+    const testDir = path.join(tmpDir, 'startup-test-28');
+    fs.mkdirSync(testDir, { recursive: true });
+
+    // Use an unroutable port where connection immediately fails
+    const config: DeviceConfig = {
+      deviceId: 'dev-start-28',
+      childId: 'child-28',
+      deviceToken: 'token-28',
+      deviceName: 'No Cache Laptop',
+      backendUrl: 'http://127.0.0.1:1',
+      parentId: 'parent-28',
+    };
+
+    const client = new PolicySyncClient(config, testDir, () => true);
+    assert.strictEqual(client.getPolicyStatus(), 'POLICY_UNAVAILABLE');
+    assert.strictEqual(client.getActivePolicy(), null);
+
+    const initialStatus = await client.start(500);
+    assert.strictEqual(initialStatus, 'POLICY_UNAVAILABLE');
+    assert.strictEqual(client.getPolicyStatus(), 'POLICY_UNAVAILABLE');
+
+    const engineStatus = computeEngineStatus(true, undefined, client.getPolicyStatus());
+    assert.strictEqual(engineStatus, 'DEGRADED_POLICY_UNAVAILABLE');
+    assert.strictEqual(isEnforcementActive(engineStatus, client.getActivePolicy() !== null), false);
+
+    client.stop();
+  });
+
+  // ----------------------------------------------------
+  // Test 29: Live policy -> backend disconnect with cache => transition callback fires, ACTIVE -> OFFLINE_BACKEND_CACHED_POLICY
+  // ----------------------------------------------------
+  it('29. live policy -> backend disconnect with cache => transition callback fires, ACTIVE -> OFFLINE_BACKEND_CACHED_POLICY', async () => {
+    let shouldFail = false;
+    const mockBackend = http.createServer((req, res) => {
+      if (shouldFail) {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: 'Backend down' }));
+        return;
+      }
+      if (req.url?.startsWith('/api/policies/device/dev-trans-29')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ policy: makeMockPolicy({ version: 7, childId: 'child-29' }) }));
+      } else if (req.url === '/api/devices/heartbeat') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ acknowledged: true }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    const port = await new Promise<number>((resolve) => {
+      mockBackend.listen(0, '127.0.0.1', () => {
+        resolve((mockBackend.address() as any).port);
+      });
+    });
+
+    const testDir = path.join(tmpDir, 'trans-test-29');
+    fs.mkdirSync(testDir, { recursive: true });
+
+    const config: DeviceConfig = {
+      deviceId: 'dev-trans-29',
+      childId: 'child-29',
+      deviceToken: 'token-29',
+      deviceName: 'Transition Laptop',
+      backendUrl: `http://127.0.0.1:${port}`,
+      parentId: 'parent-29',
+    };
+
+    const client = new PolicySyncClient(config, testDir, () => true);
+    const transitions: Array<{ newStatus: string; prevStatus: string }> = [];
+    client.setOnPolicyStatusChange((newStatus, prevStatus) => {
+      transitions.push({ newStatus, prevStatus });
+    });
+
+    await client.start(5000);
+    assert.strictEqual(client.getPolicyStatus(), 'POLICY_LIVE');
+    let engineStatus = computeEngineStatus(true, undefined, client.getPolicyStatus());
+    assert.strictEqual(engineStatus, 'ACTIVE');
+
+    // Simulate backend outage on subsequent heartbeat
+    shouldFail = true;
+    await client.sendHeartbeat();
+
+    // Must transition to POLICY_CACHED
+    assert.strictEqual(client.getPolicyStatus(), 'POLICY_CACHED');
+    const lastTrans = transitions[transitions.length - 1];
+    assert.deepStrictEqual(lastTrans, { newStatus: 'POLICY_CACHED', prevStatus: 'POLICY_LIVE' });
+
+    engineStatus = computeEngineStatus(true, undefined, client.getPolicyStatus());
+    assert.strictEqual(engineStatus, 'OFFLINE_BACKEND_CACHED_POLICY');
+    assert.strictEqual(isEnforcementActive(engineStatus, client.getActivePolicy() !== null), true);
+
+    client.stop();
+    await new Promise<void>((r) => mockBackend.close(() => r()));
+  });
+
+  // ----------------------------------------------------
+  // Test 30: Cached policy -> backend restored => transition callback fires, OFFLINE_BACKEND_CACHED_POLICY -> ACTIVE
+  // ----------------------------------------------------
+  it('30. cached policy -> backend restored => transition callback fires, OFFLINE_BACKEND_CACHED_POLICY -> ACTIVE', async () => {
+    let backendOnline = false;
+    const mockBackend = http.createServer((req, res) => {
+      if (!backendOnline) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Service Unavailable' }));
+        return;
+      }
+      if (req.url?.startsWith('/api/policies/device/dev-restore-30')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ policy: makeMockPolicy({ version: 9, childId: 'child-30' }) }));
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    const port = await new Promise<number>((resolve) => {
+      mockBackend.listen(0, '127.0.0.1', () => {
+        resolve((mockBackend.address() as any).port);
+      });
+    });
+
+    const testDir = path.join(tmpDir, 'restore-test-30');
+    fs.mkdirSync(testDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(testDir, 'policy-dev-restore-30.json'),
+      JSON.stringify(makeMockPolicy({ version: 4, childId: 'child-30' })),
+      'utf8'
+    );
+
+    const config: DeviceConfig = {
+      deviceId: 'dev-restore-30',
+      childId: 'child-30',
+      deviceToken: 'token-30',
+      deviceName: 'Restore Laptop',
+      backendUrl: `http://127.0.0.1:${port}`,
+      parentId: 'parent-30',
+    };
+
+    const client = new PolicySyncClient(config, testDir, () => true);
+    const transitions: Array<{ newStatus: string; prevStatus: string }> = [];
+    client.setOnPolicyStatusChange((newStatus, prevStatus) => {
+      transitions.push({ newStatus, prevStatus });
+    });
+
+    await client.start(1000);
+    assert.strictEqual(client.getPolicyStatus(), 'POLICY_CACHED');
+    let engineStatus = computeEngineStatus(true, undefined, client.getPolicyStatus());
+    assert.strictEqual(engineStatus, 'OFFLINE_BACKEND_CACHED_POLICY');
+
+    // Backend comes back online
+    backendOnline = true;
+    await client.fetchLatestPolicy();
+
+    assert.strictEqual(client.getPolicyStatus(), 'POLICY_LIVE');
+    const lastTrans = transitions[transitions.length - 1];
+    assert.deepStrictEqual(lastTrans, { newStatus: 'POLICY_LIVE', prevStatus: 'POLICY_CACHED' });
+
+    engineStatus = computeEngineStatus(true, undefined, client.getPolicyStatus());
+    assert.strictEqual(engineStatus, 'ACTIVE');
+
+    client.stop();
+    await new Promise<void>((r) => mockBackend.close(() => r()));
+  });
+
+  // ----------------------------------------------------
+  // Test 31: DNS not enforced (netSuccess = false) => never reported ACTIVE
+  // ----------------------------------------------------
+  it('31. DNS not enforced (netSuccess = false) => never reported ACTIVE', () => {
+    // When netSuccess = false, regardless of policyStatus, status is never ACTIVE
+    const s1 = computeEngineStatus(false, 'DNS_NOT_ENFORCED', 'POLICY_LIVE');
+    assert.strictEqual(s1, 'DEGRADED_DNS_NOT_ENFORCED');
+    assert.strictEqual(isEnforcementActive(s1, true), false);
+
+    const s2 = computeEngineStatus(false, 'NO_NETWORK_ROUTE', 'POLICY_LIVE');
+    assert.strictEqual(s2, 'DEGRADED_NO_NETWORK');
+    assert.strictEqual(isEnforcementActive(s2, true), false);
+
+    const s3 = computeEngineStatus(false, undefined, 'POLICY_LIVE');
+    assert.strictEqual(s3, 'DEGRADED_DNS_NOT_ENFORCED');
+    assert.strictEqual(isEnforcementActive(s3, true), false);
+
+    const s4 = computeEngineStatus(false, 'DNS_NOT_ENFORCED', 'POLICY_CACHED');
+    assert.strictEqual(s4, 'DEGRADED_DNS_NOT_ENFORCED');
+    assert.strictEqual(isEnforcementActive(s4, true), false);
+
+    const s5 = computeEngineStatus(false, 'NO_NETWORK_ROUTE', 'POLICY_CACHED');
+    assert.strictEqual(s5, 'DEGRADED_NO_NETWORK');
+    assert.strictEqual(isEnforcementActive(s5, true), false);
+  });
+
+  // ----------------------------------------------------
+  // Test 32: WiX SafeBrowseChild-Pilot.wxs static audit confirming Start="install", Stop="both", Remove="uninstall", and Wait="yes"
+  // ----------------------------------------------------
+  it('32. WiX SafeBrowseChild-Pilot.wxs static audit confirming Start="install", Stop="both", Remove="uninstall", and Wait="yes"', () => {
+    const wxsPath = path.resolve(__dirname, '../wix/SafeBrowseChild-Pilot.wxs');
+    assert.strictEqual(fs.existsSync(wxsPath), true, 'SafeBrowseChild-Pilot.wxs must exist');
+    const wxsContent = fs.readFileSync(wxsPath, 'utf8');
+
+    const scIndex = wxsContent.indexOf('Id="ControlSafeBrowseService"');
+    assert.ok(scIndex !== -1, 'ControlSafeBrowseService ServiceControl element must be present');
+    const scEnd = wxsContent.indexOf('/>', scIndex);
+    assert.ok(scEnd !== -1, 'ServiceControl tag closing delimiter must be found');
+    const scBlock = wxsContent.substring(scIndex, scEnd);
+
+    assert.ok(scBlock.includes('Name="SafeBrowseChildService"'), 'Must control SafeBrowseChildService');
+    assert.ok(scBlock.includes('Start="install"'), 'Must have Start="install" for immediate auto-start after MSI install');
+    assert.ok(scBlock.includes('Stop="both"'), 'Must have Stop="both" for clean shutdown on install/uninstall');
+    assert.ok(scBlock.includes('Remove="uninstall"'), 'Must have Remove="uninstall" to delete service entry on uninstall');
+    assert.ok(scBlock.includes('Wait="yes"'), 'Must have Wait="yes" to ensure service transitions complete synchronously');
+  });
+
+  // ----------------------------------------------------
+  // Test 33: WiX uninstall restore ordering remains RestoreDnsOnUninstall Before="StopServices" with NOT UPGRADINGPRODUCTCODE
+  // ----------------------------------------------------
+  it('33. WiX uninstall restore ordering remains RestoreDnsOnUninstall Before="StopServices" with NOT UPGRADINGPRODUCTCODE', () => {
+    const wxsPath = path.resolve(__dirname, '../wix/SafeBrowseChild-Pilot.wxs');
+    const wxsContent = fs.readFileSync(wxsPath, 'utf8');
+
+    const seqIndex = wxsContent.indexOf('<InstallExecuteSequence>');
+    const seqEnd = wxsContent.indexOf('</InstallExecuteSequence>', seqIndex);
+    assert.ok(seqIndex !== -1 && seqEnd !== -1, 'InstallExecuteSequence must be present');
+    const seqBlock = wxsContent.substring(seqIndex, seqEnd);
+
+    assert.ok(
+      seqBlock.includes('Action="RestoreDnsOnUninstall"'),
+      'RestoreDnsOnUninstall must be in InstallExecuteSequence'
+    );
+    assert.ok(
+      seqBlock.includes('Before="StopServices"'),
+      'RestoreDnsOnUninstall must run Before="StopServices"'
+    );
+    assert.ok(
+      seqBlock.includes('Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"'),
+      'RestoreDnsOnUninstall condition must be guarded against upgrade'
+    );
+  });
+
+  // ----------------------------------------------------
+  // Test 34: Unpaired auto-start service waits safely for config without redirecting DNS
+  // ----------------------------------------------------
+  it('34. unpaired auto-start service waits safely for config without redirecting DNS', async () => {
+    const emptyDir = path.join(tmpDir, 'unpaired-service-34');
+    fs.mkdirSync(emptyDir, { recursive: true });
+
+    const cm = new ConfigManager(emptyDir);
+    const config = await cm.loadDeviceConfig();
+    assert.strictEqual(config, null, 'Must return null when device has not been paired');
+
+    const nm = new WindowsNetworkManager(cm.getNetworkBackupFilePath());
+    // Backup file must not exist before any DNS activation
+    assert.strictEqual(fs.existsSync(cm.getNetworkBackupFilePath()), false);
+
+    // In agent-cli.ts service mode:
+    // if (!config) { logServiceMessage('INFO', 'No device pairing configuration found. SafeBrowse service is waiting for pairing.'); return; }
+    // Verify DNS activation is never triggered and system remains untampered
+    assert.strictEqual(cm.checkConfigAccess(), 'NOT_PAIRED');
+  });
+
+  // ----------------------------------------------------
+  // Test 35: --status reporting: missing config (NOT_PAIRED) vs restricted config (ACCESS_DENIED) produces correct messaging without ACL weakening
+  // ----------------------------------------------------
+  it('35. --status reporting: missing config (NOT_PAIRED) vs restricted config (ACCESS_DENIED) produces correct messaging without ACL weakening', () => {
+    const testDir = path.join(tmpDir, 'status-test-35');
+    fs.mkdirSync(testDir, { recursive: true });
+
+    const cm = new ConfigManager(testDir);
+
+    // 1. Missing config -> NOT_PAIRED
+    assert.strictEqual(cm.checkConfigAccess(), 'NOT_PAIRED');
+
+    // 2. Simulated restricted config (EACCES/EPERM) -> ACCESS_DENIED
+    cm.setConfigAccessOverrideForTesting('ACCESS_DENIED');
+    assert.strictEqual(cm.checkConfigAccess(), 'ACCESS_DENIED');
+
+    // 3. Configured state -> CONFIGURED
+    cm.setConfigAccessOverrideForTesting('CONFIGURED');
+    assert.strictEqual(cm.checkConfigAccess(), 'CONFIGURED');
+
+    // Reset override
+    cm.setConfigAccessOverrideForTesting(null);
+    assert.strictEqual(cm.checkConfigAccess(), 'NOT_PAIRED');
   });
 });

@@ -37,6 +37,7 @@
           <ServiceControl
               Id="ControlSafeBrowseService"
               Name="SafeBrowseChildService"
+              Start="install"
               Stop="both"
               Remove="uninstall"
               Wait="yes" />

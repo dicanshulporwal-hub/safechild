@@ -23,6 +23,7 @@ export class ConfigManager {
   private customLegacyPath: string | null = null;
   private platformOverride: string | null = null;
   private aclExecutor: ((cmd: string) => void) | null = null;
+  private configAccessOverride: 'CONFIGURED' | 'NOT_PAIRED' | 'ACCESS_DENIED' | null = null;
 
   constructor(customBaseDir?: string, customLegacyPath?: string) {
     if (customBaseDir) {
@@ -490,6 +491,47 @@ export class ConfigManager {
     fs.writeFileSync(tempConfigPath, JSON.stringify(recordToSave, null, 2), 'utf8');
     fs.renameSync(tempConfigPath, configPath);
     console.log(`[ConfigManager] Device configuration persisted securely at: ${configPath}`);
+  }
+
+  public setConfigAccessOverrideForTesting(override: 'CONFIGURED' | 'NOT_PAIRED' | 'ACCESS_DENIED' | null): void {
+    this.configAccessOverride = override;
+  }
+
+  /**
+   * Checks whether configuration storage is accessible by the current process.
+   * Distinguishes:
+   * - 'CONFIGURED': Device configuration file exists and is accessible
+   * - 'NOT_PAIRED': Configuration storage is accessible, but no device configuration file exists
+   * - 'ACCESS_DENIED': Configuration storage or file exists but current caller lacks permissions (e.g. non-elevated user)
+   */
+  public checkConfigAccess(): 'CONFIGURED' | 'NOT_PAIRED' | 'ACCESS_DENIED' {
+    if (this.configAccessOverride) {
+      return this.configAccessOverride;
+    }
+
+    const configPath = this.getConfigFilePath();
+    const baseDir = this.getBaseDir();
+
+    try {
+      fs.accessSync(configPath, fs.constants.R_OK);
+      return 'CONFIGURED';
+    } catch (err: any) {
+      if (err.code === 'EACCES' || err.code === 'EPERM') {
+        return 'ACCESS_DENIED';
+      }
+      if (err.code === 'ENOENT') {
+        // config file is missing; check if baseDir itself is accessible or restricted
+        try {
+          fs.accessSync(baseDir, fs.constants.R_OK);
+        } catch (dirErr: any) {
+          if (dirErr.code === 'EACCES' || dirErr.code === 'EPERM') {
+            return 'ACCESS_DENIED';
+          }
+        }
+        return 'NOT_PAIRED';
+      }
+      return 'NOT_PAIRED';
+    }
   }
 
   public hasDeviceConfig(): boolean {
