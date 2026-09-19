@@ -1810,6 +1810,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
   it('46. offline degradation: no default route (NO_NETWORK_ROUTE) sets engine status DEGRADED_NO_NETWORK', async () => {
     const backupFile = path.join(tmpDir, 'backup-test-46.json');
     const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux'); // CI isolation: mock adapter path regardless of host OS
 
     const adapters: MockAdapterState[] = [
       {
