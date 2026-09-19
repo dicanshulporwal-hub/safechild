@@ -98,12 +98,47 @@ export interface ActivationRetryOptions {
   onAttempt?: (attempt: number, maxAttempts: number) => void;
 }
 
+export interface ReconcileResult {
+  status: 'IN_SYNC' | 'RE_ENFORCED' | 'NO_NETWORK_ROUTE' | 'ERROR';
+  enforcedIndexes: number[];
+  unenforcedIndexes: number[];
+  message: string;
+}
+
+export interface CurrentEnforcementInspection {
+  isProtected: boolean;
+  activeAdapters: Array<{
+    interfaceIndex: number;
+    interfaceAlias: string;
+    gateway?: string;
+    dnsServers: string[];
+    isEnforced: boolean;
+  }>;
+  summary: string;
+}
+
+export interface MockAdapterState {
+  InterfaceIndex: number;
+  InterfaceAlias: string;
+  Description?: string;
+  Gateway?: string;
+  IpAddresses?: string[];
+  ServerAddresses: string[];
+  DhcpEnabled: boolean;
+  Status?: string;
+}
+
 export type NetworkCommandExecutor = (script: string) => Promise<{ stdout: string; stderr: string }>;
 
 export class WindowsNetworkManager {
   private backupFile: string;
   private platformOverride: string | null = null;
   private commandExecutor: NetworkCommandExecutor | null = null;
+  private isReconciling = false;
+  private isShuttingDown = false;
+  private isRestoring = false;
+  private reconcileTimer: NodeJS.Timeout | null = null;
+  private mockAdapters: MockAdapterState[] | null = null;
 
   constructor(customBackupFile?: string) {
     this.backupFile = customBackupFile || configManager.getNetworkBackupFilePath();
@@ -115,6 +150,26 @@ export class WindowsNetworkManager {
 
   public setCommandExecutorForTesting(executor: NetworkCommandExecutor | null): void {
     this.commandExecutor = executor;
+  }
+
+  public setMockAdaptersForTesting(adapters: MockAdapterState[] | null): void {
+    this.mockAdapters = adapters;
+  }
+
+  public setShuttingDown(shuttingDown: boolean): void {
+    this.isShuttingDown = shuttingDown;
+    if (shuttingDown && this.reconcileTimer) {
+      clearInterval(this.reconcileTimer);
+      this.reconcileTimer = null;
+    }
+  }
+
+  public isShuttingDownState(): boolean {
+    return this.isShuttingDown;
+  }
+
+  public isReconcilingState(): boolean {
+    return this.isReconciling;
   }
 
   public getPlatform(): string {
@@ -153,8 +208,67 @@ export class WindowsNetworkManager {
    * FALLBACK: Get-NetIPConfiguration if primary route discovery returns no eligible adapter.
    * Distinguishes ELIGIBLE_ADAPTER_FOUND, NO_NETWORK_ROUTE, and DISCOVERY_COMMAND_FAILED.
    */
-  public async discoverTargetAdapters(): Promise<AdapterDiscoveryResult> {
+  public async discoverTargetAdapters(suppressLogs: boolean = false): Promise<AdapterDiscoveryResult> {
     if (this.getPlatform() !== 'win32') {
+      if (this.mockAdapters !== null) {
+        const evaluations: CandidateEvaluation[] = [];
+        const eligibleAdapters: TargetAdapterInfo[] = [];
+
+        for (const ma of this.mockAdapters) {
+          const idx = ma.InterfaceIndex;
+          const nextHop = ma.Gateway || '';
+          const status = ma.Status || 'Up';
+          const ips = ma.IpAddresses || [];
+          let rejectionReason: string | undefined;
+
+          if (!nextHop || nextHop === '0.0.0.0' || nextHop === '::') {
+            rejectionReason = 'Invalid or zero NextHop';
+          } else if (status !== 'Up') {
+            rejectionReason = `Adapter status is '${status}', expected 'Up'`;
+          } else if (
+            ma.InterfaceAlias?.toLowerCase().includes('tailscale') ||
+            (nextHop.startsWith('100.') && ma.InterfaceAlias?.toLowerCase().includes('tailscale'))
+          ) {
+            rejectionReason = 'Tailscale CGNAT or virtual interface excluded';
+          } else {
+            const usable = ips.filter((ip) => !ip.startsWith('169.254.') && !ip.startsWith('127.'));
+            if (usable.length === 0) {
+              rejectionReason = ips.length > 0 ? 'Adapter has only APIPA or loopback IPv4 addresses' : 'No IPv4 address assigned to adapter';
+            }
+          }
+
+          const eligible = !rejectionReason;
+          evaluations.push({
+            interfaceIndex: idx,
+            interfaceAlias: ma.InterfaceAlias,
+            nextHop,
+            status,
+            ipAddresses: ips,
+            eligible,
+            rejectionReason,
+          });
+
+          if (eligible) {
+            eligibleAdapters.push({
+              InterfaceIndex: idx,
+              InterfaceAlias: ma.InterfaceAlias,
+              Description: ma.Description || ma.InterfaceAlias,
+              Gateway: nextHop,
+              IpAddresses: ips,
+            });
+          }
+        }
+
+        const reason = eligibleAdapters.length > 0 ? 'ELIGIBLE_ADAPTER_FOUND' : 'NO_NETWORK_ROUTE';
+        return {
+          method: 'mock',
+          reason,
+          adapters: eligibleAdapters,
+          defaultRouteCount: eligibleAdapters.length,
+          evaluations,
+        };
+      }
+
       // Simulation for non-Windows test environments
       const mockCandidate: CandidateEvaluation = {
         interfaceIndex: 6,
@@ -180,7 +294,9 @@ export class WindowsNetworkManager {
       };
     }
 
-    logServiceMessage('INFO', '[NetworkManager] Starting route-based network adapter discovery...');
+    if (!suppressLogs) {
+      logServiceMessage('INFO', '[NetworkManager] Starting route-based network adapter discovery...');
+    }
 
     // 1. PRIMARY DISCOVERY: Route Table (IPv4 0.0.0.0/0)
     let routeScriptError: string | null = null;
@@ -330,37 +446,42 @@ export class WindowsNetworkManager {
         primaryEvaluations = evaluations;
         primaryRouteCount = defaultRouteCount;
 
-        logServiceMessage('INFO', '[NetworkManager] Discovery method: route-table');
-        logServiceMessage(
-          'INFO',
-          `[NetworkManager] Route discovery found ${defaultRouteCount} default IPv4 route(s).`
-        );
+        if (!suppressLogs) {
+          logServiceMessage('INFO', '[NetworkManager] Discovery method: route-table');
+          logServiceMessage(
+            'INFO',
+            `[NetworkManager] Route discovery found ${defaultRouteCount} default IPv4 route(s).`
+          );
 
-        for (const ev of evaluations) {
-          if (ev.eligible) {
+          for (const ev of evaluations) {
+            if (ev.eligible) {
+              logServiceMessage(
+                'INFO',
+                `[NetworkManager] Candidate: InterfaceIndex ${ev.interfaceIndex} (${ev.interfaceAlias}), NextHop: ${ev.nextHop || 'N/A'}, Status: ${ev.status || 'Up'}, IP: ${ev.ipAddresses?.join(', ') || 'none'} - Eligible`
+              );
+            } else {
+              logServiceMessage(
+                'INFO',
+                `[NetworkManager] Candidate: InterfaceIndex ${ev.interfaceIndex} (${ev.interfaceAlias}), NextHop: ${ev.nextHop || 'none'}, Status: ${ev.status || 'unknown'} - Excluded: ${ev.rejectionReason}`
+              );
+            }
+          }
+
+          if (eligibleAdapters.length > 0) {
+            for (const a of eligibleAdapters) {
+              logServiceMessage(
+                'INFO',
+                `[NetworkManager] [OK] Selected adapter: ${a.InterfaceAlias} (Index ${a.InterfaceIndex}), Gateway: ${a.Gateway || 'N/A'}`
+              );
+            }
             logServiceMessage(
               'INFO',
-              `[NetworkManager] Candidate: InterfaceIndex ${ev.interfaceIndex} (${ev.interfaceAlias}), NextHop: ${ev.nextHop || 'N/A'}, Status: ${ev.status || 'Up'}, IP: ${ev.ipAddresses?.join(', ') || 'none'} - Eligible`
-            );
-          } else {
-            logServiceMessage(
-              'INFO',
-              `[NetworkManager] Candidate: InterfaceIndex ${ev.interfaceIndex} (${ev.interfaceAlias}), NextHop: ${ev.nextHop || 'none'}, Status: ${ev.status || 'unknown'} - Excluded: ${ev.rejectionReason}`
+              `[NetworkManager] Discovery result: ELIGIBLE_ADAPTER_FOUND (${eligibleAdapters.length} adapter(s) selected)`
             );
           }
         }
 
         if (eligibleAdapters.length > 0) {
-          for (const a of eligibleAdapters) {
-            logServiceMessage(
-              'INFO',
-              `[NetworkManager] [OK] Selected adapter: ${a.InterfaceAlias} (Index ${a.InterfaceIndex}), Gateway: ${a.Gateway || 'N/A'}`
-            );
-          }
-          logServiceMessage(
-            'INFO',
-            `[NetworkManager] Discovery result: ELIGIBLE_ADAPTER_FOUND (${eligibleAdapters.length} adapter(s) selected)`
-          );
           return {
             method: 'route-table',
             reason: 'ELIGIBLE_ADAPTER_FOUND',
@@ -522,6 +643,54 @@ export class WindowsNetworkManager {
   }
 
   /**
+   * Safely persists or refreshes an adapter's backup record in ProgramData.
+   * STRICT INVARIANTS:
+   * 1. NEVER writes 127.0.0.1 or ::1 to ServerAddresses.
+   * 2. If the adapter is DHCP, ensures DhcpEnabled = true.
+   * 3. Preserves legitimate static DNS configurations without guessing.
+   */
+  public persistOrRefreshAdapterBackup(backupRecord: AdapterDnsBackup): AdapterDnsBackup[] {
+    configManager.ensureDirectories();
+    let existingList: AdapterDnsBackup[] = [];
+    if (fs.existsSync(this.backupFile)) {
+      try {
+        const raw = fs.readFileSync(this.backupFile, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) existingList = parsed;
+      } catch {}
+    }
+
+    const cleanAddrs = (backupRecord.ServerAddresses || []).filter(
+      (ip) => ip && !ip.includes('127.0.0.1') && !ip.includes('::1')
+    );
+
+    const existingIndex = existingList.findIndex((b) => b.InterfaceIndex === backupRecord.InterfaceIndex);
+    if (existingIndex === -1) {
+      existingList.push({
+        InterfaceIndex: backupRecord.InterfaceIndex,
+        InterfaceAlias: backupRecord.InterfaceAlias || `Interface ${backupRecord.InterfaceIndex}`,
+        ServerAddresses: cleanAddrs,
+        DhcpEnabled: backupRecord.DhcpEnabled !== false,
+      });
+    } else {
+      const existing = existingList[existingIndex];
+      // Do not overwrite with loopback
+      if (cleanAddrs.length > 0) {
+        existing.ServerAddresses = cleanAddrs;
+      }
+      if (backupRecord.InterfaceAlias) {
+        existing.InterfaceAlias = backupRecord.InterfaceAlias;
+      }
+      if (typeof backupRecord.DhcpEnabled === 'boolean') {
+        existing.DhcpEnabled = backupRecord.DhcpEnabled;
+      }
+    }
+
+    fs.writeFileSync(this.backupFile, JSON.stringify(existingList, null, 2), 'utf8');
+    return existingList;
+  }
+
+  /**
    * Backs up target adapter DNS configuration into ProgramData before modification.
    * Merges newly discovered adapters into existing backup while preserving valid historical records.
    * Never records 127.0.0.1 or ::1 as original DNS.
@@ -553,12 +722,27 @@ export class WindowsNetworkManager {
           : [{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', IpAddresses: ['192.168.1.8'], Gateway: '192.168.1.1' }];
 
       for (const t of targets) {
+        let defaultAddrs = t.Gateway ? [t.Gateway] : ['192.168.1.1'];
+        let defaultDhcp = false;
+        if (this.mockAdapters) {
+          const ma = this.mockAdapters.find((a) => a.InterfaceIndex === t.InterfaceIndex);
+          if (ma) {
+            defaultAddrs = (ma.ServerAddresses || []).filter(
+              (ip) => !ip.includes('127.0.0.1') && !ip.includes('::1')
+            );
+            if (defaultAddrs.length === 0 && ma.Gateway) {
+              defaultAddrs = [ma.Gateway];
+            }
+            defaultDhcp = ma.DhcpEnabled !== false;
+          }
+        }
+
         if (!existingMap.has(t.InterfaceIndex)) {
           existingMap.set(t.InterfaceIndex, {
             InterfaceIndex: t.InterfaceIndex,
             InterfaceAlias: t.InterfaceAlias,
-            ServerAddresses: t.Gateway ? [t.Gateway] : ['192.168.1.1'],
-            DhcpEnabled: false,
+            ServerAddresses: defaultAddrs,
+            DhcpEnabled: defaultDhcp,
           });
         }
       }
@@ -814,6 +998,15 @@ export class WindowsNetworkManager {
    * Performs read-back verification and atomic rollback if any step fails.
    */
   public async activateFailSafeDns(dnsPort: number = 53, attempt: number = 1): Promise<FailSafeDnsResult> {
+    if (this.isShuttingDown || this.isRestoring) {
+      return {
+        success: false,
+        message: 'Activation aborted: service shutdown/restoration in progress.',
+        interfaceIndexes: [],
+        reason: 'NO_NETWORK_ROUTE',
+      };
+    }
+
     logServiceMessage('INFO', `[NetworkManager] Initiating fail-safe network activation (attempt ${attempt})...`);
 
     // 1. Identify target internet-facing adapters having an IPv4 default gateway
@@ -1067,18 +1260,480 @@ export class WindowsNetworkManager {
   }
 
   /**
+   * Reconciles current network adapter DNS enforcement against the active routing topology.
+   * Discovers eligible default-route adapters, safely refreshes original DNS metadata upon roaming,
+   * re-enforces 127.0.0.1 on any adapter whose DNS has changed away, and ensures firewall rules exist.
+   * Single-flight, non-overlapping, and cancellation-aware.
+   */
+  public async reconcileAdapters(dnsPort: number = 53): Promise<ReconcileResult> {
+    if (this.isShuttingDown || this.isRestoring) {
+      return {
+        status: 'NO_NETWORK_ROUTE',
+        enforcedIndexes: [],
+        unenforcedIndexes: [],
+        message: 'Reconciliation aborted: service shutdown/restoration in progress',
+      };
+    }
+
+    if (this.isReconciling) {
+      return {
+        status: 'IN_SYNC',
+        enforcedIndexes: [],
+        unenforcedIndexes: [],
+        message: 'Reconciliation tick skipped: previous cycle still active',
+      };
+    }
+
+    this.isReconciling = true;
+    try {
+      if (this.isShuttingDown || this.isRestoring) {
+        return {
+          status: 'NO_NETWORK_ROUTE',
+          enforcedIndexes: [],
+          unenforcedIndexes: [],
+          message: 'Service is stopping/restoring',
+        };
+      }
+
+      // 1. Discover current eligible internet-facing adapters (suppress routine logs on periodic ticks)
+      const discovery = await this.discoverTargetAdapters(true);
+      const targetAdapters = discovery.adapters;
+
+      if (targetAdapters.length === 0) {
+        return {
+          status: 'NO_NETWORK_ROUTE',
+          enforcedIndexes: [],
+          unenforcedIndexes: [],
+          message:
+            discovery.reason === 'DISCOVERY_COMMAND_FAILED'
+              ? `Adapter discovery failed: ${discovery.errorMessage || 'command error'}`
+              : 'No active IPv4 internet-facing adapters with default gateway found.',
+        };
+      }
+
+      // 2. Query current DNS configuration on all target adapters
+      interface AdapterDnsState {
+        InterfaceIndex: number;
+        InterfaceAlias: string;
+        ServerAddresses: string[];
+        CleanNonLoopback: string[];
+        IsEnforced: boolean;
+        DhcpEnabled: boolean;
+      }
+
+      const states: AdapterDnsState[] = [];
+
+      if (this.getPlatform() !== 'win32') {
+        // Non-Windows simulation
+        for (const target of targetAdapters) {
+          const ma = this.mockAdapters
+            ? this.mockAdapters.find((a) => a.InterfaceIndex === target.InterfaceIndex)
+            : null;
+          const addrs = ma ? ma.ServerAddresses : ['127.0.0.1'];
+          const isEnforced = addrs.includes('127.0.0.1');
+          const cleanNonLoopback = addrs.filter((ip) => !ip.includes('127.0.0.1') && !ip.includes('::1'));
+          const isDhcp = ma ? ma.DhcpEnabled !== false : true;
+
+          states.push({
+            InterfaceIndex: target.InterfaceIndex,
+            InterfaceAlias: target.InterfaceAlias,
+            ServerAddresses: addrs,
+            CleanNonLoopback: cleanNonLoopback,
+            IsEnforced: isEnforced,
+            DhcpEnabled: isDhcp,
+          });
+        }
+      } else {
+        const indexes = targetAdapters.map((a) => a.InterfaceIndex);
+        const script = [
+          '$ErrorActionPreference = \'Stop\'',
+          `$indexes = @(${indexes.join(',')})`,
+          '$dnsConfigs = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $indexes -contains $_.InterfaceIndex })',
+          '$result = foreach ($d in $dnsConfigs) {',
+          '    $idx = [int]$d.InterfaceIndex',
+          '    $addrs = if ($d.ServerAddresses) { @($d.ServerAddresses) } else { @() }',
+          '    $has127 = $addrs -contains \'127.0.0.1\'',
+          '    $cleanAddrs = @($addrs | Where-Object { $_ -and $_ -notmatch \'^127\\.\' -and $_ -ne \'::1\' })',
+          '    $isDhcp = $true',
+          '    try {',
+          '        $adapter = @(Get-NetAdapter -InterfaceIndex $idx -ErrorAction SilentlyContinue)[0]',
+          '        if ($adapter -and $adapter.InterfaceGuid) {',
+          '            $regKey = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\$($adapter.InterfaceGuid)"',
+          '            if (Test-Path $regKey) {',
+          '                $props = Get-ItemProperty -Path $regKey -ErrorAction SilentlyContinue',
+          '                $ns = if ($props.NameServer) { [string]$props.NameServer } else { \'\' }',
+          '                if (-not [string]::IsNullOrWhiteSpace($ns) -and $ns -notmatch \'127\\.0\\.0\\.1\') {',
+          '                    $isDhcp = $false',
+          '                }',
+          '            }',
+          '        }',
+          '    } catch {}',
+          '    [PSCustomObject]@{',
+          '        InterfaceIndex = $idx',
+          '        InterfaceAlias = [string]$d.InterfaceAlias',
+          '        ServerAddresses = $addrs',
+          '        CleanNonLoopback = $cleanAddrs',
+          '        IsEnforced = $has127',
+          '        DhcpEnabled = $isDhcp',
+          '    }',
+          '}',
+          'if ($result.Count -gt 0) {',
+          '    $result | ConvertTo-Json -Compress',
+          '} else {',
+          '    \'[]\'',
+          '}',
+        ].join('\n');
+
+        const { stdout } = await this.executePowerShell(script);
+        const trimmed = stdout.trim();
+        if (trimmed && trimmed !== '[]' && trimmed !== 'null') {
+          const parsed = JSON.parse(trimmed);
+          const rawList = Array.isArray(parsed) ? parsed : [parsed];
+          for (const item of rawList) {
+            const addrs: string[] = Array.isArray(item.ServerAddresses)
+              ? item.ServerAddresses
+              : item.ServerAddresses
+              ? [item.ServerAddresses]
+              : [];
+            const clean: string[] = Array.isArray(item.CleanNonLoopback)
+              ? item.CleanNonLoopback
+              : item.CleanNonLoopback
+              ? [item.CleanNonLoopback]
+              : [];
+            states.push({
+              InterfaceIndex: Number(item.InterfaceIndex),
+              InterfaceAlias: String(item.InterfaceAlias || `Interface ${item.InterfaceIndex}`),
+              ServerAddresses: addrs,
+              CleanNonLoopback: clean,
+              IsEnforced: Boolean(item.IsEnforced),
+              DhcpEnabled: Boolean(item.DhcpEnabled),
+            });
+          }
+        }
+      }
+
+      // Partition into enforced and unenforced
+      const enforced = states.filter((s) => s.IsEnforced);
+      const unenforced = states.filter((s) => !s.IsEnforced);
+
+      for (const target of targetAdapters) {
+        if (!states.some((s) => s.InterfaceIndex === target.InterfaceIndex)) {
+          unenforced.push({
+            InterfaceIndex: target.InterfaceIndex,
+            InterfaceAlias: target.InterfaceAlias,
+            ServerAddresses: [],
+            CleanNonLoopback: target.Gateway ? [target.Gateway] : [],
+            IsEnforced: false,
+            DhcpEnabled: true,
+          });
+        }
+      }
+
+      // If all active eligible adapters already have 127.0.0.1 enforced:
+      if (unenforced.length === 0) {
+        return {
+          status: 'IN_SYNC',
+          enforcedIndexes: enforced.map((e) => e.InterfaceIndex),
+          unenforcedIndexes: [],
+          message: `All ${enforced.length} active adapter(s) currently enforced with 127.0.0.1.`,
+        };
+      }
+
+      if (this.isShuttingDown || this.isRestoring) {
+        return {
+          status: 'NO_NETWORK_ROUTE',
+          enforcedIndexes: [],
+          unenforcedIndexes: unenforced.map((u) => u.InterfaceIndex),
+          message: 'Shutdown initiated before re-enforcement',
+        };
+      }
+
+      logServiceMessage(
+        'INFO',
+        `[NetworkManager] Network change detected: ${unenforced.length} active adapter(s) require DNS enforcement: [${unenforced
+          .map((u) => `${u.InterfaceAlias} (${u.InterfaceIndex})`)
+          .join(', ')}]`
+      );
+
+      // 3. Step A: Safely refresh/persist backup with genuine non-loopback DNS before applying 127.0.0.1
+      for (const u of unenforced) {
+        this.persistOrRefreshAdapterBackup({
+          InterfaceIndex: u.InterfaceIndex,
+          InterfaceAlias: u.InterfaceAlias,
+          ServerAddresses: u.CleanNonLoopback,
+          DhcpEnabled: u.DhcpEnabled,
+        });
+      }
+
+      // 4. Step B: Verify local DNS proxy is responding before re-enforcing
+      const proxyResponding = await this.verifyDnsProxyResponding(dnsPort);
+      if (!proxyResponding) {
+        logServiceMessage(
+          'ERROR',
+          `[NetworkManager] [ERROR] Cannot re-enforce DNS during roaming: DNS proxy on 127.0.0.1:${dnsPort} failed health probe.`
+        );
+        return {
+          status: 'ERROR',
+          enforcedIndexes: enforced.map((e) => e.InterfaceIndex),
+          unenforcedIndexes: unenforced.map((u) => u.InterfaceIndex),
+          message: 'Local DNS proxy health check failed during reconciliation',
+        };
+      }
+
+      if (this.isShuttingDown || this.isRestoring) {
+        return {
+          status: 'NO_NETWORK_ROUTE',
+          enforcedIndexes: [],
+          unenforcedIndexes: unenforced.map((u) => u.InterfaceIndex),
+          message: 'Shutdown initiated before DNS assignment',
+        };
+      }
+
+      // 5. Step C: Apply 127.0.0.1 to unenforced adapters
+      if (this.getPlatform() === 'win32') {
+        for (const u of unenforced) {
+          logServiceMessage(
+            'INFO',
+            `[NetworkManager] Re-assigning 127.0.0.1 DNS to adapter ${u.InterfaceAlias} (Index ${u.InterfaceIndex})...`
+          );
+          const setScript = [
+            '$ErrorActionPreference = \'Stop\'',
+            `Set-DnsClientServerAddress -InterfaceIndex ${u.InterfaceIndex} -ServerAddresses ('127.0.0.1') -ErrorAction Stop`,
+          ].join('\n');
+          await this.executePowerShell(setScript);
+
+          // Read-back verify
+          const readBackScript = [
+            '$ErrorActionPreference = \'Stop\'',
+            `$addr = Get-DnsClientServerAddress -InterfaceIndex ${u.InterfaceIndex} -AddressFamily IPv4 -ErrorAction Stop`,
+            '$addr | Select-Object InterfaceIndex, ServerAddresses | ConvertTo-Json -Compress',
+          ].join('\n');
+          const { stdout } = await this.executePowerShell(readBackScript);
+          const trimmed = stdout.trim();
+          if (trimmed) {
+            const parsed = JSON.parse(trimmed);
+            const rawAddrs = parsed.ServerAddresses;
+            const servers: string[] = Array.isArray(rawAddrs) ? rawAddrs : rawAddrs ? [rawAddrs] : [];
+            if (!servers.includes('127.0.0.1')) {
+              throw new Error(
+                `Reconciliation read-back failed for adapter ${u.InterfaceIndex}: expected [127.0.0.1], got [${servers.join(', ')}]`
+              );
+            }
+          }
+        }
+
+        // Flush DNS client cache
+        const flushScript = '$ErrorActionPreference = \'SilentlyContinue\'; Clear-DnsClientCache';
+        await this.executePowerShell(flushScript);
+      } else {
+        // Non-Windows simulation: update mock adapter state
+        if (this.mockAdapters) {
+          for (const u of unenforced) {
+            const ma = this.mockAdapters.find((a) => a.InterfaceIndex === u.InterfaceIndex);
+            if (ma) {
+              ma.ServerAddresses = ['127.0.0.1'];
+            }
+          }
+        }
+      }
+
+      // 6. Ensure firewall rules are intact (idempotent: avoid expensive netsh recreation if already running)
+      if (!firewallEngine.getStatus().isRunning) {
+        await firewallEngine.initialize();
+      }
+
+      const allEnforcedIndexes = targetAdapters.map((a) => a.InterfaceIndex);
+      logServiceMessage(
+        'INFO',
+        `[NetworkManager] [OK] Reconciled and enforced ${unenforced.length} adapter(s) [${unenforced
+          .map((u) => u.InterfaceIndex)
+          .join(', ')}] with 127.0.0.1.`
+      );
+
+      return {
+        status: 'RE_ENFORCED',
+        enforcedIndexes: allEnforcedIndexes,
+        unenforcedIndexes: [],
+        message: 'Successfully re-enforced DNS on active network change',
+      };
+    } finally {
+      this.isReconciling = false;
+    }
+  }
+
+  /**
+   * Starts periodic reconciliation loop to detect network roaming, adapter arrival, or DNS tampering.
+   */
+  public startReconciliationLoop(
+    dnsPort: number = 53,
+    intervalMs: number = 3000,
+    onStateChange?: (success: boolean, reason?: string) => void
+  ): void {
+    if (this.reconcileTimer) {
+      clearInterval(this.reconcileTimer);
+      this.reconcileTimer = null;
+    }
+
+    this.reconcileTimer = setInterval(async () => {
+      if (this.isShuttingDown || this.isRestoring) return;
+      try {
+        const result = await this.reconcileAdapters(dnsPort);
+        if (this.isShuttingDown || this.isRestoring) return;
+
+        if (result.status === 'IN_SYNC' || result.status === 'RE_ENFORCED') {
+          if (onStateChange) onStateChange(true, undefined);
+        } else if (result.status === 'NO_NETWORK_ROUTE') {
+          if (onStateChange) onStateChange(false, 'NO_NETWORK_ROUTE');
+        } else {
+          if (onStateChange) onStateChange(false, 'DNS_NOT_ENFORCED');
+        }
+      } catch (err: any) {
+        if (!this.isShuttingDown && !this.isRestoring) {
+          logServiceMessage('WARN', `[NetworkManager] Reconciliation loop error: ${err.message}`);
+        }
+      }
+    }, intervalMs);
+
+    if (this.reconcileTimer && typeof (this.reconcileTimer as any).unref === 'function') {
+      (this.reconcileTimer as any).unref();
+    }
+  }
+
+  /**
+   * Stops the active reconciliation loop cleanly.
+   */
+  public stopReconciliationLoop(): void {
+    if (this.reconcileTimer) {
+      clearInterval(this.reconcileTimer);
+      this.reconcileTimer = null;
+    }
+  }
+
+  /**
+   * Returns current reconciliation timer for testing.
+   */
+  public getReconcileTimerForTesting(): NodeJS.Timeout | null {
+    return this.reconcileTimer;
+  }
+
+  /**
+   * Inspects current network enforcement status against active default-route adapters.
+   * Accurately distinguishes between genuinely protected systems vs systems with disconnected
+   * adapters or un-enforced active default routes.
+   */
+  public async inspectCurrentEnforcement(): Promise<CurrentEnforcementInspection> {
+    const discovery = await this.discoverTargetAdapters(true);
+    const targetAdapters = discovery.adapters;
+
+    if (targetAdapters.length === 0) {
+      return {
+        isProtected: false,
+        activeAdapters: [],
+        summary: 'No active internet-facing network adapter found',
+      };
+    }
+
+    const activeAdapters: Array<{
+      interfaceIndex: number;
+      interfaceAlias: string;
+      gateway?: string;
+      dnsServers: string[];
+      isEnforced: boolean;
+    }> = [];
+
+    if (this.getPlatform() !== 'win32') {
+      for (const t of targetAdapters) {
+        const ma = this.mockAdapters
+          ? this.mockAdapters.find((a) => a.InterfaceIndex === t.InterfaceIndex)
+          : null;
+        const addrs = ma ? ma.ServerAddresses : ['127.0.0.1'];
+        const isEnforced = addrs.includes('127.0.0.1');
+        activeAdapters.push({
+          interfaceIndex: t.InterfaceIndex,
+          interfaceAlias: t.InterfaceAlias,
+          gateway: t.Gateway,
+          dnsServers: addrs,
+          isEnforced,
+        });
+      }
+    } else {
+      const indexes = targetAdapters.map((a) => a.InterfaceIndex);
+      const script = [
+        '$ErrorActionPreference = \'SilentlyContinue\'',
+        `$indexes = @(${indexes.join(',')})`,
+        '$dnsConfigs = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $indexes -contains $_.InterfaceIndex })',
+        '$result = foreach ($d in $dnsConfigs) {',
+        '    [PSCustomObject]@{',
+        '        InterfaceIndex = [int]$d.InterfaceIndex',
+        '        InterfaceAlias = [string]$d.InterfaceAlias',
+        '        ServerAddresses = if ($d.ServerAddresses) { @($d.ServerAddresses) } else { @() }',
+        '    }',
+        '}',
+        'if ($result.Count -gt 0) { $result | ConvertTo-Json -Compress } else { \'[]\' }',
+      ].join('\n');
+
+      const { stdout } = await this.executePowerShell(script);
+      const trimmed = stdout.trim();
+      const dnsMap = new Map<number, { alias: string; servers: string[] }>();
+      if (trimmed && trimmed !== '[]' && trimmed !== 'null') {
+        const parsed = JSON.parse(trimmed);
+        const rawList = Array.isArray(parsed) ? parsed : [parsed];
+        for (const item of rawList) {
+          const addrs = Array.isArray(item.ServerAddresses)
+            ? item.ServerAddresses
+            : item.ServerAddresses
+            ? [item.ServerAddresses]
+            : [];
+          dnsMap.set(Number(item.InterfaceIndex), {
+            alias: String(item.InterfaceAlias || `Interface ${item.InterfaceIndex}`),
+            servers: addrs,
+          });
+        }
+      }
+
+      for (const t of targetAdapters) {
+        const d = dnsMap.get(t.InterfaceIndex);
+        const servers = d ? d.servers : [];
+        const isEnforced = servers.includes('127.0.0.1');
+        activeAdapters.push({
+          interfaceIndex: t.InterfaceIndex,
+          interfaceAlias: t.InterfaceAlias,
+          gateway: t.Gateway,
+          dnsServers: servers,
+          isEnforced,
+        });
+      }
+    }
+
+    const isProtected = activeAdapters.length > 0 && activeAdapters.every((a) => a.isEnforced);
+    const summary = isProtected
+      ? 'Protected'
+      : activeAdapters.length === 0
+      ? 'No active network'
+      : 'DNS not redirected';
+
+    return {
+      isProtected,
+      activeAdapters,
+      summary,
+    };
+  }
+
+  /**
    * Cleanly restores original adapter DNS configuration from backup.
    * Restores static IP addresses or resets to DHCP based on original state.
    * Throws on failure to ensure uninstallers and CLI tools detect restoration errors.
    */
   public async restoreOriginalDns(): Promise<void> {
     logServiceMessage('INFO', '[NetworkManager] Restoring network adapters to original DNS settings...');
+    this.isRestoring = true;
+    this.stopReconciliationLoop();
 
     if (this.getPlatform() !== 'win32') {
       logServiceMessage('INFO', '[NetworkManager] Non-Windows platform: simulation complete.');
+      this.isRestoring = false;
       return;
     }
-
     // 1. Remove SafeBrowse firewall rules
     try {
       await firewallEngine.teardown();
@@ -1180,6 +1835,8 @@ export class WindowsNetworkManager {
     } catch (e: any) {
       logServiceMessage('ERROR', `[NetworkManager] Error during DNS restoration: ${e.message}`);
       throw e;
+    } finally {
+      this.isRestoring = false;
     }
   }
 }

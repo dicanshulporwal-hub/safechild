@@ -190,6 +190,8 @@ async function runServiceMode(): Promise<void> {
   const gracefulShutdown = async (signal: string) => {
     if (isShuttingDown) return;
     isShuttingDown = true;
+    networkManager.setShuttingDown(true);
+    networkManager.stopReconciliationLoop();
     currentEngineStatus = 'STOPPING';
     logServiceMessage('INFO', `\n[SafeBrowse Service] Received ${signal}. Initiating graceful service shutdown...`);
 
@@ -316,7 +318,20 @@ async function runServiceMode(): Promise<void> {
   }
   logServiceMessage('INFO', '--------------------------------------------------');
 
-  // 6. Network-Arrival Retry Loop (bounded backoff: 5s, 10s, 15s, 30s, 30s)
+  // 6. Start Persistent Network Reconciliation Loop (every 3000ms)
+  networkManager.startReconciliationLoop(activeDnsPort, 3000, (success, reason) => {
+    if (lastNetSuccess !== success || lastNetReason !== reason) {
+      lastNetSuccess = success;
+      lastNetReason = reason;
+      recomputeAndApplyEngineStatus(
+        success
+          ? 'Network reconciliation: active enforcement verified'
+          : `Network reconciliation: ${reason || 'degraded'}`
+      );
+    }
+  });
+
+  // Network-Arrival Retry Loop (bounded backoff: 5s, 10s, 15s, 30s, 30s for initial route arrival)
   if (!netActivation.success && netActivation.reason === 'NO_NETWORK_ROUTE') {
     const retryDelays = [5000, 10000, 15000, 30000, 30000];
     networkManager
@@ -400,22 +415,31 @@ async function showStatus(): Promise<void> {
   console.log(`\n[Network Protection State]`);
   console.log(`  DNS Backup:    ${backupStatus}`);
 
-  if (process.platform === 'win32') {
-    try {
-      const { stdout } = await execAsync(
-        'powershell -NoProfile -Command "Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object { $_.ServerAddresses -contains \'127.0.0.1\' } | Select-Object -ExpandProperty InterfaceAlias"'
-      );
-      const redirected = stdout.trim();
-      if (redirected) {
-        console.log(`  DNS Redirect:  ENFORCED (127.0.0.1 on: ${redirected})`);
-        console.log(`  Parent Status: Protected`);
+  try {
+    const inspection = await networkManager.inspectCurrentEnforcement();
+    if (inspection.isProtected) {
+      const enforcedAliases = inspection.activeAdapters.map((a) => a.interfaceAlias).join(', ');
+      console.log(`  DNS Redirect:  ENFORCED (127.0.0.1 on: ${enforcedAliases})`);
+      console.log(`  Parent Status: Protected`);
+    } else {
+      if (inspection.activeAdapters.length === 0) {
+        console.log(`  DNS Redirect:  NOT ACTIVE (No active default route)`);
+        console.log(`  Parent Status: Temporarily limited (No Active Network)`);
       } else {
-        console.log(`  DNS Redirect:  NOT ACTIVE (System DNS pointing to default gateway/DHCP)`);
+        const unenforced = inspection.activeAdapters
+          .filter((a) => !a.isEnforced)
+          .map((a) => `${a.interfaceAlias} [${a.dnsServers.join(', ') || 'NONE'}]`)
+          .join('; ');
+        console.log(`  DNS Redirect:  NOT ACTIVE (Active adapter(s) not redirected: ${unenforced})`);
         console.log(`  Parent Status: Temporarily limited (DNS Not Redirected)`);
       }
-    } catch {
-      console.log(`  DNS Redirect:  Status query failed`);
     }
+  } catch {
+    console.log(`  DNS Redirect:  Status query failed`);
+    console.log(`  Parent Status: Temporarily limited (Status Query Error)`);
+  }
+
+  if (process.platform === 'win32') {
 
     try {
       const { stdout } = await execAsync('sc.exe query SafeBrowseChildService');

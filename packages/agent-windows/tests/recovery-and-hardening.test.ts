@@ -6,11 +6,11 @@ import * as os from 'os';
 import * as http from 'http';
 import * as dgram from 'dgram';
 import { Policy, PolicyRule } from '@safebrowse/shared';
-import { WindowsNetworkManager } from '../src/network-manager';
+import { WindowsNetworkManager, MockAdapterState } from '../src/network-manager';
 import { PolicySyncClient, DeviceConfig } from '../src/sync-client';
 import { DnsFilterProxy } from '../src/dns-proxy';
 import { BlockPageServer } from '../src/block-server';
-import { WindowsFirewallEngine } from '../src/wfp-engine';
+import { WindowsFirewallEngine, firewallEngine } from '../src/wfp-engine';
 import { computeEngineStatus, isEnforcementActive } from '../src/agent-cli';
 import { ConfigManager } from '../src/config-manager';
 
@@ -57,6 +57,34 @@ function extractCsMethod(source: string, signature: string): string {
     }
   }
   assert.fail(`Matching closing brace for "${signature}" not found`);
+}
+
+/**
+ * Helper to spin up a local UDP server that immediately echoes standard DNS query responses.
+ */
+function createMockDnsServer(): Promise<{ port: number; close: () => Promise<void> }> {
+  return new Promise((resolve) => {
+    const server = dgram.createSocket('udp4');
+    server.on('message', (msg, rinfo) => {
+      const response = Buffer.from(msg);
+      response[2] |= 0x80; // Set QR flag to indicate response
+      server.send(response, rinfo.port, rinfo.address);
+    });
+    server.bind(0, '127.0.0.1', () => {
+      const addr = server.address();
+      resolve({
+        port: addr.port,
+        close: () =>
+          new Promise((res) => {
+            try {
+              server.close(() => res());
+            } catch {
+              res();
+            }
+          }),
+      });
+    });
+  });
 }
 
 describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
@@ -1292,5 +1320,911 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     // Reset override
     cm.setConfigAccessOverrideForTesting(null);
     assert.strictEqual(cm.checkConfigAccess(), 'NOT_PAIRED');
+  });
+
+  // ----------------------------------------------------
+  // Test 36: Roaming: same InterfaceIndex network switch (192.168.1.x -> 10.23.63.x) triggers re-enforcement of 127.0.0.1
+  // ----------------------------------------------------
+  it('36. roaming: same InterfaceIndex network switch (192.168.1.x -> 10.23.63.x) triggers re-enforcement of 127.0.0.1', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupFile = path.join(tmpDir, 'backup-test-36.json');
+    const nm = new WindowsNetworkManager(backupFile);
+
+    try {
+      const adapters: MockAdapterState[] = [
+        {
+          InterfaceIndex: 6,
+          InterfaceAlias: 'Wi-Fi',
+          Status: 'Up',
+          IpAddresses: ['192.168.1.8'],
+          Gateway: '192.168.1.1',
+          ServerAddresses: ['127.0.0.1'],
+          DhcpEnabled: true,
+        },
+      ];
+      nm.setMockAdaptersForTesting(adapters);
+
+      // Initially in-sync
+      const syncResult = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(syncResult.status, 'IN_SYNC');
+
+      // Laptop moves to mobile hotspot: IP changes to 10.23.63.201, Gateway to 10.23.63.1,
+      // and Windows DHCP stack resets DNS to 10.23.63.61 (DHCP DNS is distinct from default gateway)
+      adapters[0].IpAddresses = ['10.23.63.201'];
+      adapters[0].Gateway = '10.23.63.1';
+      adapters[0].ServerAddresses = ['10.23.63.61'];
+
+      // Reconciliation detects un-enforced adapter, refreshes backup, and re-enforces 127.0.0.1
+      const roamResult = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(roamResult.status, 'RE_ENFORCED');
+      assert.deepStrictEqual(roamResult.enforcedIndexes, [6]);
+      assert.deepStrictEqual(adapters[0].ServerAddresses, ['127.0.0.1']);
+
+      // Verify backup on disk recorded clean hotspot DNS and DHCP enabled
+      const savedBackup = JSON.parse(fs.readFileSync(backupFile, 'utf8'));
+      assert.strictEqual(savedBackup[0].InterfaceIndex, 6);
+      assert.strictEqual(savedBackup[0].DhcpEnabled, true);
+      assert.deepStrictEqual(savedBackup[0].ServerAddresses, ['10.23.63.61']);
+    } finally {
+      await dnsServer.close();
+    }
+  });
+
+  // ----------------------------------------------------
+  // Test 37: Roaming: reconciliation loop continuously protects across network change without service restart
+  // ----------------------------------------------------
+  it('37. roaming: reconciliation loop continuously protects across network change without service restart', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupFile = path.join(tmpDir, 'backup-test-37.json');
+    const nm = new WindowsNetworkManager(backupFile);
+
+    try {
+      const adapters: MockAdapterState[] = [
+        {
+          InterfaceIndex: 6,
+          InterfaceAlias: 'Wi-Fi',
+          Status: 'Up',
+          IpAddresses: ['192.168.1.8'],
+          Gateway: '192.168.1.1',
+          ServerAddresses: ['127.0.0.1'],
+          DhcpEnabled: true,
+        },
+      ];
+      nm.setMockAdaptersForTesting(adapters);
+
+      let lastStateChange: any = null;
+      nm.startReconciliationLoop(dnsServer.port, 25, (success, reason) => {
+        lastStateChange = { success, reason };
+      });
+
+      // Roam to hotspot (DHCP DNS is distinct from default gateway)
+      adapters[0].IpAddresses = ['10.23.63.201'];
+      adapters[0].Gateway = '10.23.63.1';
+      adapters[0].ServerAddresses = ['10.23.63.61'];
+
+      // Wait for loop to tick and re-enforce
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          clearInterval(interval);
+          reject(new Error('Timed out waiting for reconciliation loop to re-enforce 127.0.0.1'));
+        }, 2000);
+
+        const interval = setInterval(() => {
+          if (adapters[0].ServerAddresses.includes('127.0.0.1')) {
+            clearTimeout(timeout);
+            clearInterval(interval);
+            resolve();
+          }
+        }, 10);
+      });
+
+      assert.deepStrictEqual(adapters[0].ServerAddresses, ['127.0.0.1']);
+      assert.strictEqual(lastStateChange?.success, true);
+    } finally {
+      nm.stopReconciliationLoop();
+      await dnsServer.close();
+    }
+  });
+
+  // ----------------------------------------------------
+  // Test 38: Roaming: DHCP adapter backup records DhcpEnabled: true and restores via -ResetServerAddresses
+  // ----------------------------------------------------
+  it('38. roaming: DHCP adapter backup records DhcpEnabled: true and restores via -ResetServerAddresses', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-38.json');
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('win32');
+
+    const executedCommands: string[] = [];
+    nm.setCommandExecutorForTesting(async (script) => {
+      executedCommands.push(script);
+      return { stdout: '', stderr: '' };
+    });
+
+    nm.persistOrRefreshAdapterBackup({
+      InterfaceIndex: 6,
+      InterfaceAlias: 'Wi-Fi',
+      ServerAddresses: ['10.23.63.61'],
+      DhcpEnabled: true,
+    });
+
+    const saved = JSON.parse(fs.readFileSync(backupFile, 'utf8'));
+    assert.strictEqual(saved[0].DhcpEnabled, true);
+
+    await nm.restoreOriginalDns();
+
+    const resetCmd = executedCommands.find(
+      (c) => c.includes('InterfaceIndex 6') && c.includes('ResetServerAddresses')
+    );
+    assert.ok(resetCmd, 'Must restore DHCP adapter via -ResetServerAddresses');
+    assert.strictEqual(
+      executedCommands.some((c) => c.includes('InterfaceIndex 6') && c.includes('-ServerAddresses')),
+      false,
+      'Must NOT assign static server addresses to a DHCP adapter'
+    );
+  });
+
+  // ----------------------------------------------------
+  // Test 39: Roaming: stopping service while on new hotspot executes -ResetServerAddresses and does NOT restore old 192.168.1.1
+  // ----------------------------------------------------
+  it('39. roaming: stopping service while on new hotspot executes -ResetServerAddresses and does NOT restore old 192.168.1.1', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-39.json');
+    // Pre-populate backup with old home WiFi static DNS
+    fs.writeFileSync(
+      backupFile,
+      JSON.stringify([
+        {
+          InterfaceIndex: 6,
+          InterfaceAlias: 'Wi-Fi',
+          ServerAddresses: ['192.168.1.1'],
+          DhcpEnabled: false,
+        },
+      ])
+    );
+
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('win32');
+
+    const executedCommands: string[] = [];
+    nm.setCommandExecutorForTesting(async (script) => {
+      executedCommands.push(script);
+      return { stdout: '', stderr: '' };
+    });
+
+    // Device connects to mobile hotspot using DHCP (DHCP DNS is distinct from default gateway)
+    nm.persistOrRefreshAdapterBackup({
+      InterfaceIndex: 6,
+      InterfaceAlias: 'Wi-Fi',
+      ServerAddresses: ['10.23.63.61'],
+      DhcpEnabled: true,
+    });
+
+    await nm.restoreOriginalDns();
+
+    // Verify it used -ResetServerAddresses and did NOT restore old 192.168.1.1
+    const resetCmd = executedCommands.find(
+      (c) => c.includes('InterfaceIndex 6') && c.includes('ResetServerAddresses')
+    );
+    assert.ok(resetCmd, 'Must use -ResetServerAddresses on hotspot');
+    assert.strictEqual(
+      executedCommands.some((c) => c.includes('192.168.1.1')),
+      false,
+      'Must NOT restore old home Wi-Fi DNS 192.168.1.1 when stopped on mobile hotspot'
+    );
+  });
+
+  // ----------------------------------------------------
+  // Test 40: Roaming: network change never overwrites backup with 127.0.0.1 or ::1
+  // ----------------------------------------------------
+  it('40. roaming: network change never overwrites backup with 127.0.0.1 or ::1', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-40.json');
+    const nm = new WindowsNetworkManager(backupFile);
+
+    // Initial clean backup
+    nm.persistOrRefreshAdapterBackup({
+      InterfaceIndex: 6,
+      InterfaceAlias: 'Wi-Fi',
+      ServerAddresses: ['192.168.1.1'],
+      DhcpEnabled: false,
+    });
+
+    // Attempt to refresh with 127.0.0.1 and ::1 mixed in
+    nm.persistOrRefreshAdapterBackup({
+      InterfaceIndex: 6,
+      InterfaceAlias: 'Wi-Fi',
+      ServerAddresses: ['127.0.0.1', '10.23.63.61', '::1'],
+      DhcpEnabled: true,
+    });
+
+    let saved = JSON.parse(fs.readFileSync(backupFile, 'utf8'));
+    assert.deepStrictEqual(saved[0].ServerAddresses, ['10.23.63.61']);
+
+    // Attempt to refresh with ONLY loopback
+    nm.persistOrRefreshAdapterBackup({
+      InterfaceIndex: 6,
+      InterfaceAlias: 'Wi-Fi',
+      ServerAddresses: ['127.0.0.1'],
+      DhcpEnabled: true,
+    });
+
+    saved = JSON.parse(fs.readFileSync(backupFile, 'utf8'));
+    assert.deepStrictEqual(
+      saved[0].ServerAddresses,
+      ['10.23.63.61'],
+      'Must retain existing clean backup when input is only loopback'
+    );
+  });
+
+  // ----------------------------------------------------
+  // Test 41: Roaming: genuine static DNS remains preserved exactly on static adapters
+  // ----------------------------------------------------
+  it('41. roaming: genuine static DNS remains preserved exactly on static adapters', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupFile = path.join(tmpDir, 'backup-test-41.json');
+    const nm = new WindowsNetworkManager(backupFile);
+
+    try {
+      const adapters: MockAdapterState[] = [
+        {
+          InterfaceIndex: 4,
+          InterfaceAlias: 'Ethernet',
+          Status: 'Up',
+          IpAddresses: ['10.10.0.50'],
+          Gateway: '10.10.0.1',
+          ServerAddresses: ['1.1.1.1', '8.8.8.8'],
+          DhcpEnabled: false,
+        },
+      ];
+      nm.setMockAdaptersForTesting(adapters);
+
+      const res = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(res.status, 'RE_ENFORCED');
+
+      const saved = JSON.parse(fs.readFileSync(backupFile, 'utf8'));
+      assert.strictEqual(saved[0].InterfaceIndex, 4);
+      assert.strictEqual(saved[0].DhcpEnabled, false);
+      assert.deepStrictEqual(saved[0].ServerAddresses, ['1.1.1.1', '8.8.8.8']);
+
+      // Verify Win32 restore produces exact static restore command
+      nm.setPlatformForTesting('win32');
+      const executedCommands: string[] = [];
+      nm.setCommandExecutorForTesting(async (script) => {
+        executedCommands.push(script);
+        return { stdout: '', stderr: '' };
+      });
+
+      await nm.restoreOriginalDns();
+
+      const staticCmd = executedCommands.find(
+        (c) => c.includes('InterfaceIndex 4') && c.includes("'1.1.1.1','8.8.8.8'")
+      );
+      assert.ok(staticCmd, 'Must restore exact static DNS addresses');
+    } finally {
+      await dnsServer.close();
+    }
+  });
+
+  // ----------------------------------------------------
+  // Test 42: Adapter arrival: newly arriving Ethernet is discovered, backed up, and protected alongside existing WiFi
+  // ----------------------------------------------------
+  it('42. adapter arrival: newly arriving Ethernet is discovered, backed up, and protected alongside existing WiFi', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupFile = path.join(tmpDir, 'backup-test-42.json');
+    const nm = new WindowsNetworkManager(backupFile);
+
+    try {
+      const adapters: MockAdapterState[] = [
+        {
+          InterfaceIndex: 6,
+          InterfaceAlias: 'Wi-Fi',
+          Status: 'Up',
+          IpAddresses: ['192.168.1.8'],
+          Gateway: '192.168.1.1',
+          ServerAddresses: ['127.0.0.1'],
+          DhcpEnabled: true,
+        },
+      ];
+      nm.setMockAdaptersForTesting(adapters);
+
+      // Initially WiFi backup exists and adapter is enforced
+      nm.persistOrRefreshAdapterBackup({
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        ServerAddresses: ['192.168.1.1'],
+        DhcpEnabled: true,
+      });
+
+      const initialRes = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(initialRes.status, 'IN_SYNC');
+
+      // Ethernet cable is plugged in: Adapter 14 appears
+      adapters.push({
+        InterfaceIndex: 14,
+        InterfaceAlias: 'Ethernet 2',
+        Status: 'Up',
+        IpAddresses: ['10.0.0.55'],
+        Gateway: '10.0.0.1',
+        ServerAddresses: ['10.0.0.1'],
+        DhcpEnabled: true,
+      });
+
+      const roamRes = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(roamRes.status, 'RE_ENFORCED');
+      assert.ok(roamRes.enforcedIndexes.includes(14));
+      assert.deepStrictEqual(adapters[1].ServerAddresses, ['127.0.0.1']);
+
+      const saved = JSON.parse(fs.readFileSync(backupFile, 'utf8'));
+      assert.strictEqual(saved.length, 2);
+      assert.ok(saved.some((a: any) => a.InterfaceIndex === 6));
+      assert.ok(saved.some((a: any) => a.InterfaceIndex === 14 && a.DhcpEnabled === true));
+    } finally {
+      await dnsServer.close();
+    }
+  });
+
+  // ----------------------------------------------------
+  // Test 43: Multihoming: simultaneous active WiFi and Ethernet routes are both enforced
+  // ----------------------------------------------------
+  it('43. multihoming: simultaneous active WiFi and Ethernet routes are both enforced', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupFile = path.join(tmpDir, 'backup-test-43.json');
+    const nm = new WindowsNetworkManager(backupFile);
+
+    try {
+      const adapters: MockAdapterState[] = [
+        {
+          InterfaceIndex: 6,
+          InterfaceAlias: 'Wi-Fi',
+          Status: 'Up',
+          IpAddresses: ['192.168.1.8'],
+          Gateway: '192.168.1.1',
+          ServerAddresses: ['192.168.1.1'],
+          DhcpEnabled: true,
+        },
+        {
+          InterfaceIndex: 14,
+          InterfaceAlias: 'Ethernet',
+          Status: 'Up',
+          IpAddresses: ['10.0.0.2'],
+          Gateway: '10.0.0.1',
+          ServerAddresses: ['10.0.0.1'],
+          DhcpEnabled: true,
+        },
+      ];
+      nm.setMockAdaptersForTesting(adapters);
+
+      const res = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(res.status, 'RE_ENFORCED');
+      assert.deepStrictEqual(res.enforcedIndexes.slice().sort((a, b) => a - b), [6, 14]);
+
+      const inspection = await nm.inspectCurrentEnforcement();
+      assert.strictEqual(inspection.isProtected, true);
+      assert.strictEqual(inspection.activeAdapters.length, 2);
+      assert.ok(inspection.activeAdapters.every((a) => a.isEnforced));
+    } finally {
+      await dnsServer.close();
+    }
+  });
+
+  // ----------------------------------------------------
+  // Test 44: Exclusion: Tailscale virtual adapter remains strictly excluded during roaming and reconciliation
+  // ----------------------------------------------------
+  it('44. exclusion: Tailscale virtual adapter remains strictly excluded during roaming and reconciliation', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupFile = path.join(tmpDir, 'backup-test-44.json');
+    const nm = new WindowsNetworkManager(backupFile);
+
+    try {
+      const adapters: MockAdapterState[] = [
+        {
+          InterfaceIndex: 6,
+          InterfaceAlias: 'Wi-Fi',
+          Status: 'Up',
+          IpAddresses: ['192.168.1.8'],
+          Gateway: '192.168.1.1',
+          ServerAddresses: ['192.168.1.1'],
+          DhcpEnabled: true,
+        },
+        {
+          InterfaceIndex: 11,
+          InterfaceAlias: 'Tailscale',
+          Status: 'Up',
+          IpAddresses: ['100.98.155.122'],
+          Gateway: '0.0.0.0',
+          ServerAddresses: ['100.100.100.100'],
+          DhcpEnabled: false,
+        },
+      ];
+      nm.setMockAdaptersForTesting(adapters);
+
+      const res = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(res.status, 'RE_ENFORCED');
+      assert.deepStrictEqual(res.enforcedIndexes, [6]);
+      assert.strictEqual(adapters[1].ServerAddresses[0], '100.100.100.100', 'Tailscale DNS must never be modified');
+
+      const saved = JSON.parse(fs.readFileSync(backupFile, 'utf8'));
+      assert.strictEqual(saved.length, 1);
+      assert.strictEqual(saved[0].InterfaceIndex, 6);
+    } finally {
+      await dnsServer.close();
+    }
+  });
+
+  // ----------------------------------------------------
+  // Test 45: Exclusion: APIPA, loopback, and disconnected adapters remain excluded during reconciliation
+  // ----------------------------------------------------
+  it('45. exclusion: APIPA, loopback, and disconnected adapters remain excluded during reconciliation', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupFile = path.join(tmpDir, 'backup-test-45.json');
+    const nm = new WindowsNetworkManager(backupFile);
+
+    try {
+      const adapters: MockAdapterState[] = [
+        {
+          InterfaceIndex: 6,
+          InterfaceAlias: 'Wi-Fi',
+          Status: 'Up',
+          IpAddresses: ['192.168.1.8'],
+          Gateway: '192.168.1.1',
+          ServerAddresses: ['192.168.1.1'],
+          DhcpEnabled: true,
+        },
+        {
+          InterfaceIndex: 20,
+          InterfaceAlias: 'Disconnected Eth',
+          Status: 'Disconnected',
+          IpAddresses: [],
+          Gateway: '192.168.2.1',
+          ServerAddresses: ['192.168.2.1'],
+          DhcpEnabled: true,
+        },
+        {
+          InterfaceIndex: 21,
+          InterfaceAlias: 'APIPA Adapter',
+          Status: 'Up',
+          IpAddresses: ['169.254.120.30'],
+          Gateway: '169.254.120.1',
+          ServerAddresses: ['169.254.120.1'],
+          DhcpEnabled: true,
+        },
+      ];
+      nm.setMockAdaptersForTesting(adapters);
+
+      const res = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(res.status, 'RE_ENFORCED');
+      assert.deepStrictEqual(res.enforcedIndexes, [6]);
+    } finally {
+      await dnsServer.close();
+    }
+  });
+
+  // ----------------------------------------------------
+  // Test 46: Offline degradation: no default route (NO_NETWORK_ROUTE) sets engine status DEGRADED_NO_NETWORK
+  // ----------------------------------------------------
+  it('46. offline degradation: no default route (NO_NETWORK_ROUTE) sets engine status DEGRADED_NO_NETWORK', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-46.json');
+    const nm = new WindowsNetworkManager(backupFile);
+
+    const adapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Status: 'Disconnected',
+        IpAddresses: [],
+        Gateway: '0.0.0.0',
+        ServerAddresses: [],
+        DhcpEnabled: true,
+      },
+    ];
+    nm.setMockAdaptersForTesting(adapters);
+
+    const res = await nm.reconcileAdapters(53);
+    assert.strictEqual(res.status, 'NO_NETWORK_ROUTE');
+
+    const engineStatus = computeEngineStatus(false, 'NO_NETWORK_ROUTE', 'POLICY_LIVE');
+    assert.strictEqual(engineStatus, 'DEGRADED_NO_NETWORK');
+    assert.strictEqual(isEnforcementActive(engineStatus, true), false);
+  });
+
+  // ----------------------------------------------------
+  // Test 47: Network return: route restored transitions from DEGRADED_NO_NETWORK back to ACTIVE
+  // ----------------------------------------------------
+  it('47. network return: route restored transitions from DEGRADED_NO_NETWORK back to ACTIVE', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupFile = path.join(tmpDir, 'backup-test-47.json');
+    const nm = new WindowsNetworkManager(backupFile);
+
+    try {
+      const adapters: MockAdapterState[] = [
+        {
+          InterfaceIndex: 6,
+          InterfaceAlias: 'Wi-Fi',
+          Status: 'Up',
+          IpAddresses: ['10.23.63.201'],
+          Gateway: '10.23.63.1',
+          ServerAddresses: ['10.23.63.61'], // DHCP DNS distinct from gateway
+          DhcpEnabled: true,
+        },
+      ];
+      nm.setMockAdaptersForTesting(adapters);
+
+      const res = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(res.status, 'RE_ENFORCED');
+
+      // Transitions to ACTIVE when backend policy is live
+      const activeStatus = computeEngineStatus(true, undefined, 'POLICY_LIVE');
+      assert.strictEqual(activeStatus, 'ACTIVE');
+      assert.strictEqual(isEnforcementActive(activeStatus, true), true);
+
+      // Or OFFLINE_BACKEND_CACHED_POLICY when backend is unreachable but policy is cached
+      const cachedStatus = computeEngineStatus(true, undefined, 'POLICY_CACHED');
+      assert.strictEqual(cachedStatus, 'OFFLINE_BACKEND_CACHED_POLICY');
+      assert.strictEqual(isEnforcementActive(cachedStatus, true), true);
+    } finally {
+      await dnsServer.close();
+    }
+  });
+
+  // ----------------------------------------------------
+  // Test 48: Tamper repair: external or child modification of DNS away from 127.0.0.1 is repaired by reconciliation
+  // ----------------------------------------------------
+  it('48. tamper repair: external or child modification of DNS away from 127.0.0.1 is repaired by reconciliation', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupFile = path.join(tmpDir, 'backup-test-48.json');
+    const nm = new WindowsNetworkManager(backupFile);
+
+    try {
+      const adapters: MockAdapterState[] = [
+        {
+          InterfaceIndex: 6,
+          InterfaceAlias: 'Wi-Fi',
+          Status: 'Up',
+          IpAddresses: ['192.168.1.8'],
+          Gateway: '192.168.1.1',
+          ServerAddresses: ['8.8.8.8'], // Child manually changed DNS to Google Public DNS
+          DhcpEnabled: false,
+        },
+      ];
+      nm.setMockAdaptersForTesting(adapters);
+
+      const res = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(res.status, 'RE_ENFORCED');
+      assert.deepStrictEqual(adapters[0].ServerAddresses, ['127.0.0.1']);
+    } finally {
+      await dnsServer.close();
+    }
+  });
+
+  // ----------------------------------------------------
+  // Test 49: Race safety: shutdown and restore flags prevent reconciliation from re-enforcing DNS
+  // ----------------------------------------------------
+  it('49. race safety: shutdown and restore flags prevent reconciliation from re-enforcing DNS', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupFile = path.join(tmpDir, 'backup-test-49.json');
+    const nm = new WindowsNetworkManager(backupFile);
+
+    try {
+      const adapters: MockAdapterState[] = [
+        {
+          InterfaceIndex: 6,
+          InterfaceAlias: 'Wi-Fi',
+          Status: 'Up',
+          IpAddresses: ['192.168.1.8'],
+          Gateway: '192.168.1.1',
+          ServerAddresses: ['192.168.1.1'],
+          DhcpEnabled: true,
+        },
+      ];
+      nm.setMockAdaptersForTesting(adapters);
+
+      nm.setShuttingDown(true);
+      const res = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(res.status, 'NO_NETWORK_ROUTE');
+      assert.deepStrictEqual(adapters[0].ServerAddresses, ['192.168.1.1'], 'Must not re-enforce during shutdown');
+    } finally {
+      await dnsServer.close();
+    }
+  });
+
+  // ----------------------------------------------------
+  // Test 50: Concurrency: reconciliation single-flight lock skips overlapping concurrent executions
+  // ----------------------------------------------------
+  it('50. concurrency: reconciliation single-flight lock skips overlapping concurrent executions', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupFile = path.join(tmpDir, 'backup-test-50.json');
+    const nm = new WindowsNetworkManager(backupFile);
+
+    try {
+      const adapters: MockAdapterState[] = [
+        {
+          InterfaceIndex: 6,
+          InterfaceAlias: 'Wi-Fi',
+          Status: 'Up',
+          IpAddresses: ['192.168.1.8'],
+          Gateway: '192.168.1.1',
+          ServerAddresses: ['127.0.0.1'],
+          DhcpEnabled: true,
+        },
+      ];
+      nm.setMockAdaptersForTesting(adapters);
+
+      // Simulate a concurrent call while isReconciling is already held
+      (nm as any).isReconciling = true;
+      const skipped = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(skipped.status, 'IN_SYNC');
+      assert.ok(skipped.message.includes('skipped'));
+    } finally {
+      (nm as any).isReconciling = false;
+      await dnsServer.close();
+    }
+  });
+
+  // ----------------------------------------------------
+  // Test 51: Status accuracy: disconnected adapter with 127.0.0.1 and active adapter with external DNS reports NOT protected
+  // ----------------------------------------------------
+  it('51. status accuracy: disconnected adapter with 127.0.0.1 and active adapter with external DNS reports NOT protected', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-51.json');
+    const nm = new WindowsNetworkManager(backupFile);
+
+    const adapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Status: 'Disconnected',
+        IpAddresses: [],
+        Gateway: '0.0.0.0',
+        ServerAddresses: ['127.0.0.1'], // Trapped / inactive adapter
+        DhcpEnabled: true,
+      },
+      {
+        InterfaceIndex: 14,
+        InterfaceAlias: 'Ethernet',
+        Status: 'Up',
+        IpAddresses: ['10.0.0.50'],
+        Gateway: '10.0.0.1',
+        ServerAddresses: ['10.0.0.1'], // Active routing adapter lacks 127.0.0.1
+        DhcpEnabled: true,
+      },
+    ];
+    nm.setMockAdaptersForTesting(adapters);
+
+    const inspection = await nm.inspectCurrentEnforcement();
+    assert.strictEqual(inspection.isProtected, false);
+    assert.strictEqual(inspection.summary, 'DNS not redirected');
+    assert.strictEqual(inspection.activeAdapters.length, 1);
+    assert.strictEqual(inspection.activeAdapters[0].interfaceIndex, 14);
+    assert.strictEqual(inspection.activeAdapters[0].isEnforced, false);
+  });
+
+  // ----------------------------------------------------
+  // Test 52: Status accuracy: all active default-route adapters with 127.0.0.1 reports Protected
+  // ----------------------------------------------------
+  it('52. status accuracy: all active default-route adapters with 127.0.0.1 reports Protected', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-52.json');
+    const nm = new WindowsNetworkManager(backupFile);
+
+    const adapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Status: 'Up',
+        IpAddresses: ['192.168.1.8'],
+        Gateway: '192.168.1.1',
+        ServerAddresses: ['127.0.0.1'],
+        DhcpEnabled: true,
+      },
+      {
+        InterfaceIndex: 14,
+        InterfaceAlias: 'Ethernet',
+        Status: 'Up',
+        IpAddresses: ['10.0.0.50'],
+        Gateway: '10.0.0.1',
+        ServerAddresses: ['127.0.0.1'],
+        DhcpEnabled: true,
+      },
+    ];
+    nm.setMockAdaptersForTesting(adapters);
+
+    const inspection = await nm.inspectCurrentEnforcement();
+    assert.strictEqual(inspection.isProtected, true);
+    assert.strictEqual(inspection.summary, 'Protected');
+    assert.strictEqual(inspection.activeAdapters.length, 2);
+    assert.ok(inspection.activeAdapters.every((a) => a.isEnforced));
+  });
+
+  // ----------------------------------------------------
+  // Test 53: Win32 command verification: reconciliation script executes Set-DnsClientServerAddress and verifies read-back
+  // ----------------------------------------------------
+  it('53. win32 command verification: reconciliation script executes Set-DnsClientServerAddress and verifies read-back', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupFile = path.join(tmpDir, 'backup-test-53.json');
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('win32');
+
+    const executedCommands: string[] = [];
+    nm.setCommandExecutorForTesting(async (script) => {
+      executedCommands.push(script);
+      // Route discovery command
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify([
+            {
+              InterfaceIndex: 6,
+              DestinationPrefix: '0.0.0.0/0',
+              NextHop: '10.23.63.1',
+              RouteMetric: 25,
+              InterfaceMetric: 15,
+            },
+          ]),
+          stderr: '',
+        };
+      }
+      // NetAdapter discovery
+      if (script.includes('Get-NetAdapter')) {
+        return {
+          stdout: JSON.stringify([
+            {
+              InterfaceIndex: 6,
+              InterfaceAlias: 'Wi-Fi',
+              Status: 'Up',
+              LinkSpeed: '100 Mbps',
+            },
+          ]),
+          stderr: '',
+        };
+      }
+      // NetIPAddress discovery
+      if (script.includes('Get-NetIPAddress')) {
+        return {
+          stdout: JSON.stringify([
+            {
+              InterfaceIndex: 6,
+              IPAddress: '10.23.63.201',
+              PrefixLength: 24,
+            },
+          ]),
+          stderr: '',
+        };
+      }
+      // DNS client server address query during reconciliation
+      if (script.includes('Get-DnsClientServerAddress') && script.includes('$cleanAddrs')) {
+        return {
+          stdout: JSON.stringify([
+            {
+              InterfaceIndex: 6,
+              InterfaceAlias: 'Wi-Fi',
+              ServerAddresses: ['10.23.63.61'],
+              CleanNonLoopback: ['10.23.63.61'],
+              IsEnforced: false,
+              DhcpEnabled: true,
+            },
+          ]),
+          stderr: '',
+        };
+      }
+      // Read-back verification
+      if (script.includes('Get-DnsClientServerAddress') && script.includes('readBackScript')) {
+        return {
+          stdout: JSON.stringify({
+            InterfaceIndex: 6,
+            ServerAddresses: ['127.0.0.1'],
+          }),
+          stderr: '',
+        };
+      }
+      return {
+        stdout: JSON.stringify({
+          InterfaceIndex: 6,
+          ServerAddresses: ['127.0.0.1'],
+        }),
+        stderr: '',
+      };
+    });
+
+    try {
+      const res = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(res.status, 'RE_ENFORCED');
+      assert.deepStrictEqual(res.enforcedIndexes, [6]);
+
+      // Verify Set-DnsClientServerAddress was called
+      const setCmd = executedCommands.find(
+        (c) => c.includes('Set-DnsClientServerAddress') && c.includes('127.0.0.1')
+      );
+      assert.ok(setCmd, 'Must execute Set-DnsClientServerAddress with 127.0.0.1');
+
+      // Verify Clear-DnsClientCache was called
+      const flushCmd = executedCommands.find((c) => c.includes('Clear-DnsClientCache'));
+      assert.ok(flushCmd, 'Must execute Clear-DnsClientCache');
+    } finally {
+      await dnsServer.close();
+    }
+  });
+
+  // ----------------------------------------------------
+  // Test 54: Timer and reconciliation lifecycle: duplicate start, stop, shutdown cancellation, unref, and error containment
+  // ----------------------------------------------------
+  it('54. timer and reconciliation lifecycle: duplicate start, stop, shutdown cancellation, unref, and error containment', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-54.json');
+    const nm = new WindowsNetworkManager(backupFile);
+
+    // 1. Calling start creates a timer
+    nm.startReconciliationLoop(53, 100);
+    const timer1 = nm.getReconcileTimerForTesting();
+    assert.ok(timer1 !== null, 'Reconciliation timer must exist after start');
+
+    // 2. Calling start twice replaces previous timer (at most one active timer exists)
+    nm.startReconciliationLoop(53, 200);
+    const timer2 = nm.getReconcileTimerForTesting();
+    assert.ok(timer2 !== null, 'Second timer must exist');
+    assert.notStrictEqual(timer1, timer2, 'Previous timer must be cleared and replaced on duplicate start');
+
+    // 3. stop clears and nulls timer
+    nm.stopReconciliationLoop();
+    assert.strictEqual(nm.getReconcileTimerForTesting(), null, 'Timer must be null after stopReconciliationLoop');
+
+    // 4. setShuttingDown clears and nulls timer
+    nm.startReconciliationLoop(53, 100);
+    assert.ok(nm.getReconcileTimerForTesting() !== null);
+    nm.setShuttingDown(true);
+    assert.strictEqual(nm.getReconcileTimerForTesting(), null, 'Timer must be cleared and nulled by setShuttingDown(true)');
+    nm.setShuttingDown(false);
+
+    // 5. Error containment: exceptions in reconcileAdapters do not crash service or leave isReconciling true
+    const failingExecutor = async () => {
+      throw new Error('Simulated WMI/PowerShell engine failure');
+    };
+    nm.setPlatformForTesting('win32');
+    nm.setCommandExecutorForTesting(failingExecutor);
+
+    try {
+      await nm.reconcileAdapters(53);
+    } catch {
+      // Expected to fail or return error status
+    }
+    assert.strictEqual(nm.isReconcilingState(), false, 'isReconciling must be reset in finally even on error');
+  });
+
+  // ----------------------------------------------------
+  // Test 55: Firewall idempotence: running firewall engine skips redundant netsh rule recreation during reconciliation
+  // ----------------------------------------------------
+  it('55. firewall idempotence: running firewall engine skips redundant netsh rule recreation during reconciliation', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupFile = path.join(tmpDir, 'backup-test-55.json');
+    const nm = new WindowsNetworkManager(backupFile);
+
+    try {
+      const adapters: MockAdapterState[] = [
+        {
+          InterfaceIndex: 6,
+          InterfaceAlias: 'Wi-Fi',
+          Status: 'Up',
+          IpAddresses: ['10.23.63.201'],
+          Gateway: '10.23.63.1',
+          ServerAddresses: ['10.23.63.61'], // Hotspot DHCP DNS distinct from gateway
+          DhcpEnabled: true,
+        },
+      ];
+      nm.setMockAdaptersForTesting(adapters);
+
+      // Spy on firewallEngine.initialize to verify idempotency
+      let initCalls = 0;
+      const originalInit = firewallEngine.initialize.bind(firewallEngine);
+      firewallEngine.initialize = async () => {
+        initCalls++;
+        return await originalInit();
+      };
+
+      try {
+        // Ensure firewall status is running
+        (firewallEngine as any).isRunning = true;
+
+        const res = await nm.reconcileAdapters(dnsServer.port);
+        assert.strictEqual(res.status, 'RE_ENFORCED');
+        assert.strictEqual(initCalls, 0, 'Must NOT re-initialize firewall if engine is already running (idempotency)');
+      } finally {
+        firewallEngine.initialize = originalInit;
+      }
+    } finally {
+      await dnsServer.close();
+    }
   });
 });
