@@ -113,6 +113,7 @@ export interface CurrentEnforcementInspection {
     gateway?: string;
     dnsServers: string[];
     isEnforced: boolean;
+    queryStatus?: 'OK' | 'QUERY_FAILED';
   }>;
   summary: string;
 }
@@ -129,6 +130,23 @@ export interface MockAdapterState {
 }
 
 export type NetworkCommandExecutor = (script: string) => Promise<{ stdout: string; stderr: string }>;
+
+/**
+ * Result of a per-adapter DNS state query.
+ * queryStatus distinguishes between a successful read of an empty list vs a query failure.
+ */
+export interface AdapterDnsQueryResult {
+  InterfaceIndex: number;
+  InterfaceAlias: string;
+  ServerAddresses: string[];
+  CleanNonLoopback: string[];
+  IsEnforced: boolean;
+  DhcpEnabled: boolean;
+  /** 'OK' = query succeeded (possibly returning empty addresses).
+   *  'QUERY_FAILED' = PowerShell/CIM returned no row for this specific index. */
+  queryStatus: 'OK' | 'QUERY_FAILED';
+}
+
 
 export class WindowsNetworkManager {
   private backupFile: string;
@@ -517,16 +535,18 @@ export class WindowsNetworkManager {
         '$configs = @(Get-NetIPConfiguration | Where-Object {',
         '    $_.NetAdapter.Status -eq \'Up\' -and $_.IPv4DefaultGateway -ne $null',
         '})',
-        '$result = foreach ($c in $configs) {',
-        '    $gw = if ($c.IPv4DefaultGateway.NextHop) { [string]$c.IPv4DefaultGateway.NextHop } else { \'\' }',
-        '    [PSCustomObject]@{',
-        '        InterfaceIndex = [int]$c.InterfaceIndex',
-        '        InterfaceAlias = [string]$c.InterfaceAlias',
-        '        Description = if ($c.InterfaceDescription) { [string]$c.InterfaceDescription } else { \'\' }',
-        '        Gateway = $gw',
+        '$result = @(',
+        '    foreach ($c in $configs) {',
+        '        $gw = if ($c.IPv4DefaultGateway.NextHop) { [string]$c.IPv4DefaultGateway.NextHop } else { \'\' }',
+        '        [PSCustomObject]@{',
+        '            InterfaceIndex = [int]$c.InterfaceIndex',
+        '            InterfaceAlias = [string]$c.InterfaceAlias',
+        '            Description = if ($c.InterfaceDescription) { [string]$c.InterfaceDescription } else { \'\' }',
+        '            Gateway = $gw',
+        '        }',
         '    }',
-        '}',
-        'if ($result.Count -gt 0) {',
+        ')',
+        'if (@($result).Count -gt 0) {',
         '    $result | ConvertTo-Json -Compress',
         '} else {',
         '    \'[]\'',
@@ -814,29 +834,31 @@ export class WindowsNetworkManager {
         `$indexes = @(${indexes.join(',')})`,
         '$configs = Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction Stop |',
         '    Where-Object { $indexes -contains $_.InterfaceIndex }',
-        '$result = foreach ($c in $configs) {',
-        '    $idx = $c.InterfaceIndex',
-        '    $isDhcp = $true',
-        '    try {',
-        '        $adapter = Get-NetAdapter -InterfaceIndex $idx -ErrorAction SilentlyContinue',
-        '        if ($adapter -and $adapter.InterfaceGuid) {',
-        '            $regKey = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\$($adapter.InterfaceGuid)"',
-        '            if (Test-Path $regKey) {',
-        '                $ns = (Get-ItemProperty -Path $regKey -Name "NameServer" -ErrorAction SilentlyContinue).NameServer',
-        '                if (-not [string]::IsNullOrWhiteSpace($ns)) {',
-        '                    $isDhcp = $false',
+        '$result = @(',
+        '    foreach ($c in $configs) {',
+        '        $idx = $c.InterfaceIndex',
+        '        $isDhcp = $true',
+        '        try {',
+        '            $adapter = Get-NetAdapter -InterfaceIndex $idx -ErrorAction SilentlyContinue',
+        '            if ($adapter -and $adapter.InterfaceGuid) {',
+        '                $regKey = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\$($adapter.InterfaceGuid)"',
+        '                if (Test-Path $regKey) {',
+        '                    $ns = (Get-ItemProperty -Path $regKey -Name "NameServer" -ErrorAction SilentlyContinue).NameServer',
+        '                    if (-not [string]::IsNullOrWhiteSpace($ns)) {',
+        '                        $isDhcp = $false',
+        '                    }',
         '                }',
         '            }',
+        '        } catch {}',
+        '        [PSCustomObject]@{',
+        '            InterfaceIndex = $c.InterfaceIndex',
+        '            InterfaceAlias = $c.InterfaceAlias',
+        '            ServerAddresses = @($c.ServerAddresses)',
+        '            DhcpEnabled = $isDhcp',
         '        }',
-        '    } catch {}',
-        '    [PSCustomObject]@{',
-        '        InterfaceIndex = $c.InterfaceIndex',
-        '        InterfaceAlias = $c.InterfaceAlias',
-        '        ServerAddresses = @($c.ServerAddresses)',
-        '        DhcpEnabled = $isDhcp',
         '    }',
-        '}',
-        'if ($result.Count -gt 0) {',
+        ')',
+        'if (@($result).Count -gt 0) {',
         '    $result | ConvertTo-Json -Compress',
         '} else {',
         '    \'[]\'',
@@ -1259,6 +1281,161 @@ export class WindowsNetworkManager {
     return result;
   }
 
+
+  /**
+   * Queries current DNS server addresses for a list of known active adapters.
+   *
+   * PROVEN ROOT CAUSE:
+   * On Windows PowerShell 5.1 the DNS filter correctly returned one adapter.
+   * However, assigning a single PSCustomObject from foreach to $result produced
+   * a scalar object whose .Count property was empty. The subsequent
+   * if ($result.Count -gt 0) branch therefore evaluated false and serialized []
+   * despite a valid DNS record being present.
+   * Physical testing on Windows 10/11 confirmed that @($result).Count == 1,
+   * and that ServerAddresses serialized as a scalar string for a single DNS address.
+   *
+   * Fix:
+   * 1. Query each known adapter directly by InterfaceIndex.
+   * 2. Wrap collection assignment as $results = @(foreach (...) { ... }) and check
+   *    @($results).Count -gt 0 to guarantee scalar PSCustomObject results never collapse .Count.
+   * 3. Normalize single-string ServerAddresses ("127.0.0.1") to string array (["127.0.0.1"]).
+   *
+   * For mock/non-Windows paths the caller supplies adapter state directly.
+   *
+   * @param targetAdapters  Eligible adapters from discoverTargetAdapters()
+   * @returns Per-adapter DNS state with queryStatus distinguishing empty-result from query-failure
+   */
+  public async queryDnsStateForAdapters(
+    targetAdapters: TargetAdapterInfo[]
+  ): Promise<AdapterDnsQueryResult[]> {
+    if (this.getPlatform() !== 'win32') {
+      // Non-Windows / test simulation: derive state from mockAdapters
+      return targetAdapters.map((target) => {
+        const ma = this.mockAdapters
+          ? this.mockAdapters.find((a) => a.InterfaceIndex === target.InterfaceIndex)
+          : null;
+        const addrs: string[] = ma ? ma.ServerAddresses : ['127.0.0.1'];
+        const isEnforced = addrs.includes('127.0.0.1');
+        const cleanNonLoopback = addrs.filter((ip) => !ip.startsWith('127.') && ip !== '::1');
+        const isDhcp = ma ? ma.DhcpEnabled !== false : true;
+        return {
+          InterfaceIndex: target.InterfaceIndex,
+          InterfaceAlias: target.InterfaceAlias,
+          ServerAddresses: addrs,
+          CleanNonLoopback: cleanNonLoopback,
+          IsEnforced: isEnforced,
+          DhcpEnabled: isDhcp,
+          queryStatus: 'OK',
+        };
+      });
+    }
+
+    // Windows path: query each adapter individually with an explicit [int] cast on the index.
+    // Wrap foreach in @(...) and check @($results).Count to ensure scalar results never collapse .Count.
+    const script = [
+      '$ErrorActionPreference = \'SilentlyContinue\'',
+      '$results = @(',
+      '    foreach ($rawIdx in @(' + targetAdapters.map((a) => `[int]${a.InterfaceIndex}`).join(',') + ')) {',
+      '        $idx = [int]$rawIdx',
+      '        $rows = @(Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue)',
+      '        if ($rows.Count -gt 0) {',
+      '            $d = $rows[0]',
+      '            $addrs = if ($d.ServerAddresses) { @($d.ServerAddresses | ForEach-Object { [string]$_ }) } else { @() }',
+      '            $has127 = ($addrs -contains \'127.0.0.1\')',
+      '            $cleanAddrs = @($addrs | Where-Object { $_ -and $_ -notmatch \'^127\\.\' -and $_ -ne \'::1\' })',
+      '            $alias = if ($d.InterfaceAlias) { [string]$d.InterfaceAlias } else { "Interface $idx" }',
+      '            # Detect static vs DHCP via registry (NameServer key set = static override)',
+      '            $isDhcp = $true',
+      '            try {',
+      '                $adapter = @(Get-NetAdapter -InterfaceIndex $idx -ErrorAction SilentlyContinue)[0]',
+      '                if ($adapter -and $adapter.InterfaceGuid) {',
+      '                    $regKey = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\$($adapter.InterfaceGuid)"',
+      '                    if (Test-Path $regKey) {',
+      '                        $props = Get-ItemProperty -Path $regKey -ErrorAction SilentlyContinue',
+      '                        $ns = if ($props.NameServer) { [string]$props.NameServer } else { \'\' }',
+      '                        if (-not [string]::IsNullOrWhiteSpace($ns) -and $ns -notmatch \'127\\.0\\.0\\.1\') {',
+      '                            $isDhcp = $false',
+      '                        }',
+      '                    }',
+      '                }',
+      '            } catch {}',
+      '            [PSCustomObject]@{',
+      '                InterfaceIndex   = $idx',
+      '                InterfaceAlias   = $alias',
+      '                ServerAddresses  = $addrs',
+      '                CleanNonLoopback = $cleanAddrs',
+      '                IsEnforced       = $has127',
+      '                DhcpEnabled      = $isDhcp',
+      '                QueryStatus      = \'OK\'',
+      '            }',
+      '        } else {',
+      '            # No row returned for this specific index: record explicit QUERY_FAILED',
+      '            [PSCustomObject]@{',
+      '                InterfaceIndex   = $idx',
+      '                InterfaceAlias   = "Interface $idx"',
+      '                ServerAddresses  = @()',
+      '                CleanNonLoopback = @()',
+      '                IsEnforced       = $false',
+      '                DhcpEnabled      = $true',
+      '                QueryStatus      = \'QUERY_FAILED\'',
+      '            }',
+      '        }',
+      '    }',
+      ')',
+      'if (@($results).Count -gt 0) { $results | ConvertTo-Json -Compress } else { \'[]\' }',
+    ].join('\n');
+
+    const { stdout } = await this.executePowerShell(script);
+    const trimmed = stdout.trim();
+
+    const results: AdapterDnsQueryResult[] = [];
+
+    if (trimmed && trimmed !== '[]' && trimmed !== 'null') {
+      const parsed = JSON.parse(trimmed);
+      const rawList: any[] = Array.isArray(parsed) ? parsed : [parsed];
+      for (const item of rawList) {
+        const rawAddrs = item.ServerAddresses;
+        const addrs: string[] = Array.isArray(rawAddrs)
+          ? rawAddrs.map(String)
+          : rawAddrs
+          ? [String(rawAddrs)]
+          : [];
+        const rawClean = item.CleanNonLoopback;
+        const clean: string[] = Array.isArray(rawClean)
+          ? rawClean.map(String)
+          : rawClean
+          ? [String(rawClean)]
+          : [];
+        results.push({
+          InterfaceIndex: Number(item.InterfaceIndex),
+          InterfaceAlias: String(item.InterfaceAlias || `Interface ${item.InterfaceIndex}`),
+          ServerAddresses: addrs,
+          CleanNonLoopback: clean,
+          IsEnforced: Boolean(item.IsEnforced),
+          DhcpEnabled: item.DhcpEnabled !== false,
+          queryStatus: item.QueryStatus === 'QUERY_FAILED' ? 'QUERY_FAILED' : 'OK',
+        });
+      }
+    }
+
+    // Fill in QUERY_FAILED for any adapter not present in the JSON output at all
+    for (const target of targetAdapters) {
+      if (!results.some((r) => r.InterfaceIndex === target.InterfaceIndex)) {
+        results.push({
+          InterfaceIndex: target.InterfaceIndex,
+          InterfaceAlias: target.InterfaceAlias,
+          ServerAddresses: [],
+          CleanNonLoopback: target.Gateway ? [target.Gateway] : [],
+          IsEnforced: false,
+          DhcpEnabled: true,
+          queryStatus: 'QUERY_FAILED',
+        });
+      }
+    }
+
+    return results;
+  }
+
   /**
    * Reconciles current network adapter DNS enforcement against the active routing topology.
    * Discovers eligible default-route adapters, safely refreshes original DNS metadata upon roaming,
@@ -1311,126 +1488,41 @@ export class WindowsNetworkManager {
         };
       }
 
-      // 2. Query current DNS configuration on all target adapters
-      interface AdapterDnsState {
-        InterfaceIndex: number;
-        InterfaceAlias: string;
-        ServerAddresses: string[];
-        CleanNonLoopback: string[];
-        IsEnforced: boolean;
-        DhcpEnabled: boolean;
+      // 2. Query current DNS configuration on all target adapters using the shared helper.
+      // The helper queries each adapter directly by InterfaceIndex, eliminating the fragile
+      // global enumeration + Where-Object filter that returned no matching records in Windows/PS 5.1.
+      const dnsStates = await this.queryDnsStateForAdapters(targetAdapters);
+
+      // Partition results into enforced, unenforced, and query-failed categories.
+      // QUERY_FAILED adapters must NOT be treated as unenforced to avoid blind DNS rewrites.
+      const enforced = dnsStates.filter((s) => s.IsEnforced && s.queryStatus === 'OK');
+      const unenforced = dnsStates.filter((s) => !s.IsEnforced && s.queryStatus === 'OK');
+      const queryFailed = dnsStates.filter((s) => s.queryStatus === 'QUERY_FAILED');
+
+      if (queryFailed.length > 0) {
+        logServiceMessage(
+          'WARN',
+          `[NetworkManager] [WARN] DNS state query returned no data for ${queryFailed.length} adapter(s): [${queryFailed
+            .map((q) => `${q.InterfaceAlias} (${q.InterfaceIndex})`)
+            .join(', ')}]. Preserving current state; will retry on next tick.`
+        );
       }
 
-      const states: AdapterDnsState[] = [];
-
-      if (this.getPlatform() !== 'win32') {
-        // Non-Windows simulation
-        for (const target of targetAdapters) {
-          const ma = this.mockAdapters
-            ? this.mockAdapters.find((a) => a.InterfaceIndex === target.InterfaceIndex)
-            : null;
-          const addrs = ma ? ma.ServerAddresses : ['127.0.0.1'];
-          const isEnforced = addrs.includes('127.0.0.1');
-          const cleanNonLoopback = addrs.filter((ip) => !ip.includes('127.0.0.1') && !ip.includes('::1'));
-          const isDhcp = ma ? ma.DhcpEnabled !== false : true;
-
-          states.push({
-            InterfaceIndex: target.InterfaceIndex,
-            InterfaceAlias: target.InterfaceAlias,
-            ServerAddresses: addrs,
-            CleanNonLoopback: cleanNonLoopback,
-            IsEnforced: isEnforced,
-            DhcpEnabled: isDhcp,
-          });
-        }
-      } else {
-        const indexes = targetAdapters.map((a) => a.InterfaceIndex);
-        const script = [
-          '$ErrorActionPreference = \'Stop\'',
-          `$indexes = @(${indexes.join(',')})`,
-          '$dnsConfigs = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $indexes -contains $_.InterfaceIndex })',
-          '$result = foreach ($d in $dnsConfigs) {',
-          '    $idx = [int]$d.InterfaceIndex',
-          '    $addrs = if ($d.ServerAddresses) { @($d.ServerAddresses) } else { @() }',
-          '    $has127 = $addrs -contains \'127.0.0.1\'',
-          '    $cleanAddrs = @($addrs | Where-Object { $_ -and $_ -notmatch \'^127\\.\' -and $_ -ne \'::1\' })',
-          '    $isDhcp = $true',
-          '    try {',
-          '        $adapter = @(Get-NetAdapter -InterfaceIndex $idx -ErrorAction SilentlyContinue)[0]',
-          '        if ($adapter -and $adapter.InterfaceGuid) {',
-          '            $regKey = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\$($adapter.InterfaceGuid)"',
-          '            if (Test-Path $regKey) {',
-          '                $props = Get-ItemProperty -Path $regKey -ErrorAction SilentlyContinue',
-          '                $ns = if ($props.NameServer) { [string]$props.NameServer } else { \'\' }',
-          '                if (-not [string]::IsNullOrWhiteSpace($ns) -and $ns -notmatch \'127\\.0\\.0\\.1\') {',
-          '                    $isDhcp = $false',
-          '                }',
-          '            }',
-          '        }',
-          '    } catch {}',
-          '    [PSCustomObject]@{',
-          '        InterfaceIndex = $idx',
-          '        InterfaceAlias = [string]$d.InterfaceAlias',
-          '        ServerAddresses = $addrs',
-          '        CleanNonLoopback = $cleanAddrs',
-          '        IsEnforced = $has127',
-          '        DhcpEnabled = $isDhcp',
-          '    }',
-          '}',
-          'if ($result.Count -gt 0) {',
-          '    $result | ConvertTo-Json -Compress',
-          '} else {',
-          '    \'[]\'',
-          '}',
-        ].join('\n');
-
-        const { stdout } = await this.executePowerShell(script);
-        const trimmed = stdout.trim();
-        if (trimmed && trimmed !== '[]' && trimmed !== 'null') {
-          const parsed = JSON.parse(trimmed);
-          const rawList = Array.isArray(parsed) ? parsed : [parsed];
-          for (const item of rawList) {
-            const addrs: string[] = Array.isArray(item.ServerAddresses)
-              ? item.ServerAddresses
-              : item.ServerAddresses
-              ? [item.ServerAddresses]
-              : [];
-            const clean: string[] = Array.isArray(item.CleanNonLoopback)
-              ? item.CleanNonLoopback
-              : item.CleanNonLoopback
-              ? [item.CleanNonLoopback]
-              : [];
-            states.push({
-              InterfaceIndex: Number(item.InterfaceIndex),
-              InterfaceAlias: String(item.InterfaceAlias || `Interface ${item.InterfaceIndex}`),
-              ServerAddresses: addrs,
-              CleanNonLoopback: clean,
-              IsEnforced: Boolean(item.IsEnforced),
-              DhcpEnabled: Boolean(item.DhcpEnabled),
-            });
-          }
-        }
+      // If any active adapter failed DNS inspection and no other adapters require re-enforcement,
+      // we CANNOT report IN_SYNC because overall protection cannot be verified. Return ERROR.
+      if (queryFailed.length > 0 && unenforced.length === 0) {
+        return {
+          status: 'ERROR',
+          enforcedIndexes: enforced.map((e) => e.InterfaceIndex),
+          unenforcedIndexes: queryFailed.map((q) => q.InterfaceIndex),
+          message: `DNS state query failed for active adapter(s): [${queryFailed
+            .map((q) => `${q.InterfaceAlias} (${q.InterfaceIndex})`)
+            .join(', ')}]. Overall enforcement cannot be verified.`,
+        };
       }
 
-      // Partition into enforced and unenforced
-      const enforced = states.filter((s) => s.IsEnforced);
-      const unenforced = states.filter((s) => !s.IsEnforced);
-
-      for (const target of targetAdapters) {
-        if (!states.some((s) => s.InterfaceIndex === target.InterfaceIndex)) {
-          unenforced.push({
-            InterfaceIndex: target.InterfaceIndex,
-            InterfaceAlias: target.InterfaceAlias,
-            ServerAddresses: [],
-            CleanNonLoopback: target.Gateway ? [target.Gateway] : [],
-            IsEnforced: false,
-            DhcpEnabled: true,
-          });
-        }
-      }
-
-      // If all active eligible adapters already have 127.0.0.1 enforced:
-      if (unenforced.length === 0) {
+      // If all active eligible adapters already have 127.0.0.1 enforced and NONE failed query:
+      if (unenforced.length === 0 && queryFailed.length === 0) {
         return {
           status: 'IN_SYNC',
           enforcedIndexes: enforced.map((e) => e.InterfaceIndex),
@@ -1542,13 +1634,29 @@ export class WindowsNetworkManager {
         await firewallEngine.initialize();
       }
 
-      const allEnforcedIndexes = targetAdapters.map((a) => a.InterfaceIndex);
+      const allEnforcedIndexes = [
+        ...enforced.map((e) => e.InterfaceIndex),
+        ...unenforced.map((u) => u.InterfaceIndex),
+      ];
       logServiceMessage(
         'INFO',
         `[NetworkManager] [OK] Reconciled and enforced ${unenforced.length} adapter(s) [${unenforced
           .map((u) => u.InterfaceIndex)
           .join(', ')}] with 127.0.0.1.`
       );
+
+      // If any active adapter failed DNS query, overall protection cannot be verified
+      // even if known unenforced adapters were re-enforced. Return ERROR so the system remains unverified.
+      if (queryFailed.length > 0) {
+        return {
+          status: 'ERROR',
+          enforcedIndexes: allEnforcedIndexes,
+          unenforcedIndexes: queryFailed.map((q) => q.InterfaceIndex),
+          message: `Re-enforced ${unenforced.length} adapter(s), but DNS state query failed for adapter(s): [${queryFailed
+            .map((q) => `${q.InterfaceAlias} (${q.InterfaceIndex})`)
+            .join(', ')}]. Overall enforcement cannot be verified.`,
+        };
+      }
 
       return {
         status: 'RE_ENFORCED',
@@ -1639,70 +1747,25 @@ export class WindowsNetworkManager {
       gateway?: string;
       dnsServers: string[];
       isEnforced: boolean;
+      queryStatus?: 'OK' | 'QUERY_FAILED';
     }> = [];
 
-    if (this.getPlatform() !== 'win32') {
-      for (const t of targetAdapters) {
-        const ma = this.mockAdapters
-          ? this.mockAdapters.find((a) => a.InterfaceIndex === t.InterfaceIndex)
-          : null;
-        const addrs = ma ? ma.ServerAddresses : ['127.0.0.1'];
-        const isEnforced = addrs.includes('127.0.0.1');
-        activeAdapters.push({
-          interfaceIndex: t.InterfaceIndex,
-          interfaceAlias: t.InterfaceAlias,
-          gateway: t.Gateway,
-          dnsServers: addrs,
-          isEnforced,
-        });
-      }
-    } else {
-      const indexes = targetAdapters.map((a) => a.InterfaceIndex);
-      const script = [
-        '$ErrorActionPreference = \'SilentlyContinue\'',
-        `$indexes = @(${indexes.join(',')})`,
-        '$dnsConfigs = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $indexes -contains $_.InterfaceIndex })',
-        '$result = foreach ($d in $dnsConfigs) {',
-        '    [PSCustomObject]@{',
-        '        InterfaceIndex = [int]$d.InterfaceIndex',
-        '        InterfaceAlias = [string]$d.InterfaceAlias',
-        '        ServerAddresses = if ($d.ServerAddresses) { @($d.ServerAddresses) } else { @() }',
-        '    }',
-        '}',
-        'if ($result.Count -gt 0) { $result | ConvertTo-Json -Compress } else { \'[]\' }',
-      ].join('\n');
+    // Query current DNS state for all eligible adapters using the shared helper.
+    // The helper queries each adapter directly by InterfaceIndex.
+    const dnsStates = await this.queryDnsStateForAdapters(targetAdapters);
 
-      const { stdout } = await this.executePowerShell(script);
-      const trimmed = stdout.trim();
-      const dnsMap = new Map<number, { alias: string; servers: string[] }>();
-      if (trimmed && trimmed !== '[]' && trimmed !== 'null') {
-        const parsed = JSON.parse(trimmed);
-        const rawList = Array.isArray(parsed) ? parsed : [parsed];
-        for (const item of rawList) {
-          const addrs = Array.isArray(item.ServerAddresses)
-            ? item.ServerAddresses
-            : item.ServerAddresses
-            ? [item.ServerAddresses]
-            : [];
-          dnsMap.set(Number(item.InterfaceIndex), {
-            alias: String(item.InterfaceAlias || `Interface ${item.InterfaceIndex}`),
-            servers: addrs,
-          });
-        }
-      }
-
-      for (const t of targetAdapters) {
-        const d = dnsMap.get(t.InterfaceIndex);
-        const servers = d ? d.servers : [];
-        const isEnforced = servers.includes('127.0.0.1');
-        activeAdapters.push({
-          interfaceIndex: t.InterfaceIndex,
-          interfaceAlias: t.InterfaceAlias,
-          gateway: t.Gateway,
-          dnsServers: servers,
-          isEnforced,
-        });
-      }
+    for (const state of dnsStates) {
+      const target = targetAdapters.find((t) => t.InterfaceIndex === state.InterfaceIndex);
+      // For QUERY_FAILED adapters: keep dnsServers as [] (real addresses only).
+      // queryStatus cleanly conveys the query state without putting diagnostic text into dnsServers.
+      activeAdapters.push({
+        interfaceIndex: state.InterfaceIndex,
+        interfaceAlias: state.InterfaceAlias,
+        gateway: target?.Gateway,
+        dnsServers: state.queryStatus === 'QUERY_FAILED' ? [] : state.ServerAddresses,
+        isEnforced: state.IsEnforced && state.queryStatus === 'OK',
+        queryStatus: state.queryStatus,
+      });
     }
 
     const isProtected = activeAdapters.length > 0 && activeAdapters.every((a) => a.isEnforced);

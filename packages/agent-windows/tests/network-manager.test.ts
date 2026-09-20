@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as dgram from 'dgram';
-import { WindowsNetworkManager, TargetAdapterInfo } from '../src/network-manager';
+import { WindowsNetworkManager, TargetAdapterInfo, AdapterDnsQueryResult } from '../src/network-manager';
 
 /**
  * Helper to spin up a local UDP server that immediately echoes standard DNS query responses.
@@ -1400,6 +1400,685 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       try {
         if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
       } catch {}
+    }
+  });
+
+  // ===========================================================================
+  // Regression tests for Run #14 physical defect:
+  // On Windows PowerShell 5.1, assigning a single PSCustomObject from foreach
+  // collapsed the output to a scalar whose .Count property was empty/null.
+  // The subsequent `if ($result.Count -gt 0)` evaluated false, outputting `[]`
+  // and causing SafeBrowse to endlessly re-enforce an already-protected adapter.
+  // Fix: direct querying, array-safe `@(foreach ...)` assignment, `@($results).Count`,
+  // and single-string ServerAddresses normalization.
+  // ===========================================================================
+
+  it('32. queryDnsStateForAdapters: single-address 127.0.0.1 string normalises to ["127.0.0.1"] and IsEnforced=true', async () => {
+    // Simulates PowerShell JSON where a single ServerAddresses value is emitted as a plain string
+    // (not an array), which is valid PowerShell 5.1 ConvertTo-Json behavior for one-element collections.
+    const backupPath = path.join(os.tmpdir(), 'sb-test-query-32-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    net.setCommandExecutorForTesting(async (_script: string) => ({
+      stdout: JSON.stringify({
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        ServerAddresses: '127.0.0.1',   // ← single string, not array (PS 5.1 behavior)
+        CleanNonLoopback: null,
+        IsEnforced: true,
+        DhcpEnabled: true,
+        QueryStatus: 'OK',
+      }),
+      stderr: '',
+    }));
+
+    const targets: TargetAdapterInfo[] = [
+      { InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Description: 'Wi-Fi', Gateway: '192.168.1.1', IpAddresses: ['192.168.1.8'] },
+    ];
+
+    try {
+      const result = await net.queryDnsStateForAdapters(targets);
+      assert.strictEqual(result.length, 1);
+      assert.deepStrictEqual(result[0].ServerAddresses, ['127.0.0.1'], 'Single string must be normalised to array');
+      assert.strictEqual(result[0].IsEnforced, true);
+      assert.strictEqual(result[0].queryStatus, 'OK');
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('33. queryDnsStateForAdapters: multi-address array ["1.1.1.1","8.8.8.8"] normalises correctly and IsEnforced=false', async () => {
+    const backupPath = path.join(os.tmpdir(), 'sb-test-query-33-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    net.setCommandExecutorForTesting(async (_script: string) => ({
+      stdout: JSON.stringify([{
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        ServerAddresses: ['1.1.1.1', '8.8.8.8'],
+        CleanNonLoopback: ['1.1.1.1', '8.8.8.8'],
+        IsEnforced: false,
+        DhcpEnabled: false,
+        QueryStatus: 'OK',
+      }]),
+      stderr: '',
+    }));
+
+    const targets: TargetAdapterInfo[] = [
+      { InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Description: 'Wi-Fi', Gateway: '192.168.1.1', IpAddresses: ['192.168.1.8'] },
+    ];
+
+    try {
+      const result = await net.queryDnsStateForAdapters(targets);
+      assert.strictEqual(result.length, 1);
+      assert.deepStrictEqual(result[0].ServerAddresses, ['1.1.1.1', '8.8.8.8']);
+      assert.strictEqual(result[0].IsEnforced, false);
+      assert.strictEqual(result[0].DhcpEnabled, false);
+      assert.strictEqual(result[0].queryStatus, 'OK');
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('34. queryDnsStateForAdapters: zero ServerAddresses returns [] (truly empty adapter)', async () => {
+    const backupPath = path.join(os.tmpdir(), 'sb-test-query-34-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    net.setCommandExecutorForTesting(async (_script: string) => ({
+      stdout: JSON.stringify([{
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        ServerAddresses: [],
+        CleanNonLoopback: [],
+        IsEnforced: false,
+        DhcpEnabled: true,
+        QueryStatus: 'OK',
+      }]),
+      stderr: '',
+    }));
+
+    const targets: TargetAdapterInfo[] = [
+      { InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Description: 'Wi-Fi', Gateway: '192.168.1.1', IpAddresses: ['192.168.1.8'] },
+    ];
+
+    try {
+      const result = await net.queryDnsStateForAdapters(targets);
+      assert.strictEqual(result.length, 1);
+      assert.deepStrictEqual(result[0].ServerAddresses, []);
+      assert.strictEqual(result[0].IsEnforced, false);
+      assert.strictEqual(result[0].queryStatus, 'OK');
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('35. queryDnsStateForAdapters: QUERY_FAILED when PS returns empty for a known-active adapter index', async () => {
+    // Simulates adapter DNS query failure: PS returns no row for the adapter.
+    // The helper returns queryStatus=QUERY_FAILED instead of silently treating as unenforced.
+    const backupPath = path.join(os.tmpdir(), 'sb-test-query-35-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    net.setCommandExecutorForTesting(async (_script: string) => ({
+      stdout: JSON.stringify([{
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Interface 6',
+        ServerAddresses: [],
+        CleanNonLoopback: [],
+        IsEnforced: false,
+        DhcpEnabled: true,
+        QueryStatus: 'QUERY_FAILED',   // ← explicit failure marker
+      }]),
+      stderr: '',
+    }));
+
+    const targets: TargetAdapterInfo[] = [
+      { InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Description: 'Wi-Fi', Gateway: '192.168.1.1', IpAddresses: ['192.168.1.8'] },
+    ];
+
+    try {
+      const result = await net.queryDnsStateForAdapters(targets);
+      assert.strictEqual(result.length, 1);
+      assert.strictEqual(result[0].queryStatus, 'QUERY_FAILED');
+      assert.strictEqual(result[0].IsEnforced, false);
+      assert.deepStrictEqual(result[0].ServerAddresses, []);
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('36. reconcileAdapters: already-enforced adapter (127.0.0.1) returns IN_SYNC with no Set-DnsClientServerAddress call', async () => {
+    // This is the exact physical regression: DNS was already 127.0.0.1 but reconciliation
+    // kept re-enforcing because the old -contains query returned empty.
+    const dnsServer = await createMockDnsServer();
+    const backupPath = path.join(os.tmpdir(), 'sb-test-reconcile-36-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    const executedCommands: string[] = [];
+    net.setCommandExecutorForTesting(async (script: string) => {
+      executedCommands.push(script);
+      // Route discovery
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify([{
+            InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Description: 'Intel Wi-Fi',
+            Gateway: '192.168.1.1', IPv4Addresses: ['192.168.1.8'],
+          }]),
+          stderr: '',
+        };
+      }
+      // Per-adapter DNS query — returns 127.0.0.1 already enforced, QueryStatus=OK
+      if (script.includes('Get-DnsClientServerAddress') && script.includes('[int]6')) {
+        return {
+          stdout: JSON.stringify([{
+            InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi',
+            ServerAddresses: ['127.0.0.1'],
+            CleanNonLoopback: [],
+            IsEnforced: true,
+            DhcpEnabled: true,
+            QueryStatus: 'OK',
+          }]),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    try {
+      const result = await net.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(result.status, 'IN_SYNC', 'Already-enforced adapter must report IN_SYNC');
+      const setDnsCalls = executedCommands.filter((c) => c.includes('Set-DnsClientServerAddress'));
+      assert.strictEqual(setDnsCalls.length, 0, 'No Set-DnsClientServerAddress must be invoked when already enforced');
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      await dnsServer.close();
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('37. reconcileAdapters: QUERY_FAILED for all adapters returns ERROR (never IN_SYNC) and zero Set-DnsClientServerAddress calls', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupPath = path.join(os.tmpdir(), 'sb-test-reconcile-37-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    const executedCommands: string[] = [];
+    net.setCommandExecutorForTesting(async (script: string) => {
+      executedCommands.push(script);
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify([{
+            InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Description: 'Intel Wi-Fi',
+            Gateway: '192.168.1.1', IPv4Addresses: ['192.168.1.8'],
+          }]),
+          stderr: '',
+        };
+      }
+      // DNS query returns QUERY_FAILED — simulates adapter query failure
+      if (script.includes('Get-DnsClientServerAddress')) {
+        return {
+          stdout: JSON.stringify([{
+            InterfaceIndex: 6, InterfaceAlias: 'Interface 6',
+            ServerAddresses: [], CleanNonLoopback: [],
+            IsEnforced: false, DhcpEnabled: true,
+            QueryStatus: 'QUERY_FAILED',
+          }]),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    try {
+      const result = await net.reconcileAdapters(dnsServer.port);
+      // Must not blindly re-enforce; must return ERROR, NEVER IN_SYNC
+      assert.strictEqual(result.status, 'ERROR', 'QUERY_FAILED for all adapters must return ERROR, never IN_SYNC');
+      assert.deepStrictEqual(result.unenforcedIndexes, [6]);
+      assert.ok(result.message.includes('DNS state query failed'));
+      const setDnsCalls = executedCommands.filter((c) => c.includes('Set-DnsClientServerAddress'));
+      assert.strictEqual(setDnsCalls.length, 0, 'No Set-DnsClientServerAddress when DNS query fails');
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      await dnsServer.close();
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('38. reconcileAdapters: hotspot external DNS 10.23.63.61 triggers exactly one RE_ENFORCED then next tick is IN_SYNC', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupPath = path.join(os.tmpdir(), 'sb-test-reconcile-38-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('linux');
+
+    const adapters = [{
+      InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Status: 'Up' as const,
+      IpAddresses: ['10.23.63.201'], Gateway: '10.23.63.1',
+      ServerAddresses: ['10.23.63.61'], DhcpEnabled: true,
+    }];
+    net.setMockAdaptersForTesting(adapters);
+
+    try {
+      // First tick: DNS is 10.23.63.61 — must RE_ENFORCE
+      const r1 = await net.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(r1.status, 'RE_ENFORCED');
+      assert.deepStrictEqual(adapters[0].ServerAddresses, ['127.0.0.1']);
+
+      // Second tick: DNS is now 127.0.0.1 — must be IN_SYNC
+      const r2 = await net.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(r2.status, 'IN_SYNC');
+    } finally {
+      net.setPlatformForTesting(null);
+      await dnsServer.close();
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('39. inspectCurrentEnforcement: adapter with 127.0.0.1 reports isProtected=true and summary="Protected"', async () => {
+    const backupPath = path.join(os.tmpdir(), 'sb-test-inspect-39-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    net.setCommandExecutorForTesting(async (script: string) => {
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify([{
+            InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Description: 'Intel Wi-Fi',
+            Gateway: '192.168.1.1', IPv4Addresses: ['192.168.1.8'],
+          }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-DnsClientServerAddress') && script.includes('[int]6')) {
+        return {
+          stdout: JSON.stringify([{
+            InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi',
+            ServerAddresses: ['127.0.0.1'],
+            CleanNonLoopback: [],
+            IsEnforced: true,
+            DhcpEnabled: true,
+            QueryStatus: 'OK',
+          }]),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    try {
+      const inspection = await net.inspectCurrentEnforcement();
+      assert.strictEqual(inspection.isProtected, true, 'Must report Protected when DNS is 127.0.0.1');
+      assert.strictEqual(inspection.summary, 'Protected');
+      assert.strictEqual(inspection.activeAdapters.length, 1);
+      assert.strictEqual(inspection.activeAdapters[0].isEnforced, true);
+      assert.deepStrictEqual(inspection.activeAdapters[0].dnsServers, ['127.0.0.1']);
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('40. inspectCurrentEnforcement and reconcileAdapters use the same queryDnsStateForAdapters helper (same PS script shape)', async () => {
+    // Verifies both callers emit the same -InterfaceIndex [int]N query shape,
+    // confirming they share the helper and are immune to the type-mismatch regression.
+    const dnsServer = await createMockDnsServer();
+    const backupPath = path.join(os.tmpdir(), 'sb-test-shared-40-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    const reconcileScripts: string[] = [];
+    const inspectScripts: string[] = [];
+    let phase: 'reconcile' | 'inspect' = 'reconcile';
+
+    const dnsResponse = JSON.stringify([{
+      InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi',
+      ServerAddresses: ['127.0.0.1'],
+      CleanNonLoopback: [],
+      IsEnforced: true,
+      DhcpEnabled: true,
+      QueryStatus: 'OK',
+    }]);
+    const routeResponse = JSON.stringify([{
+      InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Description: 'Intel Wi-Fi',
+      Gateway: '192.168.1.1', IPv4Addresses: ['192.168.1.8'],
+    }]);
+
+    net.setCommandExecutorForTesting(async (script: string) => {
+      if (script.includes('Get-NetRoute')) {
+        return { stdout: routeResponse, stderr: '' };
+      }
+      if (script.includes('Get-DnsClientServerAddress')) {
+        if (phase === 'reconcile') reconcileScripts.push(script);
+        else inspectScripts.push(script);
+        return { stdout: dnsResponse, stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    try {
+      phase = 'reconcile';
+      await net.reconcileAdapters(dnsServer.port);
+
+      phase = 'inspect';
+      await net.inspectCurrentEnforcement();
+
+      // Both must use -InterfaceIndex [int]6 (not the old -contains filter)
+      const reconcileDnsScript = reconcileScripts[0] || '';
+      const inspectDnsScript = inspectScripts[0] || '';
+
+      assert.ok(reconcileScripts.length > 0, 'reconcileAdapters must have captured a DNS script');
+      assert.ok(inspectScripts.length > 0, 'inspectCurrentEnforcement must have captured a DNS script');
+
+      assert.ok(
+        reconcileDnsScript.includes('[int]6') || reconcileDnsScript.includes('-InterfaceIndex'),
+        'reconcileAdapters DNS script must use explicit -InterfaceIndex query'
+      );
+      assert.ok(
+        inspectDnsScript.includes('[int]6') || inspectDnsScript.includes('-InterfaceIndex'),
+        'inspectCurrentEnforcement DNS script must use explicit -InterfaceIndex query'
+      );
+
+      // Verify array-safe result handling to prevent scalar .Count collapse
+      assert.ok(
+        reconcileDnsScript.includes('@($results).Count') || reconcileDnsScript.includes('$results = @('),
+        'reconcileAdapters DNS script must use array-safe Count handling'
+      );
+      assert.ok(
+        inspectDnsScript.includes('@($results).Count') || inspectDnsScript.includes('$results = @('),
+        'inspectCurrentEnforcement DNS script must use array-safe Count handling'
+      );
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      await dnsServer.close();
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+
+  it('41. queryDnsStateForAdapters: null ServerAddresses from PS normalises to [] (not null/undefined)', async () => {
+    const backupPath = path.join(os.tmpdir(), 'sb-test-query-41-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    net.setCommandExecutorForTesting(async (_script: string) => ({
+      stdout: JSON.stringify([{
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        ServerAddresses: null,   // PowerShell can emit null for empty collections in some PS versions
+        CleanNonLoopback: null,
+        IsEnforced: false,
+        DhcpEnabled: true,
+        QueryStatus: 'OK',
+      }]),
+      stderr: '',
+    }));
+
+    const targets: TargetAdapterInfo[] = [
+      { InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Description: 'Wi-Fi', Gateway: '192.168.1.1', IpAddresses: ['192.168.1.8'] },
+    ];
+
+    try {
+      const result = await net.queryDnsStateForAdapters(targets);
+      assert.strictEqual(result.length, 1);
+      assert.ok(Array.isArray(result[0].ServerAddresses), 'ServerAddresses must always be an array');
+      assert.deepStrictEqual(result[0].ServerAddresses, []);
+      assert.ok(Array.isArray(result[0].CleanNonLoopback), 'CleanNonLoopback must always be an array');
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('42. reconcileAdapters: ONE of multiple active adapters fails DNS query -> overall result is ERROR, never IN_SYNC', async () => {
+    // When one adapter's DNS query succeeds and is enforced, but another active adapter's
+    // DNS query fails, overall system protection cannot be verified. Must return ERROR, not IN_SYNC.
+    const dnsServer = await createMockDnsServer();
+    const backupPath = path.join(os.tmpdir(), 'sb-test-reconcile-42-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    const executedCommands: string[] = [];
+    net.setCommandExecutorForTesting(async (script: string) => {
+      executedCommands.push(script);
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify([
+            { InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Description: 'Intel Wi-Fi', Gateway: '192.168.1.1', IPv4Addresses: ['192.168.1.8'] },
+            { InterfaceIndex: 14, InterfaceAlias: 'Ethernet', Description: 'Realtek PCIe', Gateway: '10.0.0.1', IPv4Addresses: ['10.0.0.15'] },
+          ]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-DnsClientServerAddress')) {
+        // Wi-Fi (6) succeeds with 127.0.0.1; Ethernet (14) fails query
+        return {
+          stdout: JSON.stringify([
+            { InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['127.0.0.1'], CleanNonLoopback: [], IsEnforced: true, DhcpEnabled: true, QueryStatus: 'OK' },
+            { InterfaceIndex: 14, InterfaceAlias: 'Ethernet', ServerAddresses: [], CleanNonLoopback: [], IsEnforced: false, DhcpEnabled: true, QueryStatus: 'QUERY_FAILED' },
+          ]),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    try {
+      const result = await net.reconcileAdapters(dnsServer.port);
+      // Overall status must be ERROR because Ethernet could not be verified
+      assert.strictEqual(result.status, 'ERROR', 'Partial query failure must return ERROR, never IN_SYNC');
+      assert.deepStrictEqual(result.enforcedIndexes, [6]);
+      assert.deepStrictEqual(result.unenforcedIndexes, [14]);
+      assert.ok(result.message.includes('DNS state query failed'));
+
+      // No blind rewrite of the failed adapter
+      const setDnsCalls = executedCommands.filter((c) => c.includes('Set-DnsClientServerAddress'));
+      assert.strictEqual(setDnsCalls.length, 0, 'No Set-DnsClientServerAddress calls on query failure');
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      await dnsServer.close();
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('43. inspectCurrentEnforcement: QUERY_FAILED adapter sets isProtected=false and surfaces [DNS_QUERY_FAILED]', async () => {
+    const backupPath = path.join(os.tmpdir(), 'sb-test-inspect-43-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    net.setCommandExecutorForTesting(async (script: string) => {
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify([{
+            InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Description: 'Intel Wi-Fi',
+            Gateway: '192.168.1.1', IPv4Addresses: ['192.168.1.8'],
+          }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-DnsClientServerAddress')) {
+        return {
+          stdout: JSON.stringify([{
+            InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi',
+            ServerAddresses: [], CleanNonLoopback: [],
+            IsEnforced: false, DhcpEnabled: true,
+            QueryStatus: 'QUERY_FAILED',
+          }]),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    try {
+      const inspection = await net.inspectCurrentEnforcement();
+      assert.strictEqual(inspection.isProtected, false, 'QUERY_FAILED must not report Protected');
+      assert.strictEqual(inspection.summary, 'DNS not redirected');
+      assert.strictEqual(inspection.activeAdapters.length, 1);
+      assert.strictEqual(inspection.activeAdapters[0].isEnforced, false);
+      // queryStatus is set to QUERY_FAILED, and dnsServers remains clean [] (DNS IP addresses only)
+      assert.strictEqual(inspection.activeAdapters[0].queryStatus, 'QUERY_FAILED');
+      assert.deepStrictEqual(inspection.activeAdapters[0].dnsServers, []);
+      assert.strictEqual(inspection.activeAdapters[0].interfaceAlias, 'Wi-Fi');
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('44. reconcileAdapters: stable protected network produces zero DNS writes and skips redundant firewall initialization', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupPath = path.join(os.tmpdir(), 'sb-test-reconcile-44-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    const executedCommands: string[] = [];
+    net.setCommandExecutorForTesting(async (script: string) => {
+      executedCommands.push(script);
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify([{
+            InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Description: 'Intel Wi-Fi',
+            Gateway: '192.168.1.1', IPv4Addresses: ['192.168.1.8'],
+          }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-DnsClientServerAddress')) {
+        return {
+          stdout: JSON.stringify([{
+            InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi',
+            ServerAddresses: ['127.0.0.1'], CleanNonLoopback: [],
+            IsEnforced: true, DhcpEnabled: true,
+            QueryStatus: 'OK',
+          }]),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    try {
+      // Tick 1
+      const r1 = await net.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(r1.status, 'IN_SYNC');
+      assert.deepStrictEqual(r1.enforcedIndexes, [6]);
+
+      // Tick 2
+      const r2 = await net.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(r2.status, 'IN_SYNC');
+      assert.deepStrictEqual(r2.enforcedIndexes, [6]);
+
+      // Across both ticks, zero Set-DnsClientServerAddress calls
+      const setDnsCalls = executedCommands.filter((c) => c.includes('Set-DnsClientServerAddress'));
+      assert.strictEqual(setDnsCalls.length, 0, 'Zero DNS writes on stable protected network');
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      await dnsServer.close();
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('45. proven root cause: single-adapter scalar PSCustomObject from ConvertTo-Json parses into 1-element array with normalized DNS', async () => {
+    // When PowerShell 5.1 converts a single PSCustomObject (not an array), ConvertTo-Json emits a raw
+    // JSON object: {"InterfaceIndex":6,"InterfaceAlias":"Wi-Fi","ServerAddresses":"127.0.0.1",...}
+    // queryDnsStateForAdapters must handle this scalar object correctly and normalize ServerAddresses to ["127.0.0.1"].
+    const backupPath = path.join(os.tmpdir(), 'sb-test-scalar-45-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    net.setCommandExecutorForTesting(async (_script: string) => ({
+      // Real PowerShell 5.1 output on DIC Windows laptop: single object, scalar ServerAddresses string
+      stdout: JSON.stringify({
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        ServerAddresses: '127.0.0.1',
+        CleanNonLoopback: [],
+        IsEnforced: true,
+        DhcpEnabled: true,
+        QueryStatus: 'OK',
+      }),
+      stderr: '',
+    }));
+
+    const targets: TargetAdapterInfo[] = [
+      { InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Description: 'Wi-Fi', Gateway: '192.168.1.1', IpAddresses: ['192.168.1.8'] },
+    ];
+
+    try {
+      const results = await net.queryDnsStateForAdapters(targets);
+      assert.strictEqual(results.length, 1);
+      assert.strictEqual(results[0].InterfaceIndex, 6);
+      assert.deepStrictEqual(results[0].ServerAddresses, ['127.0.0.1']);
+      assert.strictEqual(results[0].IsEnforced, true);
+      assert.strictEqual(results[0].queryStatus, 'OK');
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('46. generated PowerShell scripts audit: array assignment @(...) and @().Count prevents scalar .Count collapse', async () => {
+    // Audit that queryDnsStateForAdapters script syntax guards against the proven PS 5.1 foreach scalar collapse
+    const backupPath = path.join(os.tmpdir(), 'sb-test-audit-46-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+
+    let capturedScript = '';
+    net.setCommandExecutorForTesting(async (script: string) => {
+      capturedScript = script;
+      return {
+        stdout: JSON.stringify([{
+          InterfaceIndex: 6,
+          InterfaceAlias: 'Wi-Fi',
+          ServerAddresses: ['127.0.0.1'],
+          CleanNonLoopback: [],
+          IsEnforced: true,
+          DhcpEnabled: true,
+          QueryStatus: 'OK',
+        }]),
+        stderr: '',
+      };
+    });
+
+    const targets: TargetAdapterInfo[] = [
+      { InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Description: 'Wi-Fi', Gateway: '192.168.1.1', IpAddresses: ['192.168.1.8'] },
+    ];
+
+    try {
+      await net.queryDnsStateForAdapters(targets);
+      // Must use @(foreach ...) assignment and @($results).Count check
+      assert.ok(
+        capturedScript.includes('$results = @('),
+        'PowerShell script must use $results = @( to avoid scalar .Count collapse'
+      );
+      assert.ok(
+        capturedScript.includes('@($results).Count -gt 0'),
+        'PowerShell script must use @($results).Count -gt 0'
+      );
+    } finally {
+      net.setPlatformForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
     }
   });
 });

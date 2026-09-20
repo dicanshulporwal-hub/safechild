@@ -428,7 +428,12 @@ async function showStatus(): Promise<void> {
       } else {
         const unenforced = inspection.activeAdapters
           .filter((a) => !a.isEnforced)
-          .map((a) => `${a.interfaceAlias} [${a.dnsServers.join(', ') || 'NONE'}]`)
+          .map((a) => {
+            if (a.queryStatus === 'QUERY_FAILED') {
+              return `${a.interfaceAlias} [DNS_QUERY_FAILED]`;
+            }
+            return `${a.interfaceAlias} [${a.dnsServers.join(', ') || 'NONE'}]`;
+          })
           .join('; ');
         console.log(`  DNS Redirect:  NOT ACTIVE (Active adapter(s) not redirected: ${unenforced})`);
         console.log(`  Parent Status: Temporarily limited (DNS Not Redirected)`);
