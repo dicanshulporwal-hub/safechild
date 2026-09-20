@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as dgram from 'dgram';
 import { WindowsNetworkManager, TargetAdapterInfo, AdapterDnsQueryResult } from '../src/network-manager';
+import { computeEngineStatus } from '../src/agent-cli';
 
 /**
  * Helper to spin up a local UDP server that immediately echoes standard DNS query responses.
@@ -2078,6 +2079,146 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
     } finally {
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('47. concurrent reconcile: active execution causes concurrent call to return SKIPPED (never IN_SYNC)', async () => {
+    const backupPath = path.join(os.tmpdir(), 'sb-test-concurrent-47-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('linux');
+
+    try {
+      // Simulate isReconciling lock held by an in-flight operation
+      (net as any).isReconciling = true;
+      const res = await net.reconcileAdapters(53);
+      assert.strictEqual(res.status, 'SKIPPED');
+      assert.notStrictEqual(res.status, 'IN_SYNC', 'Concurrent reconcile must never return IN_SYNC');
+      assert.ok(res.message.includes('skipped'));
+    } finally {
+      (net as any).isReconciling = false;
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('48. reconciliation loop: slow reconciliation overlapping with timer ticks does NOT emit onStateChange for skipped ticks', async () => {
+    const backupPath = path.join(os.tmpdir(), 'sb-test-loop-48-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('linux');
+
+    const callbacks: Array<{ success: boolean; reason?: string }> = [];
+    try {
+      // Hold isReconciling lock while startReconciliationLoop is running
+      (net as any).isReconciling = true;
+      net.startReconciliationLoop(53, 20, (success, reason) => {
+        callbacks.push({ success, reason });
+      });
+
+      // Allow several timer ticks to fire while isReconciling is held
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      // Must be ZERO callbacks emitted because all overlapping ticks are skipped
+      assert.strictEqual(callbacks.length, 0, 'Skipped/busy ticks must emit zero state change callbacks');
+    } finally {
+      net.stopReconciliationLoop();
+      (net as any).isReconciling = false;
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('49. NO_NETWORK_ROUTE invariant: slow reconciliation with no route emits NO_NETWORK_ROUTE, while overlapping ticks emit zero false success callbacks', async () => {
+    const backupPath = path.join(os.tmpdir(), 'sb-test-no-route-49-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('linux');
+    net.setMockAdaptersForTesting([]); // No active internet-facing route
+
+    const callbacks: Array<{ success: boolean; reason?: string }> = [];
+    try {
+      net.startReconciliationLoop(53, 25, (success, reason) => {
+        callbacks.push({ success, reason });
+      });
+
+      // Wait for multiple ticks
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // All emitted callbacks must be false / NO_NETWORK_ROUTE
+      assert.ok(callbacks.length > 0, 'Should have received at least one callback');
+      for (const cb of callbacks) {
+        assert.strictEqual(cb.success, false, 'No callback must report success during no-network');
+        assert.strictEqual(cb.reason, 'NO_NETWORK_ROUTE');
+      }
+    } finally {
+      net.stopReconciliationLoop();
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('50. no-network engine status stability: policy changes while NO_NETWORK_ROUTE is held keep engine DEGRADED_NO_NETWORK', () => {
+    // Verifies the state invariant: policy changes (POLICY_LIVE <-> POLICY_CACHED) do not
+    // override DEGRADED_NO_NETWORK because network connectivity is not verified.
+    const sLive = computeEngineStatus(false, 'NO_NETWORK_ROUTE', 'POLICY_LIVE');
+    assert.strictEqual(sLive, 'DEGRADED_NO_NETWORK');
+
+    const sCached = computeEngineStatus(false, 'NO_NETWORK_ROUTE', 'POLICY_CACHED');
+    assert.strictEqual(sCached, 'DEGRADED_NO_NETWORK');
+
+    const sUnavail = computeEngineStatus(false, 'NO_NETWORK_ROUTE', 'POLICY_UNAVAILABLE');
+    assert.strictEqual(sUnavail, 'DEGRADED_NO_NETWORK');
+  });
+
+  it('51. network reconnect: returns RE_ENFORCED on external DNS, subsequent tick returns IN_SYNC', async () => {
+    const dnsServer = await createMockDnsServer();
+    const backupPath = path.join(os.tmpdir(), 'sb-test-reconnect-51-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('linux');
+
+    const adapters = [{
+      InterfaceIndex: 6,
+      InterfaceAlias: 'Wi-Fi',
+      Status: 'Up' as const,
+      IpAddresses: ['192.168.1.50'],
+      Gateway: '192.168.1.1',
+      ServerAddresses: ['192.168.1.1'],
+      DhcpEnabled: true,
+    }];
+    net.setMockAdaptersForTesting(adapters);
+
+    try {
+      // Reconnect tick: external DNS -> RE_ENFORCED
+      const r1 = await net.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(r1.status, 'RE_ENFORCED');
+      assert.deepStrictEqual(adapters[0].ServerAddresses, ['127.0.0.1']);
+
+      // Subsequent tick: already at 127.0.0.1 -> IN_SYNC
+      const r2 = await net.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(r2.status, 'IN_SYNC');
+    } finally {
+      net.setPlatformForTesting(null);
+      await dnsServer.close();
+      try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('52. timer lifecycle safety: duplicate start clears previous timer, stopReconciliationLoop leaves no open handles', () => {
+    const backupPath = path.join(os.tmpdir(), 'sb-test-timer-52-' + Date.now() + '.json');
+    const net = new WindowsNetworkManager(backupPath);
+
+    try {
+      net.startReconciliationLoop(53, 5000);
+      const timer1 = net.getReconcileTimerForTesting();
+      assert.ok(timer1 !== null, 'Timer must be active');
+
+      // Duplicate start must replace timer without leaking
+      net.startReconciliationLoop(53, 5000);
+      const timer2 = net.getReconcileTimerForTesting();
+      assert.ok(timer2 !== null, 'Timer must be active after duplicate start');
+      assert.notStrictEqual(timer1, timer2, 'New timer instance must replace previous');
+
+      // Clean stop
+      net.stopReconciliationLoop();
+      assert.strictEqual(net.getReconcileTimerForTesting(), null, 'Timer must be cleared after stop');
+    } finally {
+      net.stopReconciliationLoop();
       try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
     }
   });

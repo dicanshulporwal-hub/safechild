@@ -1962,7 +1962,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
       // Simulate a concurrent call while isReconciling is already held
       (nm as any).isReconciling = true;
       const skipped = await nm.reconcileAdapters(dnsServer.port);
-      assert.strictEqual(skipped.status, 'IN_SYNC');
+      assert.strictEqual(skipped.status, 'SKIPPED', 'Concurrent call must return SKIPPED, never IN_SYNC');
       assert.ok(skipped.message.includes('skipped'));
     } finally {
       (nm as any).isReconciling = false;

@@ -99,7 +99,7 @@ export interface ActivationRetryOptions {
 }
 
 export interface ReconcileResult {
-  status: 'IN_SYNC' | 'RE_ENFORCED' | 'NO_NETWORK_ROUTE' | 'ERROR';
+  status: 'IN_SYNC' | 'RE_ENFORCED' | 'NO_NETWORK_ROUTE' | 'ERROR' | 'SKIPPED';
   enforcedIndexes: number[];
   unenforcedIndexes: number[];
   message: string;
@@ -1454,7 +1454,7 @@ export class WindowsNetworkManager {
 
     if (this.isReconciling) {
       return {
-        status: 'IN_SYNC',
+        status: 'SKIPPED',
         enforcedIndexes: [],
         unenforcedIndexes: [],
         message: 'Reconciliation tick skipped: previous cycle still active',
@@ -1684,9 +1684,17 @@ export class WindowsNetworkManager {
 
     this.reconcileTimer = setInterval(async () => {
       if (this.isShuttingDown || this.isRestoring) return;
+      // Prevent timer overlap early: skip interval tick if previous cycle is still executing
+      if (this.isReconciling) return;
       try {
         const result = await this.reconcileAdapters(dnsPort);
         if (this.isShuttingDown || this.isRestoring) return;
+
+        // Defense-in-depth: SKIPPED represents busy / no-new-information.
+        // Never call onStateChange(true) or onStateChange(false); preserve last verified state.
+        if (result.status === 'SKIPPED') {
+          return;
+        }
 
         if (result.status === 'IN_SYNC' || result.status === 'RE_ENFORCED') {
           if (onStateChange) onStateChange(true, undefined);
