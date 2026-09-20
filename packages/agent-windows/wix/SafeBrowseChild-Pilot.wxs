@@ -28,12 +28,7 @@
               Type="ownProcess"
               Start="auto"
               ErrorControl="normal"
-              Account="LocalSystem">
-            <ServiceConfig
-                DelayedAutoStart="yes"
-                OnInstall="yes"
-                OnReinstall="yes" />
-          </ServiceInstall>
+              Account="LocalSystem" />
           <ServiceControl
               Id="ControlSafeBrowseService"
               Name="SafeBrowseChildService"

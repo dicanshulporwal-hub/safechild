@@ -105,10 +105,16 @@ async function pairDevice(args: string[]): Promise<void> {
 }
 
 export type EngineOperationalStatus =
+  | 'BOOT_RECOVERY'
+  | 'WAITING_FOR_NETWORK'
+  | 'DNS_PROXY_STARTING'
+  | 'DNS_PROXY_HEALTHY'
+  | 'ENFORCING'
   | 'ACTIVE'
   | 'DEGRADED_NO_NETWORK'
   | 'DEGRADED_POLICY_UNAVAILABLE'
   | 'DEGRADED_DNS_NOT_ENFORCED'
+  | 'DEGRADED_RESOLVER_UNHEALTHY'
   | 'OFFLINE_BACKEND_CACHED_POLICY'
   | 'STOPPING'
   | 'RESTORING_NETWORK';
@@ -121,6 +127,9 @@ export function computeEngineStatus(
   if (!netSuccess) {
     if (netReason === 'NO_NETWORK_ROUTE') {
       return 'DEGRADED_NO_NETWORK';
+    }
+    if (netReason === 'DNS_PROXY_HEALTH_CHECK_FAILED' || netReason === 'RESOLVER_UNHEALTHY') {
+      return 'DEGRADED_RESOLVER_UNHEALTHY';
     }
     return 'DEGRADED_DNS_NOT_ENFORCED';
   }
@@ -137,12 +146,17 @@ export function isEnforcementActive(
   engineStatus: EngineOperationalStatus,
   hasUsablePolicy: boolean
 ): boolean {
-  if (engineStatus === 'STOPPING' || engineStatus === 'RESTORING_NETWORK') {
-    return false;
-  }
   if (
+    engineStatus === 'STOPPING' ||
+    engineStatus === 'RESTORING_NETWORK' ||
+    engineStatus === 'BOOT_RECOVERY' ||
+    engineStatus === 'WAITING_FOR_NETWORK' ||
+    engineStatus === 'DNS_PROXY_STARTING' ||
+    engineStatus === 'DNS_PROXY_HEALTHY' ||
+    engineStatus === 'ENFORCING' ||
     engineStatus === 'DEGRADED_NO_NETWORK' ||
     engineStatus === 'DEGRADED_DNS_NOT_ENFORCED' ||
+    engineStatus === 'DEGRADED_RESOLVER_UNHEALTHY' ||
     engineStatus === 'DEGRADED_POLICY_UNAVAILABLE'
   ) {
     return false;
@@ -223,6 +237,13 @@ async function runServiceMode(): Promise<void> {
     });
   }
 
+  // 0. Perform boot safety recovery for any stale 127.0.0.1 DNS before normal enforcement
+  currentEngineStatus = 'BOOT_RECOVERY';
+  const bootRecovery = await networkManager.recoverStaleDnsAtBoot(53);
+  if (bootRecovery.recovered) {
+    logServiceMessage('INFO', `[SafeBrowse Service] [OK] Boot safety recovery: ${bootRecovery.message}`);
+  }
+
   // Await valid pairing credentials if not yet paired
   let config = await configManager.loadDeviceConfig();
   while (!config) {
@@ -259,18 +280,24 @@ async function runServiceMode(): Promise<void> {
   blockServer = new BlockPageServer(config.backendUrl, config.childId, config.deviceId);
   await blockServer.start(8880);
 
-  // 3. Initialize DNS Filter Proxy on port 53
-  dnsProxy = new DnsFilterProxy(() => syncClient!.getActivePolicy(), '1.1.1.1', 53);
+  // 3. Initialize DNS Filter Proxy on port 53 with physical network's upstream DNS
+  currentEngineStatus = 'DNS_PROXY_STARTING';
+  const initialUpstreams = await networkManager.getUpstreamDnsServers();
+  dnsProxy = new DnsFilterProxy(() => syncClient!.getActivePolicy(), initialUpstreams[0] || '1.1.1.1', 53);
+  dnsProxy.setUpstreams(initialUpstreams);
   let activeDnsPort = 53;
   try {
     activeDnsPort = await dnsProxy.start(53);
-    logServiceMessage('INFO', `[SafeBrowse Service] DNS Proxy listening on UDP 127.0.0.1:${activeDnsPort}`);
+    logServiceMessage('INFO', `[SafeBrowse Service] DNS Proxy listening on UDP 127.0.0.1:${activeDnsPort} (Upstreams: ${initialUpstreams.join(', ')})`);
   } catch (err: any) {
     logServiceMessage('WARN', `[SafeBrowse Service] Port 53 bind notice (${err.message}). Starting on fallback port 5353.`);
     activeDnsPort = await dnsProxy.start(5353);
   }
 
+  currentEngineStatus = 'DNS_PROXY_HEALTHY';
+
   // 4. Fail-Safe Network DNS Activation (Initial Attempt)
+  currentEngineStatus = 'ENFORCING';
   const netActivation = await networkManager.activateFailSafeDns(activeDnsPort, 1);
   lastNetSuccess = netActivation.success;
   lastNetReason = netActivation.reason;
@@ -319,7 +346,15 @@ async function runServiceMode(): Promise<void> {
   logServiceMessage('INFO', '--------------------------------------------------');
 
   // 6. Start Persistent Network Reconciliation Loop (every 3000ms)
-  networkManager.startReconciliationLoop(activeDnsPort, 3000, (success, reason) => {
+  networkManager.startReconciliationLoop(activeDnsPort, 3000, async (success, reason) => {
+    // Dynamically update upstream DNS servers if physical network DNS changed
+    try {
+      const currentUpstreams = await networkManager.getUpstreamDnsServers();
+      if (dnsProxy) {
+        dnsProxy.setUpstreams(currentUpstreams);
+      }
+    } catch {}
+
     if (lastNetSuccess !== success || lastNetReason !== reason) {
       lastNetSuccess = success;
       lastNetReason = reason;

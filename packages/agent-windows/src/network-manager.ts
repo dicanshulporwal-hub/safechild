@@ -56,6 +56,7 @@ export type ActivationReasonCode =
   | 'NO_NETWORK_ROUTE'
   | 'DISCOVERY_COMMAND_FAILED'
   | 'DNS_PROXY_HEALTH_CHECK_FAILED'
+  | 'POST_ACTIVATION_RESOLUTION_FAILED'
   | 'DNS_ASSIGNMENT_FAILED'
   | 'READBACK_MISMATCH'
   | 'CRITICAL_ROLLBACK_FAILED';
@@ -157,6 +158,10 @@ export class WindowsNetworkManager {
   private isRestoring = false;
   private reconcileTimer: NodeJS.Timeout | null = null;
   private mockAdapters: MockAdapterState[] | null = null;
+  private upstreamResolutionChecker: ((port: number, domain: string) => Promise<boolean>) | null = null;
+  private postAssignmentProbeOverride: ((port: number) => Promise<boolean>) | null = null;
+  private consecutiveHealthFailures = 0;
+  private maxConsecutiveHealthFailures = 3;
 
   constructor(customBackupFile?: string) {
     this.backupFile = customBackupFile || configManager.getNetworkBackupFilePath();
@@ -172,6 +177,26 @@ export class WindowsNetworkManager {
 
   public setMockAdaptersForTesting(adapters: MockAdapterState[] | null): void {
     this.mockAdapters = adapters;
+  }
+
+  public setUpstreamResolutionCheckerForTesting(
+    checker: ((port: number, domain: string) => Promise<boolean>) | null
+  ): void {
+    this.upstreamResolutionChecker = checker;
+  }
+
+  public setPostAssignmentProbeForTesting(
+    probe: ((port: number) => Promise<boolean>) | null
+  ): void {
+    this.postAssignmentProbeOverride = probe;
+  }
+
+  public setMaxConsecutiveHealthFailuresForTesting(count: number): void {
+    this.maxConsecutiveHealthFailures = Math.max(1, count);
+  }
+
+  public getConsecutiveHealthFailuresForTesting(): number {
+    return this.consecutiveHealthFailures;
   }
 
   public setShuttingDown(shuttingDown: boolean): void {
@@ -196,6 +221,153 @@ export class WindowsNetworkManager {
 
   public getBackupFilePath(): string {
     return this.backupFile;
+  }
+
+  /**
+   * Verifies end-to-end resolver health: confirms local proxy responds AND upstream
+   * DNS resolution path is operational.
+   */
+  public async verifyEndToEndResolverHealth(
+    dnsPort: number = 53,
+    options?: { timeoutMs?: number; probeDomain?: string }
+  ): Promise<boolean> {
+    const probeDomain = options?.probeDomain || 'health.safebrowse.local';
+    const timeoutMs = options?.timeoutMs || 2500;
+
+    if (this.upstreamResolutionChecker) {
+      return await this.upstreamResolutionChecker(dnsPort, probeDomain);
+    }
+
+    return await this.verifyDnsProxyResponding(dnsPort, timeoutMs);
+  }
+
+  /**
+   * Discovers clean non-loopback DNS servers from currently active adapters or backup.
+   * Strictly filters out loopback addresses (127.*, ::1, localhost) to prevent forwarding loops.
+   */
+  public async getUpstreamDnsServers(): Promise<string[]> {
+    const cleanServers: string[] = [];
+
+    // 1. Check target adapters currently discovered
+    try {
+      const discovery = await this.discoverTargetAdapters(true);
+      if (discovery.adapters.length > 0) {
+        const dnsStates = await this.queryDnsStateForAdapters(discovery.adapters);
+        for (const s of dnsStates) {
+          for (const addr of s.CleanNonLoopback || []) {
+            if (addr && !cleanServers.includes(addr)) {
+              cleanServers.push(addr);
+            }
+          }
+        }
+      }
+    } catch {}
+
+    // 2. Check backup file if no servers found yet
+    if (cleanServers.length === 0 && fs.existsSync(this.backupFile)) {
+      try {
+        const raw = fs.readFileSync(this.backupFile, 'utf8');
+        const list: AdapterDnsBackup[] = JSON.parse(raw);
+        if (Array.isArray(list)) {
+          for (const b of list) {
+            for (const addr of b.ServerAddresses || []) {
+              if (
+                addr &&
+                !addr.startsWith('127.') &&
+                addr !== '::1' &&
+                !cleanServers.includes(addr)
+              ) {
+                cleanServers.push(addr);
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+
+    // Filter strictly to ensure no loopback
+    const valid = cleanServers.filter(
+      (ip) => ip && !ip.startsWith('127.') && ip !== '::1' && ip.toLowerCase() !== 'localhost'
+    );
+
+    return valid.length > 0 ? valid : ['1.1.1.1'];
+  }
+
+  /**
+   * Boot-time safety pre-flight: detects any stale 127.0.0.1 DNS left from an earlier process or boot.
+   * If detected while the SafeBrowse local resolver is not healthy/running, immediately restores the adapter
+   * to its original/DHCP configuration BEFORE normal child enforcement begins.
+   * Strictly excludes Tailscale, loopback, APIPA, and disconnected adapters.
+   */
+  public async recoverStaleDnsAtBoot(dnsPort: number = 53): Promise<{
+    recovered: boolean;
+    message: string;
+    restoredAdapters: number[];
+  }> {
+    logServiceMessage('INFO', '[NetworkManager] Performing boot-time stale DNS pre-flight check...');
+
+    // 1. Discover target adapters (route-based; excludes Tailscale, loopback, APIPA, disconnected)
+    const discovery = await this.discoverTargetAdapters(true);
+    const targetAdapters = discovery.adapters;
+
+    if (targetAdapters.length === 0) {
+      logServiceMessage('INFO', '[NetworkManager] Boot pre-flight: No active default-route adapters found.');
+      return {
+        recovered: false,
+        message: 'No active default-route adapters found at boot',
+        restoredAdapters: [],
+      };
+    }
+
+    // 2. Query DNS configuration on target adapters
+    const dnsStates = await this.queryDnsStateForAdapters(targetAdapters);
+    const staleAdapters = dnsStates.filter((s) => s.IsEnforced);
+
+    if (staleAdapters.length === 0) {
+      logServiceMessage('INFO', '[NetworkManager] [OK] Boot pre-flight: No stale 127.0.0.1 DNS found. Network is clean.');
+      return {
+        recovered: false,
+        message: 'No stale 127.0.0.1 DNS found at boot',
+        restoredAdapters: [],
+      };
+    }
+
+    // 3. Check if resolver is already running and healthy (e.g. fast restart of Node)
+    const isResolverHealthy = await this.verifyEndToEndResolverHealth(dnsPort, { timeoutMs: 1000 });
+    if (isResolverHealthy) {
+      logServiceMessage(
+        'INFO',
+        `[NetworkManager] Boot pre-flight: 127.0.0.1 detected on adapter(s) [${staleAdapters
+          .map((a) => a.InterfaceIndex)
+          .join(', ')}], but verified SafeBrowse resolver is already operational. Preserving active protection.`
+      );
+      return {
+        recovered: false,
+        message: 'SafeBrowse resolver already operational at boot; preserving active protection',
+        restoredAdapters: [],
+      };
+    }
+
+    // 4. Stale 127.0.0.1 detected with no resolver! Recover to original/DHCP DNS immediately
+    logServiceMessage(
+      'WARN',
+      `[NetworkManager] [WARN] Boot pre-flight detected STALE 127.0.0.1 DNS on adapter(s) [${staleAdapters
+        .map((a) => `${a.InterfaceAlias} (${a.InterfaceIndex})`)
+        .join(', ')}] without active resolver. Restoring to original/DHCP DNS before enforcement...`
+    );
+
+    await this.restoreOriginalDns();
+
+    logServiceMessage(
+      'INFO',
+      `[NetworkManager] [OK] Boot pre-flight successfully recovered ${staleAdapters.length} adapter(s) to original/DHCP DNS.`
+    );
+
+    return {
+      recovered: true,
+      message: `Recovered ${staleAdapters.length} adapter(s) from stale 127.0.0.1 to original/DHCP configuration at boot`,
+      restoredAdapters: staleAdapters.map((a) => a.InterfaceIndex),
+    };
   }
 
   private defaultExecutor: NetworkCommandExecutor = async (script: string) => {
@@ -236,7 +408,7 @@ export class WindowsNetworkManager {
           const idx = ma.InterfaceIndex;
           const nextHop = ma.Gateway || '';
           const status = ma.Status || 'Up';
-          const ips = ma.IpAddresses || [];
+          const ips = ma.IpAddresses !== undefined ? ma.IpAddresses : (nextHop ? ['192.168.1.8'] : []);
           let rejectionReason: string | undefined;
 
           if (!nextHop || nextHop === '0.0.0.0' || nextHop === '::') {
@@ -1064,12 +1236,12 @@ export class WindowsNetworkManager {
       logServiceMessage('INFO', `[NetworkManager] Verified existing DNS backup at: ${this.backupFile}`);
     }
 
-    // 3. Confirm 127.0.0.1:53 DNS proxy responds
-    logServiceMessage('INFO', `[NetworkManager] Testing 127.0.0.1:${dnsPort} local resolver response...`);
-    const isResponding = await this.verifyDnsProxyResponding(dnsPort);
+    // 3. Confirm 127.0.0.1:53 DNS proxy responds and upstream resolution is operational
+    logServiceMessage('INFO', `[NetworkManager] Testing 127.0.0.1:${dnsPort} local resolver and upstream resolution...`);
+    const isResponding = await this.verifyEndToEndResolverHealth(dnsPort);
     if (!isResponding) {
-      const errReason = `Local DNS proxy on port ${dnsPort} failed health probe. Original network DNS untouched.`;
-      logServiceMessage('ERROR', `[NetworkManager] [ERROR] Fail-safe abort: 127.0.0.1:${dnsPort} is NOT answering DNS queries.`);
+      const errReason = `Local DNS proxy or upstream resolution on port ${dnsPort} failed health probe. Original network DNS untouched.`;
+      logServiceMessage('ERROR', `[NetworkManager] [ERROR] Fail-safe abort: 127.0.0.1:${dnsPort} or upstream DNS is NOT answering.`);
       logServiceMessage('ERROR', '[NetworkManager] Preserving original network adapter DNS to prevent connectivity loss.');
       return {
         success: false,
@@ -1079,7 +1251,7 @@ export class WindowsNetworkManager {
         discoveryMethod: discovery.method,
       };
     }
-    logServiceMessage('INFO', `[NetworkManager] [OK] Verified: 127.0.0.1:${dnsPort} responded to DNS probe.`);
+    logServiceMessage('INFO', `[NetworkManager] [OK] Verified: 127.0.0.1:${dnsPort} and upstream resolution responded to DNS probe.`);
 
     // 4. Apply 127.0.0.1 and read-back verify each adapter on Windows
     if (this.getPlatform() === 'win32') {
@@ -1110,7 +1282,8 @@ export class WindowsNetworkManager {
           }
 
           const parsed = JSON.parse(trimmed);
-          const rawAddrs = parsed.ServerAddresses;
+          const firstObj = Array.isArray(parsed) ? parsed[0] : parsed;
+          const rawAddrs = firstObj ? firstObj.ServerAddresses : undefined;
           const servers: string[] = Array.isArray(rawAddrs) ? rawAddrs : rawAddrs ? [rawAddrs] : [];
 
           logServiceMessage(
@@ -1126,11 +1299,16 @@ export class WindowsNetworkManager {
           logServiceMessage('INFO', `[NetworkManager] [OK] Adapter ${adapter.InterfaceIndex} verified configured to 127.0.0.1.`);
         }
 
-        // 5. Post-assignment resolver check
-        logServiceMessage('INFO', `[NetworkManager] Verifying 127.0.0.1:${dnsPort} resolver still healthy post-assignment...`);
-        const postCheck = await this.verifyDnsProxyResponding(dnsPort);
+        // 5. Post-assignment resolver and real DNS resolution check through 127.0.0.1
+        logServiceMessage('INFO', `[NetworkManager] Verifying 127.0.0.1:${dnsPort} resolver and real DNS resolution still healthy post-assignment...`);
+        let postCheck = true;
+        if (this.postAssignmentProbeOverride) {
+          postCheck = await this.postAssignmentProbeOverride(dnsPort);
+        } else {
+          postCheck = await this.verifyEndToEndResolverHealth(dnsPort);
+        }
         if (!postCheck) {
-          throw new Error(`DNS proxy on 127.0.0.1:${dnsPort} stopped responding after adapter configuration.`);
+          throw new Error(`Real DNS resolution failed through 127.0.0.1:${dnsPort} post-assignment.`);
         }
         logServiceMessage('INFO', '[NetworkManager] [OK] Post-assignment resolver check passed.');
 
@@ -1148,6 +1326,8 @@ export class WindowsNetworkManager {
           logServiceMessage('INFO', '[NetworkManager] Original DNS restored after activation failure.');
           const reasonCode: ActivationReasonCode = applyErr.message.includes('Read-back verification failed')
             ? 'READBACK_MISMATCH'
+            : applyErr.message.includes('Real DNS resolution failed') || applyErr.message.includes('post-assignment')
+            ? 'POST_ACTIVATION_RESOLUTION_FAILED'
             : 'DNS_ASSIGNMENT_FAILED';
           return {
             success: false,
@@ -1166,6 +1346,26 @@ export class WindowsNetworkManager {
             interfaceIndexes: targetAdapters.map((a) => a.InterfaceIndex),
             details: `Activation Error: ${applyErr.message}; Rollback Error: ${rollbackErr.message}`,
             reason: 'CRITICAL_ROLLBACK_FAILED',
+            discoveryMethod: discovery.method,
+          };
+        }
+      }
+    } else {
+      // Non-Windows simulation: verify post-assignment probe if configured
+      if (this.postAssignmentProbeOverride) {
+        const postCheck = await this.postAssignmentProbeOverride(dnsPort);
+        if (!postCheck) {
+          logServiceMessage(
+            'ERROR',
+            `[NetworkManager] [ERROR] Real DNS resolution failed through 127.0.0.1:${dnsPort} post-assignment. Initiating immediate rollback.`
+          );
+          await this.restoreOriginalDns();
+          return {
+            success: false,
+            message: `Activation failed: Real DNS resolution failed through 127.0.0.1:${dnsPort} post-assignment. Original DNS restored.`,
+            interfaceIndexes: targetAdapters.map((a) => a.InterfaceIndex),
+            details: 'Post-assignment DNS resolution probe failed',
+            reason: 'POST_ACTIVATION_RESOLUTION_FAILED',
             discoveryMethod: discovery.method,
           };
         }
@@ -1410,8 +1610,8 @@ export class WindowsNetworkManager {
           InterfaceIndex: Number(item.InterfaceIndex),
           InterfaceAlias: String(item.InterfaceAlias || `Interface ${item.InterfaceIndex}`),
           ServerAddresses: addrs,
-          CleanNonLoopback: clean,
-          IsEnforced: Boolean(item.IsEnforced),
+          CleanNonLoopback: clean.length > 0 ? clean : addrs.filter((a) => !a.startsWith('127.') && a !== '::1'),
+          IsEnforced: typeof item.IsEnforced === 'boolean' ? item.IsEnforced : addrs.includes('127.0.0.1'),
           DhcpEnabled: item.DhcpEnabled !== false,
           queryStatus: item.QueryStatus === 'QUERY_FAILED' ? 'QUERY_FAILED' : 'OK',
         });
@@ -1523,6 +1723,37 @@ export class WindowsNetworkManager {
 
       // If all active eligible adapters already have 127.0.0.1 enforced and NONE failed query:
       if (unenforced.length === 0 && queryFailed.length === 0) {
+        // Continuous fail-safe watchdog: verify proxy and upstream resolution are healthy while 127.0.0.1 is active
+        const resolverHealthy = await this.verifyEndToEndResolverHealth(dnsPort);
+        if (!resolverHealthy) {
+          this.consecutiveHealthFailures++;
+          logServiceMessage(
+            'WARN',
+            `[NetworkManager] [WARN] Fail-safe watchdog: Resolver/upstream health check failed (${this.consecutiveHealthFailures}/${this.maxConsecutiveHealthFailures}) while 127.0.0.1 enforced.`
+          );
+          if (this.consecutiveHealthFailures >= this.maxConsecutiveHealthFailures) {
+            logServiceMessage(
+              'ERROR',
+              `[NetworkManager] [CRITICAL] Fail-safe watchdog triggered: Resolver unhealthy for ${this.consecutiveHealthFailures} consecutive checks. Restoring original/DHCP DNS to prevent network trap.`
+            );
+            await this.restoreOriginalDns();
+            this.consecutiveHealthFailures = 0;
+            return {
+              status: 'ERROR',
+              enforcedIndexes: [],
+              unenforcedIndexes: enforced.map((e) => e.InterfaceIndex),
+              message: 'Watchdog restored original/DHCP DNS due to persistent resolver/upstream failure',
+            };
+          }
+          return {
+            status: 'ERROR',
+            enforcedIndexes: enforced.map((e) => e.InterfaceIndex),
+            unenforcedIndexes: [],
+            message: `Resolver health check failed (${this.consecutiveHealthFailures}/${this.maxConsecutiveHealthFailures})`,
+          };
+        }
+
+        this.consecutiveHealthFailures = 0;
         return {
           status: 'IN_SYNC',
           enforcedIndexes: enforced.map((e) => e.InterfaceIndex),
@@ -1557,18 +1788,18 @@ export class WindowsNetworkManager {
         });
       }
 
-      // 4. Step B: Verify local DNS proxy is responding before re-enforcing
-      const proxyResponding = await this.verifyDnsProxyResponding(dnsPort);
+      // 4. Step B: Verify local DNS proxy and upstream resolution are healthy before re-enforcing
+      const proxyResponding = await this.verifyEndToEndResolverHealth(dnsPort);
       if (!proxyResponding) {
         logServiceMessage(
           'ERROR',
-          `[NetworkManager] [ERROR] Cannot re-enforce DNS during roaming: DNS proxy on 127.0.0.1:${dnsPort} failed health probe.`
+          `[NetworkManager] [ERROR] Cannot re-enforce DNS during roaming: DNS proxy on 127.0.0.1:${dnsPort} or upstream resolution failed health probe. Preserving working DHCP/original DNS.`
         );
         return {
           status: 'ERROR',
           enforcedIndexes: enforced.map((e) => e.InterfaceIndex),
           unenforcedIndexes: unenforced.map((u) => u.InterfaceIndex),
-          message: 'Local DNS proxy health check failed during reconciliation',
+          message: 'Local DNS proxy or upstream health check failed during reconciliation',
         };
       }
 
@@ -1604,7 +1835,8 @@ export class WindowsNetworkManager {
           const trimmed = stdout.trim();
           if (trimmed) {
             const parsed = JSON.parse(trimmed);
-            const rawAddrs = parsed.ServerAddresses;
+            const firstObj = Array.isArray(parsed) ? parsed[0] : parsed;
+            const rawAddrs = firstObj ? firstObj.ServerAddresses : undefined;
             const servers: string[] = Array.isArray(rawAddrs) ? rawAddrs : rawAddrs ? [rawAddrs] : [];
             if (!servers.includes('127.0.0.1')) {
               throw new Error(
@@ -1614,11 +1846,48 @@ export class WindowsNetworkManager {
           }
         }
 
+        // Post-assignment end-to-end check
+        let postCheck = true;
+        if (this.postAssignmentProbeOverride) {
+          postCheck = await this.postAssignmentProbeOverride(dnsPort);
+        } else {
+          postCheck = await this.verifyEndToEndResolverHealth(dnsPort);
+        }
+        if (!postCheck) {
+          logServiceMessage(
+            'ERROR',
+            `[NetworkManager] [ERROR] Post-assignment resolution probe failed after re-enforcement. Rolling back...`
+          );
+          await this.restoreOriginalDns();
+          return {
+            status: 'ERROR',
+            enforcedIndexes: [],
+            unenforcedIndexes: unenforced.map((u) => u.InterfaceIndex),
+            message: 'Post-assignment resolution probe failed after re-enforcement. Original DNS restored.',
+          };
+        }
+
         // Flush DNS client cache
         const flushScript = '$ErrorActionPreference = \'SilentlyContinue\'; Clear-DnsClientCache';
         await this.executePowerShell(flushScript);
       } else {
-        // Non-Windows simulation: update mock adapter state
+        // Non-Windows simulation: verify post-assignment probe if configured
+        if (this.postAssignmentProbeOverride) {
+          const postCheck = await this.postAssignmentProbeOverride(dnsPort);
+          if (!postCheck) {
+            logServiceMessage(
+              'ERROR',
+              `[NetworkManager] [ERROR] Post-assignment resolution probe failed after re-enforcement. Rolling back...`
+            );
+            await this.restoreOriginalDns();
+            return {
+              status: 'ERROR',
+              enforcedIndexes: [],
+              unenforcedIndexes: unenforced.map((u) => u.InterfaceIndex),
+              message: 'Post-assignment resolution probe failed after re-enforcement. Original DNS restored.',
+            };
+          }
+        }
         if (this.mockAdapters) {
           for (const u of unenforced) {
             const ma = this.mockAdapters.find((a) => a.InterfaceIndex === u.InterfaceIndex);
@@ -1802,6 +2071,38 @@ export class WindowsNetworkManager {
 
     if (this.getPlatform() !== 'win32') {
       logServiceMessage('INFO', '[NetworkManager] Non-Windows platform: simulation complete.');
+      if (this.mockAdapters) {
+        const backupMap = new Map<number, AdapterDnsBackup>();
+        if (fs.existsSync(this.backupFile)) {
+          try {
+            const list: AdapterDnsBackup[] = JSON.parse(fs.readFileSync(this.backupFile, 'utf8'));
+            for (const b of list) backupMap.set(b.InterfaceIndex, b);
+          } catch {}
+        }
+        if (backupMap.size > 0) {
+          for (const ma of this.mockAdapters) {
+            const rec = backupMap.get(ma.InterfaceIndex);
+            if (rec) {
+              const clean = (rec.ServerAddresses || []).filter((ip) => !ip.startsWith('127.') && ip !== '::1');
+              ma.ServerAddresses = rec.DhcpEnabled !== false || clean.length === 0 ? [] : clean;
+            }
+          }
+        } else {
+          // If no backup records exist, reset ONLY internet-facing adapters currently configured to 127.0.0.1 to DHCP
+          for (const ma of this.mockAdapters) {
+            const isTrapped = (ma.ServerAddresses || []).includes('127.0.0.1');
+            const hasDefaultGateway = Boolean(ma.Gateway && ma.Gateway !== '0.0.0.0' && ma.Status !== 'Disconnected');
+            const alias = (ma.InterfaceAlias || '').toLowerCase();
+            const isExcluded =
+              alias.includes('tailscale') ||
+              alias.includes('loopback') ||
+              (ma.IpAddresses || []).some((ip) => ip.startsWith('169.254.'));
+            if (isTrapped && hasDefaultGateway && !isExcluded) {
+              ma.ServerAddresses = [];
+            }
+          }
+        }
+      }
       this.isRestoring = false;
       return;
     }

@@ -1,11 +1,16 @@
 import dgram from 'dgram';
 import { evaluatePolicy, Policy } from '@safebrowse/shared';
 
+export interface UpstreamDnsServer {
+  host: string;
+  port: number;
+}
+
 export class DnsFilterProxy {
   private socket: dgram.Socket | null = null;
   private getPolicy: () => Policy | null;
-  private upstreamDnsHost: string;
-  private upstreamDnsPort: number;
+  private upstreamServers: UpstreamDnsServer[] = [{ host: '1.1.1.1', port: 53 }];
+  private listeningPort: number = 53;
 
   constructor(
     getPolicy: () => Policy | null,
@@ -13,8 +18,47 @@ export class DnsFilterProxy {
     upstreamDnsPort: number = 53
   ) {
     this.getPolicy = getPolicy;
-    this.upstreamDnsHost = upstreamDnsHost;
-    this.upstreamDnsPort = upstreamDnsPort;
+    this.setUpstreams([upstreamDnsHost], upstreamDnsPort);
+  }
+
+  /**
+   * Updates upstream DNS servers dynamically, strictly filtering out loopback addresses
+   * (127.0.0.1, ::1, localhost) to avoid recursive forwarding loops.
+   */
+  public setUpstreamServers(servers: Array<{ host: string; port?: number }>): void {
+    const valid: UpstreamDnsServer[] = (servers || [])
+      .filter((s) => s && s.host && typeof s.host === 'string')
+      .map((s) => ({ host: s.host.trim(), port: s.port || 53 }))
+      .filter(
+        (s) =>
+          s.host.length > 0 &&
+          s.host !== '::1' &&
+          s.host.toLowerCase() !== 'localhost' &&
+          !(s.host.startsWith('127.') && (s.port === 53 || (this.listeningPort && s.port === this.listeningPort)))
+      );
+
+    if (valid.length > 0) {
+      this.upstreamServers = valid;
+    } else {
+      this.upstreamServers = [{ host: '1.1.1.1', port: 53 }];
+    }
+  }
+
+  public setUpstreams(hosts: string[], port: number = 53): void {
+    const servers = (hosts || []).map((h) => ({ host: h, port }));
+    this.setUpstreamServers(servers);
+  }
+
+  public getUpstreamServers(): UpstreamDnsServer[] {
+    return [...this.upstreamServers];
+  }
+
+  public get upstreamDnsHost(): string {
+    return this.upstreamServers[0]?.host || '1.1.1.1';
+  }
+
+  public get upstreamDnsPort(): number {
+    return this.upstreamServers[0]?.port || 53;
   }
 
   /**
@@ -228,22 +272,48 @@ export class DnsFilterProxy {
           console.log(`[Windows DNS Filter] [WARN] [DEGRADED_POLICY_UNAVAILABLE] No active policy available. Forwarding ${query.domain} to upstream DNS.`);
         }
 
-        // Forward allowed queries to upstream DNS (e.g. 1.1.1.1)
+        // Forward allowed queries to upstream DNS (physical network DNS first, with fallback)
+        const primary = this.upstreamServers[0] || { host: '1.1.1.1', port: 53 };
         const upstreamClient = dgram.createSocket('udp4');
-        upstreamClient.send(msg, this.upstreamDnsPort, this.upstreamDnsHost, (err) => {
-          if (err) {
-            upstreamClient.close();
+        let finished = false;
+
+        const cleanup = () => {
+          if (!finished) {
+            finished = true;
+            try { upstreamClient.close(); } catch {}
+          }
+        };
+
+        const timeout = setTimeout(cleanup, 4000);
+
+        upstreamClient.on('message', (upstreamResponse) => {
+          if (!finished) {
+            clearTimeout(timeout);
+            finished = true;
+            this.socket?.send(upstreamResponse, rinfo.port, rinfo.address);
+            try { upstreamClient.close(); } catch {}
           }
         });
 
-        upstreamClient.on('message', (upstreamResponse) => {
-          this.socket?.send(upstreamResponse, rinfo.port, rinfo.address);
-          upstreamClient.close();
+        upstreamClient.on('error', () => {
+          cleanup();
         });
 
-        upstreamClient.on('error', () => {
-          upstreamClient.close();
+        upstreamClient.send(msg, primary.port, primary.host, (err) => {
+          if (err) {
+            cleanup();
+          }
         });
+
+        // If secondary exists and primary does not answer within 1200ms, try secondary
+        if (this.upstreamServers.length > 1) {
+          setTimeout(() => {
+            if (!finished) {
+              const secondary = this.upstreamServers[1];
+              upstreamClient.send(msg, secondary.port, secondary.host, () => {});
+            }
+          }, 1200);
+        }
       });
 
       this.socket.on('error', (err: any) => {
@@ -253,6 +323,7 @@ export class DnsFilterProxy {
           const fallbackSocket = dgram.createSocket('udp4');
           this.socket = fallbackSocket;
           fallbackSocket.bind(5353, '127.0.0.1', () => {
+            this.listeningPort = 5353;
             console.log(`[Windows DNS Filter] Listening on fallback 127.0.0.1:5353`);
             resolve(5353);
           });
@@ -264,6 +335,7 @@ export class DnsFilterProxy {
 
       this.socket.bind(port, '127.0.0.1', () => {
         const boundPort = this.socket ? this.socket.address().port : port;
+        this.listeningPort = boundPort;
         console.log(`[Windows DNS Filter] SafeBrowse DNS Interception Proxy listening on 127.0.0.1:${boundPort}`);
         resolve(boundPort);
       });

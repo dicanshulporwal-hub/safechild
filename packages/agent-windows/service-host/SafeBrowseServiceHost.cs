@@ -26,6 +26,70 @@ namespace SafeBrowse
             string logDir = Path.Combine(programData, "SafeBrowse", "logs");
             Directory.CreateDirectory(logDir);
             _logPath = Path.Combine(logDir, "service-host.log");
+
+            // Attempt to register for SERVICE_ACCEPT_PRESHUTDOWN (optional best-effort optimization).
+            // ARCHITECTURAL RECOVERY CONTRACT:
+            // PRESHUTDOWN = OPTIMISATION / BEST-EFFORT CLEANUP ONLY
+            // BOOT PREFLIGHT = MANDATORY CORRECTNESS GUARANTEE
+            TryEnablePreShutdown();
+        }
+
+        private const int SERVICE_CONTROL_PRESHUTDOWN = 0x0F;
+
+        /// <summary>
+        /// Attempts to register SERVICE_ACCEPT_PRESHUTDOWN (0x100) via reflection into ServiceBase.acceptedCommands.
+        ///
+        /// ARCHITECTURAL DESIGN & RECOVERY CONTRACT:
+        /// PRESHUTDOWN = OPTIMISATION / BEST-EFFORT CLEANUP ONLY
+        /// BOOT PREFLIGHT = MANDATORY CORRECTNESS GUARANTEE
+        ///
+        /// Physical evidence on real Windows systems proves CIM/WMI and networking services
+        /// may already be shutting down or unavailable by the time shutdown notifications arrive,
+        /// causing Set-DnsClientServerAddress to fail with "Cannot connect to CIM server. A system shutdown is in progress."
+        /// Furthermore, private reflection into ServiceBase is an implementation detail that may not succeed across all runtimes.
+        ///
+        /// Therefore:
+        /// 1. This registration is completely isolated, null-checked, and wrapped in exception handling.
+        /// 2. If registration fails or acceptedCommands is unavailable, a warning is logged and service startup continues uninterrupted.
+        /// 3. The system NEVER assumes preshutdown was delivered.
+        /// 4. Boot preflight in the worker bootstrap thread guarantees clean recovery even if shutdown was abrupt or CIM failed.
+        /// </summary>
+        private void TryEnablePreShutdown()
+        {
+            try
+            {
+                var field = typeof(ServiceBase).GetField("acceptedCommands",
+                    System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.NonPublic);
+                if (field != null)
+                {
+                    object rawVal = field.GetValue(this);
+                    if (rawVal is int val)
+                    {
+                        field.SetValue(this, val | 0x100);
+                        Log("[INFO] SERVICE_ACCEPT_PRESHUTDOWN registered successfully (best-effort cleanup optimization).");
+                        return;
+                    }
+                }
+                Log("[WARN] ServiceBase acceptedCommands field not found or not an integer; preshutdown registration skipped.");
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("[WARN] Optional SERVICE_ACCEPT_PRESHUTDOWN registration failed: {0}. Continuing startup.", ex.Message));
+            }
+        }
+
+        protected override void OnCustomCommand(int command)
+        {
+            if (command == SERVICE_CONTROL_PRESHUTDOWN)
+            {
+                Log("[INFO] SERVICE_CONTROL_PRESHUTDOWN (0x0F) received prior to CIM/WMI shutdown. Performing early DNS restoration (best-effort)...");
+                OnStop();
+            }
+            else
+            {
+                base.OnCustomCommand(command);
+            }
         }
 
         private void Log(string message)
@@ -42,13 +106,129 @@ namespace SafeBrowse
         {
             Log("SafeBrowse Service Host starting...");
             _stopping = false;
+
+            // SCM NON-BLOCKING INVARIANT:
+            // Windows SCM expects OnStart() to return promptly (<30s).
+            // Do NOT synchronously block OnStart() on PowerShell, CIM, route discovery,
+            // network retry sleeps, or DNS restoration.
+            // All boot preflight checks and child process management are performed asynchronously
+            // in WorkerLoop on the background monitor thread.
             _monitorThread = new Thread(WorkerLoop)
             {
                 IsBackground = true,
                 Name = "SafeBrowseServiceMonitor"
             };
             _monitorThread.Start();
-            Log("SafeBrowse Service Host started successfully.");
+            Log("SafeBrowse Service Host started successfully; OnStart returned promptly to SCM.");
+        }
+
+        public bool PerformBootPreflight(int maxRetries = 3, int retryDelayMs = 2000)
+        {
+            Log("[INFO] Performing boot safety pre-flight check for stale 127.0.0.1 DNS...");
+
+            for (int attempt = 1; attempt <= maxRetries; attempt++)
+            {
+                if (_stopping)
+                {
+                    Log("[INFO] Boot pre-flight cancelled by service stop request.");
+                    return false;
+                }
+
+                try
+                {
+                    string psScript =
+                        "$ErrorActionPreference = 'SilentlyContinue'; " +
+                        "$backupPath = Join-Path $env:ProgramData 'SafeBrowse\\network-backup.json'; " +
+                        "$staleRecovered = $false; " +
+                        "$backupMap = @{}; " +
+                        "if (Test-Path $backupPath) { " +
+                        "    try { " +
+                        "        $raw = Get-Content $backupPath -Raw -ErrorAction Stop; " +
+                        "        $records = @(ConvertFrom-Json $raw -ErrorAction Stop); " +
+                        "        foreach ($rec in $records) { " +
+                        "            if ($rec.InterfaceIndex) { " +
+                        "                $backupMap[[int]$rec.InterfaceIndex] = $rec; " +
+                        "            } " +
+                        "        } " +
+                        "    } catch {} " +
+                        "}; " +
+                        "$validRoutes = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' -and $_.NextHop -ne '::' }); " +
+                        "$routeIndexes = @($validRoutes | ForEach-Object { [int]$_.InterfaceIndex }); " +
+                        "$allDns = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue); " +
+                        "foreach ($dns in $allDns) { " +
+                        "    $idx = [int]$dns.InterfaceIndex; " +
+                        "    $addrs = @($dns.ServerAddresses); " +
+                        "    if ($addrs -contains '127.0.0.1') { " +
+                        "        $adapter = @(Get-NetAdapter -InterfaceIndex $idx -ErrorAction SilentlyContinue)[0]; " +
+                        "        if (-not $adapter -or $adapter.Status -ne 'Up') { continue }; " +
+                        "        $alias = [string]$adapter.InterfaceAlias; " +
+                        "        if ($alias -match 'Tailscale|Loopback|Teredo|isatap') { continue }; " +
+                        "        if (-not ($routeIndexes -contains $idx)) { continue }; " +
+                        "        $ips = @(Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.IPAddress }); " +
+                        "        $usableIps = @($ips | Where-Object { $_ -and -not $_.StartsWith('169.254.') -and -not $_.StartsWith('127.') }); " +
+                        "        if ($usableIps.Count -eq 0) { continue }; " +
+                        "        if ($backupMap.ContainsKey($idx)) { " +
+                        "            $rec = $backupMap[$idx]; " +
+                        "            $cleanAddrs = @($rec.ServerAddresses) | Where-Object { $_ -and $_ -notlike '*127.0.0.1*' -and $_ -notlike '*::1*' }; " +
+                        "            if ($rec.DhcpEnabled -eq $true -or $cleanAddrs.Count -eq 0) { " +
+                        "                Set-DnsClientServerAddress -InterfaceIndex $idx -ResetServerAddresses -ErrorAction SilentlyContinue; " +
+                        "            } else { " +
+                        "                Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses $cleanAddrs -ErrorAction SilentlyContinue; " +
+                        "            }; " +
+                        "            $staleRecovered = $true; " +
+                        "        } else { " +
+                        "            Set-DnsClientServerAddress -InterfaceIndex $idx -ResetServerAddresses -ErrorAction SilentlyContinue; " +
+                        "            $staleRecovered = $true; " +
+                        "        } " +
+                        "    } " +
+                        "}; " +
+                        "if ($staleRecovered) { Clear-DnsClientCache -ErrorAction SilentlyContinue; Write-Output 'STALE_DNS_RECOVERED'; } else { Write-Output 'DNS_CLEAN'; }";
+
+                    ProcessStartInfo psi = new ProcessStartInfo
+                    {
+                        FileName = "powershell.exe",
+                        Arguments = "-NoProfile -ExecutionPolicy Bypass -Command \"" + psScript + "\"",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
+                    };
+
+                    using (Process proc = Process.Start(psi))
+                    {
+                        if (proc != null && proc.WaitForExit(15000))
+                        {
+                            string output = proc.StandardOutput.ReadToEnd().Trim();
+                            if (output.Contains("STALE_DNS_RECOVERED"))
+                            {
+                                Log("[OK] Boot pre-flight: Detected and successfully restored stale 127.0.0.1 DNS to DHCP/original configuration.");
+                                return true;
+                            }
+                            else if (output.Contains("DNS_CLEAN"))
+                            {
+                                Log("[OK] Boot pre-flight: No stale 127.0.0.1 DNS detected. Network state is clean.");
+                                return true;
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log(string.Format("[WARN] Boot pre-flight attempt {0}/{1} failed: {2}", attempt, maxRetries, ex.Message));
+                }
+
+                if (attempt < maxRetries && !_stopping)
+                {
+                    Log(string.Format("[INFO] Retrying boot pre-flight in {0}ms (waiting for network/CIM readiness)...", retryDelayMs));
+                    for (int s = 0; s < retryDelayMs / 100 && !_stopping; s++)
+                    {
+                        Thread.Sleep(100);
+                    }
+                }
+            }
+
+            Log("[WARN] Boot pre-flight finished retries without confirming clean state. Continuing safely toward child startup.");
+            return false;
         }
 
         protected override void OnStop()
@@ -236,6 +416,18 @@ namespace SafeBrowse
 
         private void WorkerLoop()
         {
+            Log("[INFO] SafeBrowse worker bootstrap thread started.");
+
+            // MANDATORY CORRECTNESS INVARIANT:
+            // The child enforcement process MUST NOT start before stale 127.0.0.1 recovery
+            // has been attempted.
+            // Boot pre-flight safely inspects active adapters and recovers stale 127.0.0.1
+            // from any prior incomplete shutdown BEFORE launching the child enforcement process.
+            if (!_stopping)
+            {
+                PerformBootPreflight();
+            }
+
             int restartCount = 0;
             DateTime lastStartTime = DateTime.UtcNow;
 

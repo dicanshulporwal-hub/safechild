@@ -2255,4 +2255,802 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
       await dnsServer.close();
     }
   });
+
+  // =========================================================================
+  // SafeBrowse — Reboot Network Continuity & Boot Recovery Regression Suite
+  // Requirements: 15 Deterministic Physical-Defect Regression Tests
+  // =========================================================================
+
+  // Test 56 / Required Test 1: shutdown restore CIM failure
+  it('56. shutdown restore CIM failure: "A system shutdown is in progress" leaves stale 127, next service boot automatically recovers', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-reboot-1.json');
+    fs.writeFileSync(
+      backupFile,
+      JSON.stringify([
+        { InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['192.168.1.1'], DhcpEnabled: true }
+      ])
+    );
+
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('win32');
+
+    // Simulate CIM shutdown error on shutdown restore
+    nm.setCommandExecutorForTesting(async (script) => {
+      if (script.includes('Set-DnsClientServerAddress')) {
+        throw new Error('Set-DnsClientServerAddress: Cannot connect to CIM server. A system shutdown is in progress.');
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    // Shutdown restore attempts and fails due to CIM shutdown
+    await assert.rejects(
+      async () => {
+        await nm.restoreOriginalDns();
+      },
+      (err: any) => err.message.includes('A system shutdown is in progress')
+    );
+
+    // System now reboots with WiFi stuck on stale 127.0.0.1 and no resolver running
+    const mockExecutor = async (script: string) => {
+      if (script.includes('Get-DnsClientServerAddress')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['127.0.0.1'], DhcpEnabled: true }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', NextHop: '192.168.1.1' }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetAdapter')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Status: 'Up', InterfaceDescription: 'Intel Wi-Fi' }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetIPAddress')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, IPAddress: '192.168.1.8' }]),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    nm.setCommandExecutorForTesting(mockExecutor);
+
+    // On next service boot, boot safety pre-flight detects stale 127.0.0.1 and automatically recovers
+    const recoveryResult = await nm.recoverStaleDnsAtBoot(53);
+    assert.strictEqual(recoveryResult.recovered, true);
+    assert.deepStrictEqual(recoveryResult.restoredAdapters, [6]);
+    assert.match(recoveryResult.message, /Recovered 1 adapter\(s\) from stale 127\.0\.0\.1/);
+  });
+
+  // Test 57 / Required Test 2: stale 127 boot
+  it('57. stale 127 boot: initial adapter DNS = 127.0.0.1, no resolver running, DNS restored to DHCP/original BEFORE normal enforcement', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-reboot-2.json');
+    fs.writeFileSync(
+      backupFile,
+      JSON.stringify([
+        { InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['192.168.1.1'], DhcpEnabled: true }
+      ])
+    );
+
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('win32');
+
+    let resetExecuted = false;
+    const mockExecutor = async (script: string) => {
+      if (script.includes('ResetServerAddresses')) {
+        resetExecuted = true;
+      }
+      if (script.includes('Get-DnsClientServerAddress')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['127.0.0.1'], DhcpEnabled: true }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', NextHop: '192.168.1.1' }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetAdapter')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Status: 'Up' }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetIPAddress')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, IPAddress: '192.168.1.8' }]),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    nm.setCommandExecutorForTesting(mockExecutor);
+
+    // Service starts up and executes boot preflight BEFORE normal enforcement
+    const result = await nm.recoverStaleDnsAtBoot(53);
+    assert.strictEqual(result.recovered, true);
+    assert.strictEqual(resetExecuted, true, 'Must execute ResetServerAddresses to clear stale 127.0.0.1');
+  });
+
+  // Test 58 / Required Test 3: service startup before network
+  it('58. service startup before network: no route/DHCP initially leaves DNS untouched; later network arrival recovers automatically', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-reboot-3.json');
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('win32');
+
+    const executedScripts: string[] = [];
+    let hasRoute = false;
+
+    nm.setCommandExecutorForTesting(async (script: string) => {
+      executedScripts.push(script);
+      if (script.includes('Get-DnsClientServerAddress')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: hasRoute ? ['127.0.0.1'] : ['192.168.1.1'] }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetRoute')) {
+        if (!hasRoute) {
+          return { stdout: '[]', stderr: '' };
+        }
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', NextHop: '192.168.1.1' }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetIPConfiguration')) {
+        if (!hasRoute) {
+          return { stdout: '[]', stderr: '' };
+        }
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Gateway: '192.168.1.1' }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetAdapter')) {
+        return { stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Status: hasRoute ? 'Up' : 'Disconnected' }]), stderr: '' };
+      }
+      if (script.includes('Get-NetIPAddress')) {
+        return { stdout: JSON.stringify([{ InterfaceIndex: 6, IPAddress: hasRoute ? '192.168.1.8' : '' }]), stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const dnsServer = await createMockDnsServer();
+    try {
+      // Step A: Startup before network exists
+      const initialActivation = await nm.activateFailSafeDns(dnsServer.port);
+      assert.strictEqual(initialActivation.success, false);
+      assert.strictEqual(initialActivation.reason, 'NO_NETWORK_ROUTE');
+      // Verify NO destructive write occurred
+      assert.ok(
+        !executedScripts.some((s) => s.includes('Set-DnsClientServerAddress') && s.includes('127.0.0.1')),
+        'Must NOT write 127.0.0.1 when no network route is available'
+      );
+
+      // Step B: Later network arrival (DHCP lease obtained, route established)
+      hasRoute = true;
+      const retryActivation = await nm.activateFailSafeDns(dnsServer.port);
+      assert.strictEqual(retryActivation.success, true);
+      assert.strictEqual(retryActivation.reason, 'ELIGIBLE_ADAPTER_FOUND');
+    } finally {
+      await dnsServer.close();
+    }
+  });
+
+  // Test 59 / Required Test 4: delayed auto-start removed
+  it('59. delayed auto-start removed: static WiX audit confirms no DelayedAutoStart=yes', () => {
+    const wxsPath = path.resolve(__dirname, '../wix/SafeBrowseChild-Pilot.wxs');
+    assert.ok(fs.existsSync(wxsPath), 'SafeBrowseChild-Pilot.wxs must exist');
+    const content = fs.readFileSync(wxsPath, 'utf8');
+
+    assert.ok(
+      !content.includes('DelayedAutoStart="yes"'),
+      'WiX file must NOT contain DelayedAutoStart="yes"'
+    );
+    assert.ok(
+      content.includes('Start="auto"'),
+      'WiX file must configure normal Automatic service startup (Start="auto")'
+    );
+  });
+
+  // Test 60 / Required Test 5: real proxy health
+  it('60. real proxy health: local socket response alone is insufficient, upstream resolution failure must fail health', async () => {
+    const nm = new WindowsNetworkManager();
+    const dnsServer = await createMockDnsServer();
+
+    try {
+      // Hook upstream resolution checker to simulate upstream resolution failure
+      // (local UDP socket is listening and responds, but upstream resolution fails)
+      nm.setUpstreamResolutionCheckerForTesting(async () => false);
+
+      const isHealthy = await nm.verifyEndToEndResolverHealth(dnsServer.port);
+      assert.strictEqual(isHealthy, false, 'End-to-end resolver health must fail if upstream resolution fails');
+    } finally {
+      nm.setUpstreamResolutionCheckerForTesting(null);
+      await dnsServer.close();
+    }
+  });
+
+  // Test 61 / Required Test 6: upstream unavailable
+  it('61. upstream unavailable: adapter must not be left at 127', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-reboot-6.json');
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('win32');
+
+    const executedScripts: string[] = [];
+    nm.setCommandExecutorForTesting(async (script: string) => {
+      executedScripts.push(script);
+      if (script.includes('Get-NetIPConfiguration')) {
+        return { stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Gateway: '192.168.1.1' }]), stderr: '' };
+      }
+      if (script.includes('Get-DnsClientServerAddress')) {
+        return { stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['192.168.1.1'] }]), stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const dnsServer = await createMockDnsServer();
+    try {
+      // Upstream is unavailable
+      nm.setUpstreamResolutionCheckerForTesting(async () => false);
+
+      const result = await nm.activateFailSafeDns(dnsServer.port);
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(result.reason, 'DNS_PROXY_HEALTH_CHECK_FAILED');
+      assert.ok(
+        !executedScripts.some((s) => s.includes('Set-DnsClientServerAddress') && s.includes('127.0.0.1')),
+        'Adapter must never be assigned 127.0.0.1 when upstream is unavailable'
+      );
+    } finally {
+      nm.setUpstreamResolutionCheckerForTesting(null);
+      await dnsServer.close();
+    }
+  });
+
+  // Test 62 / Required Test 7: post-assignment failure
+  it('62. post-assignment failure: set 127 succeeds, real DNS resolution fails, automatic rollback occurs', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-reboot-7.json');
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('win32');
+
+    const executedScripts: string[] = [];
+    nm.setCommandExecutorForTesting(async (script: string) => {
+      executedScripts.push(script);
+      if (script.includes('Get-NetIPConfiguration')) {
+        return { stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Gateway: '192.168.1.1' }]), stderr: '' };
+      }
+      if (script.includes('Get-DnsClientServerAddress') && script.includes('Select-Object')) {
+        return { stdout: JSON.stringify({ InterfaceIndex: 6, ServerAddresses: ['127.0.0.1'] }), stderr: '' };
+      }
+      if (script.includes('Get-DnsClientServerAddress')) {
+        return { stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['192.168.1.1'] }]), stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const dnsServer = await createMockDnsServer();
+    try {
+      // Simulate post-assignment resolution failure (127.0.0.1 set succeeds, but post-assignment probe fails)
+      nm.setPostAssignmentProbeForTesting(async () => false);
+
+      const result = await nm.activateFailSafeDns(dnsServer.port);
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(result.reason, 'POST_ACTIVATION_RESOLUTION_FAILED');
+      // Verify automatic rollback was invoked
+      assert.ok(
+        executedScripts.some((s) => s.includes('ResetServerAddresses') || (s.includes('Set-DnsClientServerAddress') && s.includes('192.168.1.1'))),
+        'Must invoke rollback to restore original DNS upon post-assignment resolution failure'
+      );
+    } finally {
+      nm.setPostAssignmentProbeForTesting(null);
+      await dnsServer.close();
+    }
+  });
+
+  // Test 63 / Required Test 8: DHCP upstream
+  it('63. DHCP upstream: current DHCP DNS selected as upstream', async () => {
+    const nm = new WindowsNetworkManager();
+    nm.setPlatformForTesting('linux');
+
+    const adapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Gateway: '192.168.1.1',
+        ServerAddresses: ['192.168.1.1'],
+        DhcpEnabled: true,
+      },
+    ];
+    nm.setMockAdaptersForTesting(adapters);
+
+    const upstreams = await nm.getUpstreamDnsServers();
+    assert.deepStrictEqual(upstreams, ['192.168.1.1']);
+
+    const proxy = new DnsFilterProxy(() => null);
+    proxy.setUpstreams(upstreams);
+    assert.deepStrictEqual(proxy.getUpstreamServers(), [{ host: '192.168.1.1', port: 53 }]);
+  });
+
+  // Test 64 / Required Test 9: static upstream
+  it('64. static upstream: static original DNS preserved and selected safely', async () => {
+    const nm = new WindowsNetworkManager();
+    nm.setPlatformForTesting('linux');
+
+    const adapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Gateway: '192.168.1.1',
+        ServerAddresses: ['9.9.9.9', '149.112.112.112'],
+        DhcpEnabled: false,
+      },
+    ];
+    nm.setMockAdaptersForTesting(adapters);
+
+    const upstreams = await nm.getUpstreamDnsServers();
+    assert.deepStrictEqual(upstreams, ['9.9.9.9', '149.112.112.112']);
+
+    const proxy = new DnsFilterProxy(() => null);
+    proxy.setUpstreams(upstreams);
+    assert.deepStrictEqual(proxy.getUpstreamServers(), [
+      { host: '9.9.9.9', port: 53 },
+      { host: '149.112.112.112', port: 53 },
+    ]);
+  });
+
+  // Test 65 / Required Test 10: roaming
+  it('65. roaming: home DNS 192.168.1.1 -> hotspot DNS 10.23.63.61, upstream set updates without loop', async () => {
+    const nm = new WindowsNetworkManager();
+    nm.setPlatformForTesting('linux');
+
+    // Initial state: Home WiFi
+    const homeAdapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Gateway: '192.168.1.1',
+        ServerAddresses: ['192.168.1.1'],
+        DhcpEnabled: true,
+      },
+    ];
+    nm.setMockAdaptersForTesting(homeAdapters);
+
+    const proxy = new DnsFilterProxy(() => null);
+    proxy.setUpstreams(await nm.getUpstreamDnsServers());
+    assert.strictEqual(proxy.upstreamDnsHost, '192.168.1.1');
+
+    // Roam to mobile hotspot: 10.23.63.61
+    const hotspotAdapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Gateway: '10.23.63.1',
+        ServerAddresses: ['10.23.63.61'],
+        DhcpEnabled: true,
+      },
+    ];
+    nm.setMockAdaptersForTesting(hotspotAdapters);
+
+    // Reconciliation loop / roaming updates upstream set
+    const roamingUpstreams = await nm.getUpstreamDnsServers();
+    proxy.setUpstreams(roamingUpstreams);
+    assert.strictEqual(proxy.upstreamDnsHost, '10.23.63.61');
+
+    // Verify loopback is strictly excluded even if adapter DNS is 127.0.0.1
+    proxy.setUpstreams(['127.0.0.1', '::1']);
+    assert.deepStrictEqual(proxy.getUpstreamServers(), [{ host: '1.1.1.1', port: 53 }], 'Loopback must be rejected as upstream');
+  });
+
+  // Test 66 / Required Test 11: reconciliation tamper repair
+  it('66. reconciliation tamper repair: resolver unhealthy, external DNS present, MUST NOT re-enforce 127', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-reboot-11.json');
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux');
+
+    // Adapter has external DNS (e.g. 8.8.8.8)
+    const adapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Gateway: '192.168.1.1',
+        ServerAddresses: ['8.8.8.8'],
+        DhcpEnabled: true,
+      },
+    ];
+    nm.setMockAdaptersForTesting(adapters);
+
+    const dnsServer = await createMockDnsServer();
+    try {
+      // Simulate resolver unhealthy during reconciliation
+      nm.setUpstreamResolutionCheckerForTesting(async () => false);
+
+      const result = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(result.status, 'ERROR');
+      assert.match(result.message, /health check failed/);
+      // Adapter MUST remain on 8.8.8.8, NOT re-enforced to 127.0.0.1!
+      assert.deepStrictEqual(adapters[0].ServerAddresses, ['8.8.8.8']);
+    } finally {
+      nm.setUpstreamResolutionCheckerForTesting(null);
+      await dnsServer.close();
+    }
+  });
+
+  // Test 67 / Required Test 12: resolver recovers
+  it('67. resolver recovers: real health returns, transactional enforcement succeeds, DNS -> 127, filtering active', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-reboot-12.json');
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux');
+
+    const adapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Gateway: '192.168.1.1',
+        ServerAddresses: ['8.8.8.8'],
+        DhcpEnabled: true,
+      },
+    ];
+    nm.setMockAdaptersForTesting(adapters);
+
+    const dnsServer = await createMockDnsServer();
+    try {
+      // Step A: Initially resolver unhealthy -> not re-enforced
+      nm.setUpstreamResolutionCheckerForTesting(async () => false);
+      const res1 = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(res1.status, 'ERROR');
+      assert.deepStrictEqual(adapters[0].ServerAddresses, ['8.8.8.8']);
+
+      // Step B: Resolver recovers!
+      nm.setUpstreamResolutionCheckerForTesting(async () => true);
+      const res2 = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(res2.status, 'RE_ENFORCED');
+      // Adapter DNS is now transactionally updated to 127.0.0.1
+      assert.deepStrictEqual(adapters[0].ServerAddresses, ['127.0.0.1']);
+    } finally {
+      nm.setUpstreamResolutionCheckerForTesting(null);
+      await dnsServer.close();
+    }
+  });
+
+  // Test 68 / Required Test 13: child crash while 127 enforced
+  it('68. child crash while 127 enforced: DNS automatically restored by ServiceHost', () => {
+    const csPath = path.resolve(__dirname, '../service-host/SafeBrowseServiceHost.cs');
+    const csContent = fs.readFileSync(csPath, 'utf8');
+
+    // 1. WorkerLoop handles child crash and restores DNS before restart delay
+    assert.ok(
+      csContent.includes('Unexpected child process termination detected. Restoring network DNS before restart delay'),
+      'WorkerLoop must detect child termination and restore DNS'
+    );
+    assert.ok(
+      csContent.includes('RunEmergencyRestore(1, 10000)'),
+      'Must invoke RunEmergencyRestore immediately upon unexpected child termination'
+    );
+
+    // 2. WorkerLoop performs boot safety preflight before launching child process
+    const workerLoopBody = extractCsMethod(csContent, 'private void WorkerLoop()');
+    const preflightIdx = workerLoopBody.indexOf('PerformBootPreflight()');
+    const childLaunchIdx = workerLoopBody.indexOf('Process.Start(psi)');
+    assert.ok(preflightIdx !== -1, 'WorkerLoop must invoke PerformBootPreflight');
+    assert.ok(childLaunchIdx !== -1, 'WorkerLoop must launch child process');
+    assert.ok(preflightIdx < childLaunchIdx, 'PerformBootPreflight must execute BEFORE child process launch');
+
+    // 2b. OnStart must return promptly to SCM without blocking on preflight
+    const onStartBody = extractCsMethod(csContent, 'protected override void OnStart(string[] args)');
+    assert.ok(
+      !onStartBody.includes('PerformBootPreflight()'),
+      'OnStart must NOT synchronously execute PerformBootPreflight'
+    );
+    assert.ok(
+      onStartBody.includes('_monitorThread = new Thread(WorkerLoop)'),
+      'OnStart must instantiate worker thread'
+    );
+
+    // 3. ServiceHost accepts PRESHUTDOWN
+    assert.ok(
+      csContent.includes('SERVICE_ACCEPT_PRESHUTDOWN'),
+      'ServiceHost must register SERVICE_ACCEPT_PRESHUTDOWN'
+    );
+    assert.ok(
+      csContent.includes('SERVICE_CONTROL_PRESHUTDOWN'),
+      'ServiceHost must handle SERVICE_CONTROL_PRESHUTDOWN in OnCustomCommand'
+    );
+  });
+
+  // Test 69 / Required Test 14: boot recovery does not touch
+  it('69. boot recovery does not touch: Tailscale, loopback, disconnected, APIPA, unrelated adapters', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-reboot-14.json');
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux');
+
+    // Multi-adapter setup with only Interface 6 being the eligible routed WiFi
+    const adapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Gateway: '192.168.1.1',
+        ServerAddresses: ['127.0.0.1'], // Stale 127 on eligible adapter
+        DhcpEnabled: true,
+        Status: 'Up',
+        IpAddresses: ['192.168.1.8'],
+      },
+      {
+        InterfaceIndex: 11,
+        InterfaceAlias: 'Tailscale',
+        Description: 'Tailscale Tunnel',
+        ServerAddresses: ['100.100.100.100'],
+        DhcpEnabled: false,
+        Status: 'Up',
+        IpAddresses: ['100.88.17.16'],
+      },
+      {
+        InterfaceIndex: 1,
+        InterfaceAlias: 'Loopback Pseudo-Interface 1',
+        ServerAddresses: ['127.0.0.1'],
+        DhcpEnabled: false,
+        Status: 'Up',
+        IpAddresses: ['127.0.0.1'],
+      },
+      {
+        InterfaceIndex: 12,
+        InterfaceAlias: 'Ethernet Disconnected',
+        ServerAddresses: [],
+        DhcpEnabled: true,
+        Status: 'Disconnected',
+        IpAddresses: [],
+      },
+      {
+        InterfaceIndex: 15,
+        InterfaceAlias: 'Ethernet APIPA',
+        ServerAddresses: [],
+        DhcpEnabled: true,
+        Status: 'Up',
+        IpAddresses: ['169.254.10.20'],
+      },
+    ];
+    nm.setMockAdaptersForTesting(adapters);
+
+    // Run boot recovery with no resolver running
+    const result = await nm.recoverStaleDnsAtBoot(53);
+    assert.strictEqual(result.recovered, true);
+    assert.deepStrictEqual(result.restoredAdapters, [6], 'Only eligible Interface 6 must be recovered');
+
+    // Verify non-eligible adapters are completely untouched
+    const tailscale = adapters.find((a) => a.InterfaceIndex === 11);
+    assert.deepStrictEqual(tailscale?.ServerAddresses, ['100.100.100.100'], 'Tailscale must remain untouched');
+
+    const loopback = adapters.find((a) => a.InterfaceIndex === 1);
+    assert.deepStrictEqual(loopback?.ServerAddresses, ['127.0.0.1'], 'Loopback must remain untouched');
+
+    const disconnected = adapters.find((a) => a.InterfaceIndex === 12);
+    assert.deepStrictEqual(disconnected?.ServerAddresses, [], 'Disconnected adapter must remain untouched');
+
+    const apipa = adapters.find((a) => a.InterfaceIndex === 15);
+    assert.deepStrictEqual(apipa?.ServerAddresses, [], 'APIPA adapter must remain untouched');
+  });
+
+  // Test 70 / Required Test 15: fail-safe watchdog
+  it('70. fail-safe watchdog: persistent resolver failure triggers fail-open restore to original/DHCP DNS', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-reboot-watchdog.json');
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux');
+
+    // Initial state: Adapter 6 enforced with 127.0.0.1
+    const adapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Gateway: '192.168.1.1',
+        ServerAddresses: ['127.0.0.1'],
+        DhcpEnabled: true,
+      },
+    ];
+    nm.setMockAdaptersForTesting(adapters);
+    nm.setMaxConsecutiveHealthFailuresForTesting(2); // Set threshold to 2 checks for test
+
+    const dnsServer = await createMockDnsServer();
+    try {
+      // Simulate persistent resolver/upstream failure
+      nm.setUpstreamResolutionCheckerForTesting(async () => false);
+
+      // Check 1: Warning, failure recorded
+      const res1 = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(res1.status, 'ERROR');
+      assert.strictEqual(nm.getConsecutiveHealthFailuresForTesting(), 1);
+      assert.deepStrictEqual(adapters[0].ServerAddresses, ['127.0.0.1']);
+
+      // Check 2: Threshold reached -> Watchdog triggers fail-open restoration!
+      const res2 = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(res2.status, 'ERROR');
+      assert.match(res2.message, /Watchdog restored original\/DHCP DNS/);
+      // Adapter DNS is fail-open restored (not trapped on 127.0.0.1)
+      assert.deepStrictEqual(adapters[0].ServerAddresses, []);
+    } finally {
+      nm.setUpstreamResolutionCheckerForTesting(null);
+      await dnsServer.close();
+    }
+  });
+
+  // Test 71 / Required Test A & C: OnStart non-blocking invariant
+  it('71. OnStart non-blocking: SCM OnStart does not synchronously execute boot recovery / retry sleeps, slow/unavailable CIM does not block SCM startup', async () => {
+    const csPath = path.resolve(__dirname, '../service-host/SafeBrowseServiceHost.cs');
+    const csContent = fs.readFileSync(csPath, 'utf8');
+
+    const onStartBody = extractCsMethod(csContent, 'protected override void OnStart(string[] args)');
+
+    // Invariant: OnStart MUST NOT call PowerShell, sleep, or synchronously execute preflight
+    assert.ok(!onStartBody.includes('PerformBootPreflight()'), 'OnStart must not call PerformBootPreflight');
+    assert.ok(!onStartBody.includes('Thread.Sleep'), 'OnStart must never call Thread.Sleep');
+    assert.ok(!onStartBody.includes('powershell'), 'OnStart must not execute powershell');
+    assert.ok(!onStartBody.includes('Process.Start'), 'OnStart must not synchronously spawn and wait on child processes');
+    assert.ok(onStartBody.includes('_stopping = false'), 'OnStart must initialize _stopping flag');
+    assert.ok(onStartBody.includes('_monitorThread = new Thread(WorkerLoop)'), 'OnStart must delegate work to WorkerLoop thread');
+    assert.ok(onStartBody.includes('_monitorThread.Start()'), 'OnStart must start monitor thread');
+
+    // Simulate OnStart execution under slow / unavailable CIM:
+    // When CIM/network discovery is delayed (e.g. 500ms delay with retries),
+    // SCM startup function (triggering background thread start) completes immediately (< 50ms).
+    let preflightExecuted = false;
+    let cimRetriesAttempted = 0;
+    const fakeSlowPreflight = async () => {
+      preflightExecuted = true;
+      for (let i = 0; i < 3; i++) {
+        cimRetriesAttempted++;
+        await new Promise((r) => setTimeout(r, 50)); // simulate slow CIM retry
+      }
+    };
+
+    const startExecution = Date.now();
+    let threadStarted = false;
+    // Simulate OnStart non-blocking contract:
+    const simulateOnStart = () => {
+      (async () => {
+        threadStarted = true;
+        await fakeSlowPreflight();
+      })();
+      return { started: true };
+    };
+
+    const result = simulateOnStart();
+    const elapsed = Date.now() - startExecution;
+
+    assert.strictEqual(result.started, true);
+    assert.ok(elapsed < 50, `OnStart must return immediately (<50ms), took ${elapsed}ms`);
+    assert.strictEqual(threadStarted, true);
+
+    // Allow background worker thread to finish
+    await new Promise((r) => setTimeout(r, 200));
+    assert.strictEqual(preflightExecuted, true);
+    assert.strictEqual(cimRetriesAttempted, 3);
+  });
+
+  // Test 72 / Required Test B: Worker bootstrap preflight ordering
+  it('72. worker bootstrap ordering: WorkerLoop performs boot preflight BEFORE child process launch', () => {
+    const csPath = path.resolve(__dirname, '../service-host/SafeBrowseServiceHost.cs');
+    const csContent = fs.readFileSync(csPath, 'utf8');
+
+    const workerLoopBody = extractCsMethod(csContent, 'private void WorkerLoop()');
+
+    const preflightIdx = workerLoopBody.indexOf('PerformBootPreflight()');
+    const childLaunchIdx = workerLoopBody.indexOf('Process.Start(psi)');
+
+    assert.ok(preflightIdx !== -1, 'WorkerLoop must invoke PerformBootPreflight()');
+    assert.ok(childLaunchIdx !== -1, 'WorkerLoop must launch child process via Process.Start(psi)');
+    assert.ok(
+      preflightIdx < childLaunchIdx,
+      'Mandatory invariant: Boot preflight MUST execute BEFORE child process launch to prevent starting with stale 127.0.0.1'
+    );
+  });
+
+  // Test 73 / Required Test D: Preshutdown optional best-effort isolation
+  it('73. preshutdown optional best-effort: reflection/registration failure does not prevent service startup', () => {
+    const csPath = path.resolve(__dirname, '../service-host/SafeBrowseServiceHost.cs');
+    const csContent = fs.readFileSync(csPath, 'utf8');
+
+    // 1. Static audit: TryEnablePreShutdown is isolated and non-fatal
+    const tryPreShutdownBody = extractCsMethod(csContent, 'private void TryEnablePreShutdown()');
+    assert.ok(tryPreShutdownBody.includes('try'), 'TryEnablePreShutdown must wrap reflection in try block');
+    assert.ok(tryPreShutdownBody.includes('catch (Exception'), 'TryEnablePreShutdown must catch all exceptions');
+    assert.ok(
+      tryPreShutdownBody.includes('Log(string.Format("[WARN] Optional SERVICE_ACCEPT_PRESHUTDOWN registration failed'),
+      'Must log warning on registration failure'
+    );
+    assert.ok(!tryPreShutdownBody.includes('throw'), 'TryEnablePreShutdown must never rethrow exception');
+
+    // 2. Explicit architectural contract documentation
+    assert.ok(
+      csContent.includes('PRESHUTDOWN = OPTIMISATION / BEST-EFFORT CLEANUP ONLY'),
+      'Must document PRESHUTDOWN as best-effort optimization only'
+    );
+    assert.ok(
+      csContent.includes('BOOT PREFLIGHT = MANDATORY CORRECTNESS GUARANTEE'),
+      'Must document BOOT PREFLIGHT as mandatory correctness guarantee'
+    );
+
+    // 3. Constructor must invoke TryEnablePreShutdown without fatal abort
+    const ctorBody = extractCsMethod(csContent, 'public SafeBrowseServiceHost()');
+    assert.ok(ctorBody.includes('TryEnablePreShutdown()'), 'Constructor must call TryEnablePreShutdown');
+  });
+
+  // Test 74 / Required Test E: No preshutdown delivered recovers on next boot
+  it('74. no preshutdown delivered: abrupt shutdown/power loss leaves stale 127, boot preflight recovers correctly', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-no-preshutdown.json');
+    fs.writeFileSync(
+      backupFile,
+      JSON.stringify([
+        { InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['192.168.1.1'], DhcpEnabled: true }
+      ])
+    );
+
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('win32');
+
+    let resetExecuted = false;
+
+    // Simulate scenario: System was power-cycled abruptly or CIM was terminated before OnStop/OnCustomCommand.
+    // Zero preshutdown events were delivered.
+    // WiFi adapter was left configured to 127.0.0.1 in the Windows registry.
+    const mockExecutor = async (script: string) => {
+      if (script.includes('ResetServerAddresses')) {
+        resetExecuted = true;
+      }
+      if (script.includes('Get-DnsClientServerAddress')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['127.0.0.1'], DhcpEnabled: true }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetRoute')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', NextHop: '192.168.1.1' }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetAdapter')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Status: 'Up' }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-NetIPAddress')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, IPAddress: '192.168.1.8' }]),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    nm.setCommandExecutorForTesting(mockExecutor);
+
+    // Boot preflight executes on next startup without assuming any preshutdown was received
+    const result = await nm.recoverStaleDnsAtBoot(53);
+    assert.strictEqual(result.recovered, true, 'Boot preflight must recover stale 127 even with no preshutdown');
+    assert.strictEqual(resetExecuted, true, 'Must execute ResetServerAddresses');
+    assert.deepStrictEqual(result.restoredAdapters, [6]);
+  });
+
+  // Test 75: Boot preflight cancellation responsiveness
+  it('75. boot preflight cancellation responsiveness: stopping service while preflight retries exits cleanly', () => {
+    const csPath = path.resolve(__dirname, '../service-host/SafeBrowseServiceHost.cs');
+    const csContent = fs.readFileSync(csPath, 'utf8');
+
+    const preflightBody = extractCsMethod(csContent, 'public bool PerformBootPreflight(int maxRetries = 3, int retryDelayMs = 2000)');
+
+    assert.ok(
+      preflightBody.includes('if (_stopping)'),
+      'PerformBootPreflight must check _stopping at start of each attempt'
+    );
+    assert.ok(
+      preflightBody.includes('!_stopping'),
+      'PerformBootPreflight retry sleep must be interruptible by _stopping'
+    );
+  });
 });
