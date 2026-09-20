@@ -64,8 +64,9 @@ namespace SafeBrowse
                 if (field != null)
                 {
                     object rawVal = field.GetValue(this);
-                    if (rawVal is int val)
+                    if (rawVal is int)
                     {
+                        int val = (int)rawVal;
                         field.SetValue(this, val | 0x100);
                         Log("[INFO] SERVICE_ACCEPT_PRESHUTDOWN registered successfully (best-effort cleanup optimization).");
                         return;
