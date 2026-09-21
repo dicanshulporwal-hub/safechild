@@ -16,7 +16,19 @@ function createMockDnsServer(): Promise<{ port: number; close: () => Promise<voi
     server.on('message', (msg, rinfo) => {
       const response = Buffer.from(msg);
       response[2] |= 0x80; // Set QR flag to indicate response
-      server.send(response, rinfo.port, rinfo.address);
+      response[3] = response[3] & 0xf0; // RCODE = 0 (NOERROR)
+      response[6] = 0x00; // ANCOUNT = 1
+      response[7] = 0x01;
+      const answer = Buffer.from([
+        0xc0, 0x0c, // Pointer to question name
+        0x00, 0x01, // Type A
+        0x00, 0x01, // Class IN
+        0x00, 0x00, 0x01, 0x2c, // TTL = 300
+        0x00, 0x04, // RDLENGTH = 4
+        0x08, 0x08, 0x08, 0x08, // RDATA = 8.8.8.8
+      ]);
+      const fullResponse = Buffer.concat([response, answer]);
+      server.send(fullResponse, rinfo.port, rinfo.address);
     });
     server.bind(0, '127.0.0.1', () => {
       const addr = server.address();

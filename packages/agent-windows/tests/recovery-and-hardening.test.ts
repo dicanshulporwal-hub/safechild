@@ -62,13 +62,31 @@ function extractCsMethod(source: string, signature: string): string {
 /**
  * Helper to spin up a local UDP server that immediately echoes standard DNS query responses.
  */
-function createMockDnsServer(): Promise<{ port: number; close: () => Promise<void> }> {
+function createMockDnsServer(
+  customHandler?: (msg: Buffer, rinfo: dgram.RemoteInfo, socket: dgram.Socket) => void
+): Promise<{ port: number; close: () => Promise<void> }> {
   return new Promise((resolve) => {
     const server = dgram.createSocket('udp4');
     server.on('message', (msg, rinfo) => {
+      if (customHandler) {
+        customHandler(msg, rinfo, server);
+        return;
+      }
       const response = Buffer.from(msg);
       response[2] |= 0x80; // Set QR flag to indicate response
-      server.send(response, rinfo.port, rinfo.address);
+      response[3] = response[3] & 0xf0; // RCODE = 0 (NOERROR)
+      response[6] = 0x00; // ANCOUNT = 1
+      response[7] = 0x01;
+      const answer = Buffer.from([
+        0xc0, 0x0c, // Pointer to question name
+        0x00, 0x01, // Type A
+        0x00, 0x01, // Class IN
+        0x00, 0x00, 0x01, 0x2c, // TTL = 300
+        0x00, 0x04, // RDLENGTH = 4
+        0x08, 0x08, 0x08, 0x08, // RDATA = 8.8.8.8
+      ]);
+      const fullResponse = Buffer.concat([response, answer]);
+      server.send(fullResponse, rinfo.port, rinfo.address);
     });
     server.bind(0, '127.0.0.1', () => {
       const addr = server.address();
@@ -3052,5 +3070,844 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
       preflightBody.includes('!_stopping'),
       'PerformBootPreflight retry sleep must be interruptible by _stopping'
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // SafeBrowse Windows Run #18 P0.1 Upstream Lifecycle & Watchdog Recovery Tests (Tests 76-84)
+  // -------------------------------------------------------------------------
+
+  // Test 76: Old backup + new network
+  it('76. old backup + new network: proxy retains current-network upstreams and NEVER switches to stale backup', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-76.json');
+    // Pre-create old backup with 192.168.1.1
+    fs.writeFileSync(
+      backupFile,
+      JSON.stringify(
+        [
+          {
+            InterfaceIndex: 6,
+            InterfaceAlias: 'Wi-Fi',
+            ServerAddresses: ['192.168.1.1'],
+            DhcpEnabled: true,
+          },
+        ],
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux');
+
+    // New physical network has 8.8.8.8, 4.4.2.2
+    const adapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Gateway: '10.0.0.1',
+        ServerAddresses: ['8.8.8.8', '4.4.2.2'],
+        DhcpEnabled: true,
+      },
+    ];
+    nm.setMockAdaptersForTesting(adapters);
+
+    // Initial physical DNS discovery
+    const physicalDns = await nm.getCurrentPhysicalDnsServers();
+    assert.deepStrictEqual(physicalDns, ['8.8.8.8', '4.4.2.2']);
+
+    const proxy = new DnsFilterProxy(() => null);
+    proxy.setUpstreams(physicalDns);
+    assert.deepStrictEqual(proxy.getUpstreamServers(), [
+      { host: '8.8.8.8', port: 53 },
+      { host: '4.4.2.2', port: 53 },
+    ]);
+
+    // Adapter is now enforced to 127.0.0.1
+    adapters[0].ServerAddresses = ['127.0.0.1'];
+
+    // During subsequent tick, physical DNS returns []
+    const runtimePhysical = await nm.getCurrentPhysicalDnsServers();
+    assert.deepStrictEqual(runtimePhysical, []);
+
+    // Proxy retains known-good upstreams, NEVER substitutes 192.168.1.1 from network-backup.json
+    proxy.retainUpstreams();
+    assert.deepStrictEqual(proxy.getUpstreamServers(), [
+      { host: '8.8.8.8', port: 53 },
+      { host: '4.4.2.2', port: 53 },
+    ]);
+    assert.ok(
+      !proxy.getUpstreamServers().some((u) => u.host === '192.168.1.1'),
+      'Proxy upstreams must NEVER switch to stale 192.168.1.1 from backup'
+    );
+  });
+
+  // Test 77: Enforced adapter runtime inspection
+  it('77. enforced adapter: getCurrentPhysicalDnsServers returns empty, proxy retains upstreams without fallback injection', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-77.json');
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux');
+
+    // Adapter DNS is 127.0.0.1
+    const adapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Gateway: '192.168.1.1',
+        ServerAddresses: ['127.0.0.1'],
+        DhcpEnabled: true,
+      },
+    ];
+    nm.setMockAdaptersForTesting(adapters);
+
+    const physical = await nm.getCurrentPhysicalDnsServers();
+    assert.deepStrictEqual(physical, [], 'Must return empty when adapter is enforced to 127.0.0.1');
+
+    const proxy = new DnsFilterProxy(() => null);
+    proxy.setUpstreams(['8.8.8.8', '4.4.2.2']);
+    proxy.retainUpstreams();
+
+    // Upstreams remain exactly 8.8.8.8, 4.4.2.2
+    assert.deepStrictEqual(proxy.getUpstreamServers(), [
+      { host: '8.8.8.8', port: 53 },
+      { host: '4.4.2.2', port: 53 },
+    ]);
+  });
+
+  // Test 78: Watchdog fail-open retains reconciliation loop
+  it('78. watchdog fail-open retains loop: persistent failure triggers fail-open without stopping timer', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-78.json');
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux');
+
+    const adapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Gateway: '192.168.1.1',
+        ServerAddresses: ['127.0.0.1'],
+        DhcpEnabled: true,
+      },
+    ];
+    nm.setMockAdaptersForTesting(adapters);
+    nm.setMaxConsecutiveHealthFailuresForTesting(3);
+
+    const dnsServer = await createMockDnsServer();
+    try {
+      // Simulate active reconciliation loop
+      nm.startReconciliationLoop(dnsServer.port, 60000);
+      assert.notStrictEqual(nm.getReconcileTimerForTesting(), null, 'Reconciliation timer must be active');
+
+      // Upstream resolution fails persistently
+      nm.setUpstreamResolutionCheckerForTesting(async () => false);
+
+      // Tick 1
+      await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(nm.getConsecutiveHealthFailuresForTesting(), 1);
+      assert.deepStrictEqual(adapters[0].ServerAddresses, ['127.0.0.1']);
+
+      // Tick 2
+      await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(nm.getConsecutiveHealthFailuresForTesting(), 2);
+      assert.deepStrictEqual(adapters[0].ServerAddresses, ['127.0.0.1']);
+
+      // Tick 3: Watchdog triggers fail-open
+      const res3 = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(res3.status, 'ERROR');
+      assert.match(res3.message, /Watchdog restored original\/DHCP DNS/);
+
+      // DNS restored to original/DHCP
+      assert.deepStrictEqual(adapters[0].ServerAddresses, []);
+
+      // Mandatory Invariant: reconciliation timer MUST REMAIN ACTIVE for automatic recovery!
+      assert.notStrictEqual(
+        nm.getReconcileTimerForTesting(),
+        null,
+        'Reconciliation loop timer MUST NOT be stopped by watchdog fail-open'
+      );
+      assert.strictEqual(nm.getIsRestoringForTesting(), false, 'isRestoring must be reset to false');
+    } finally {
+      nm.stopReconciliationLoop();
+      nm.setUpstreamResolutionCheckerForTesting(null);
+      await dnsServer.close();
+    }
+  });
+
+  // Test 79: Watchdog recovery: auto-recovers protection once upstream healthy
+  it('79. watchdog recovery: synchronizes proxy upstreams, re-enforces 127 transactionally without service restart', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-79.json');
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux');
+
+    // System is in fail-open state: adapter is on external DNS (8.8.8.8, 4.4.2.2)
+    const adapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Gateway: '192.168.1.1',
+        ServerAddresses: ['8.8.8.8', '4.4.2.2'],
+        DhcpEnabled: true,
+      },
+    ];
+    nm.setMockAdaptersForTesting(adapters);
+
+    const proxy = new DnsFilterProxy(() => null);
+    // Wire up upstream sync handler
+    nm.setUpstreamSyncHandler((upstreams) => proxy.setUpstreams(upstreams));
+
+    const dnsServer = await createMockDnsServer();
+    try {
+      // Upstream becomes healthy
+      nm.setUpstreamResolutionCheckerForTesting(async () => true);
+
+      // Next reconciliation tick runs
+      const res = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(res.status, 'RE_ENFORCED');
+
+      // Proxy upstreams synchronized with current external DNS
+      assert.deepStrictEqual(proxy.getUpstreamServers(), [
+        { host: '8.8.8.8', port: 53 },
+        { host: '4.4.2.2', port: 53 },
+      ]);
+
+      // Adapter re-enforced to 127.0.0.1
+      assert.deepStrictEqual(adapters[0].ServerAddresses, ['127.0.0.1']);
+
+      // Status becomes protected
+      const inspection = await nm.inspectCurrentEnforcement();
+      assert.strictEqual(inspection.isProtected, true);
+    } finally {
+      nm.setUpstreamResolutionCheckerForTesting(null);
+      await dnsServer.close();
+    }
+  });
+
+  // Test 80: Persistent bad upstream: no flip oscillation
+  it('80. persistent bad upstream: stays on external DNS with zero flip oscillation when upstream remains down', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-80.json');
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux');
+
+    // Failed open to external DNS
+    const adapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Gateway: '192.168.1.1',
+        ServerAddresses: ['192.168.1.1'],
+        DhcpEnabled: true,
+      },
+    ];
+    nm.setMockAdaptersForTesting(adapters);
+
+    const dnsServer = await createMockDnsServer();
+    try {
+      // Upstream DNS is broken / unreachable
+      nm.setUpstreamResolutionCheckerForTesting(async () => false);
+
+      // Run multiple reconciliation ticks
+      for (let i = 1; i <= 5; i++) {
+        const res = await nm.reconcileAdapters(dnsServer.port);
+        assert.strictEqual(res.status, 'ERROR');
+        assert.match(res.message, /health (check failed|probe)/);
+        // Adapter must stay on external DNS, NEVER toggled to 127.0.0.1
+        assert.deepStrictEqual(adapters[0].ServerAddresses, ['192.168.1.1']);
+      }
+    } finally {
+      nm.setUpstreamResolutionCheckerForTesting(null);
+      await dnsServer.close();
+    }
+  });
+
+  // Test 81: Transient health failure resets counter on success
+  it('81. transient health failure: counter increments on failure and resets on subsequent success without fail-open', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-81.json');
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux');
+
+    const adapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Gateway: '192.168.1.1',
+        ServerAddresses: ['127.0.0.1'],
+        DhcpEnabled: true,
+      },
+    ];
+    nm.setMockAdaptersForTesting(adapters);
+    nm.setMaxConsecutiveHealthFailuresForTesting(3);
+
+    const dnsServer = await createMockDnsServer();
+    try {
+      // Tick 1: Transient failure
+      nm.setUpstreamResolutionCheckerForTesting(async () => false);
+      const res1 = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(res1.status, 'ERROR');
+      assert.strictEqual(nm.getConsecutiveHealthFailuresForTesting(), 1);
+      assert.deepStrictEqual(adapters[0].ServerAddresses, ['127.0.0.1'], 'Must stay 127 on transient failure');
+
+      // Tick 2: Health restored!
+      nm.setUpstreamResolutionCheckerForTesting(async () => true);
+      const res2 = await nm.reconcileAdapters(dnsServer.port);
+      assert.strictEqual(res2.status, 'IN_SYNC');
+      assert.strictEqual(nm.getConsecutiveHealthFailuresForTesting(), 0, 'Counter must reset to 0');
+      assert.deepStrictEqual(adapters[0].ServerAddresses, ['127.0.0.1']);
+    } finally {
+      nm.setUpstreamResolutionCheckerForTesting(null);
+      await dnsServer.close();
+    }
+  });
+
+  // Test 82: DHCP restore with stale backup
+  it('82. DHCP restore with stale backup: executes ResetServerAddresses and never applies stale IP statically', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-82.json');
+    fs.writeFileSync(
+      backupFile,
+      JSON.stringify(
+        [
+          {
+            InterfaceIndex: 6,
+            InterfaceAlias: 'Wi-Fi',
+            ServerAddresses: ['192.168.1.1'],
+            DhcpEnabled: true,
+          },
+        ],
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('win32');
+
+    let executedReset = false;
+    let executedStaticSet = false;
+    nm.setCommandExecutorForTesting(async (script: string) => {
+      if (script.includes('ResetServerAddresses')) {
+        executedReset = true;
+      }
+      if (script.includes('Set-DnsClientServerAddress') && script.includes('-ServerAddresses')) {
+        executedStaticSet = true;
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    await nm.restoreOriginalDns({ stopReconciliation: false });
+    assert.strictEqual(executedReset, true, 'Must execute ResetServerAddresses for DHCP-enabled adapter');
+    assert.strictEqual(executedStaticSet, false, 'Must NOT statically assign stale 192.168.1.1 for DHCP adapter');
+  });
+
+  // Test 83: Static DNS restore
+  it('83. static DNS restore: restores exact static IP addresses when DhcpEnabled is false', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-83.json');
+    fs.writeFileSync(
+      backupFile,
+      JSON.stringify(
+        [
+          {
+            InterfaceIndex: 6,
+            InterfaceAlias: 'Wi-Fi',
+            ServerAddresses: ['1.1.1.1', '1.0.0.1'],
+            DhcpEnabled: false,
+          },
+        ],
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('win32');
+
+    const executedCommands: string[] = [];
+    nm.setCommandExecutorForTesting(async (script: string) => {
+      executedCommands.push(script);
+      return { stdout: '', stderr: '' };
+    });
+
+    await nm.restoreOriginalDns({ stopReconciliation: false });
+    assert.ok(
+      executedCommands.some((c) => c.includes("-ServerAddresses @('1.1.1.1','1.0.0.1')")),
+      'Must restore static IP addresses'
+    );
+    assert.ok(
+      !executedCommands.some((c) => c.includes('ResetServerAddresses')),
+      'Must not reset to DHCP when DhcpEnabled is false'
+    );
+  });
+
+  // Test 84: Terminal shutdown restore stops loop
+  it('84. terminal shutdown restore: default restoreOriginalDns stops reconciliation loop and clears state', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-84.json');
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux');
+
+    const adapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Gateway: '192.168.1.1',
+        ServerAddresses: ['127.0.0.1'],
+        DhcpEnabled: true,
+      },
+    ];
+    nm.setMockAdaptersForTesting(adapters);
+
+    // Start reconciliation loop
+    nm.startReconciliationLoop(53, 60000);
+    assert.notStrictEqual(nm.getReconcileTimerForTesting(), null, 'Reconcile timer must be running');
+
+    // Call restoreOriginalDns with default options (stopReconciliation: true)
+    await nm.restoreOriginalDns();
+
+    // Reconcile timer must be cleared
+    assert.strictEqual(nm.getReconcileTimerForTesting(), null, 'Reconcile timer must be stopped on terminal restore');
+    assert.strictEqual(nm.getIsRestoringForTesting(), false, 'isRestoring must be false');
+    assert.deepStrictEqual(adapters[0].ServerAddresses, []);
+  });
+
+  // -------------------------------------------------------------------------
+  // SafeBrowse Windows DNS Health Probe Deterministic Suite (Tests 85-92)
+  // -------------------------------------------------------------------------
+
+  // Test 85: valid NOERROR + answer => healthy
+  it('85. health probe: valid NOERROR + answer => healthy', async () => {
+    const nm = new WindowsNetworkManager();
+    const server = await createMockDnsServer(); // Default responds with NOERROR + 1 answer
+    try {
+      const healthy = await nm.verifyDnsProxyResponding(server.port, 1000);
+      assert.strictEqual(healthy, true, 'Valid NOERROR response with answer must be healthy');
+    } finally {
+      await server.close();
+    }
+  });
+
+  // Test 86: NXDOMAIN => unhealthy
+  it('86. health probe: NXDOMAIN (RCODE 3) => unhealthy', async () => {
+    const nm = new WindowsNetworkManager();
+    const server = await createMockDnsServer((msg, rinfo, socket) => {
+      const response = Buffer.from(msg);
+      response[2] |= 0x80; // QR = 1
+      response[3] = (response[3] & 0xf0) | 0x03; // RCODE 3 = NXDOMAIN
+      response[6] = 0x00; // ANCOUNT = 0
+      response[7] = 0x00;
+      socket.send(response, rinfo.port, rinfo.address);
+    });
+    try {
+      const healthy = await nm.verifyDnsProxyResponding(server.port, 500);
+      assert.strictEqual(healthy, false, 'NXDOMAIN must be considered unhealthy for dns.google');
+    } finally {
+      await server.close();
+    }
+  });
+
+  // Test 87: SERVFAIL => unhealthy
+  it('87. health probe: SERVFAIL (RCODE 2) => unhealthy', async () => {
+    const nm = new WindowsNetworkManager();
+    const server = await createMockDnsServer((msg, rinfo, socket) => {
+      const response = Buffer.from(msg);
+      response[2] |= 0x80; // QR = 1
+      response[3] = (response[3] & 0xf0) | 0x02; // RCODE 2 = SERVFAIL
+      socket.send(response, rinfo.port, rinfo.address);
+    });
+    try {
+      const healthy = await nm.verifyDnsProxyResponding(server.port, 500);
+      assert.strictEqual(healthy, false, 'SERVFAIL must be considered unhealthy');
+    } finally {
+      await server.close();
+    }
+  });
+
+  // Test 88: REFUSED => unhealthy
+  it('88. health probe: REFUSED (RCODE 5) => unhealthy', async () => {
+    const nm = new WindowsNetworkManager();
+    const server = await createMockDnsServer((msg, rinfo, socket) => {
+      const response = Buffer.from(msg);
+      response[2] |= 0x80; // QR = 1
+      response[3] = (response[3] & 0xf0) | 0x05; // RCODE 5 = REFUSED
+      socket.send(response, rinfo.port, rinfo.address);
+    });
+    try {
+      const healthy = await nm.verifyDnsProxyResponding(server.port, 500);
+      assert.strictEqual(healthy, false, 'REFUSED must be considered unhealthy');
+    } finally {
+      await server.close();
+    }
+  });
+
+  // Test 89: wrong transaction ID => unhealthy
+  it('89. health probe: wrong transaction ID => unhealthy', async () => {
+    const nm = new WindowsNetworkManager();
+    const server = await createMockDnsServer((msg, rinfo, socket) => {
+      const response = Buffer.from(msg);
+      response[0] ^= 0xff; // Invert transaction ID byte
+      response[2] |= 0x80; // QR = 1
+      response[3] = response[3] & 0xf0; // RCODE 0
+      response[6] = 0x00;
+      response[7] = 0x01; // ANCOUNT = 1
+      const answer = Buffer.from([
+        0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x2c, 0x00, 0x04, 0x08, 0x08, 0x08, 0x08,
+      ]);
+      socket.send(Buffer.concat([response, answer]), rinfo.port, rinfo.address);
+    });
+    try {
+      const healthy = await nm.verifyDnsProxyResponding(server.port, 500);
+      assert.strictEqual(healthy, false, 'Response with mismatched transaction ID must be rejected');
+    } finally {
+      await server.close();
+    }
+  });
+
+  // Test 90: QR=0 => unhealthy
+  it('90. health probe: QR=0 (query flag, not response) => unhealthy', async () => {
+    const nm = new WindowsNetworkManager();
+    const server = await createMockDnsServer((msg, rinfo, socket) => {
+      const response = Buffer.from(msg);
+      response[2] &= 0x7f; // QR = 0 (not a response)
+      socket.send(response, rinfo.port, rinfo.address);
+    });
+    try {
+      const healthy = await nm.verifyDnsProxyResponding(server.port, 500);
+      assert.strictEqual(healthy, false, 'Packet with QR=0 must be rejected');
+    } finally {
+      await server.close();
+    }
+  });
+
+  // Test 91: malformed/short response => unhealthy
+  it('91. health probe: malformed/short response => unhealthy', async () => {
+    const nm = new WindowsNetworkManager();
+    const server = await createMockDnsServer((msg, rinfo, socket) => {
+      // Send truncated 8-byte response (less than 12-byte header)
+      socket.send(msg.subarray(0, 8), rinfo.port, rinfo.address);
+    });
+    try {
+      const healthy = await nm.verifyDnsProxyResponding(server.port, 500);
+      assert.strictEqual(healthy, false, 'Malformed/short packet must be rejected');
+    } finally {
+      await server.close();
+    }
+  });
+
+  // Test 92: timeout then successful retry => healthy
+  it('92. health probe: timeout then successful retry => healthy', async () => {
+    const nm = new WindowsNetworkManager();
+    let queryCount = 0;
+    const server = await createMockDnsServer((msg, rinfo, socket) => {
+      queryCount++;
+      if (queryCount === 1) {
+        // Drop attempt 1: simulate transient packet loss
+        return;
+      }
+      // Attempt 2 (retry): respond with valid NOERROR + answer
+      const response = Buffer.from(msg);
+      response[2] |= 0x80;
+      response[3] = response[3] & 0xf0;
+      response[6] = 0x00;
+      response[7] = 0x01;
+      const answer = Buffer.from([
+        0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x2c, 0x00, 0x04, 0x08, 0x08, 0x08, 0x08,
+      ]);
+      socket.send(Buffer.concat([response, answer]), rinfo.port, rinfo.address);
+    });
+    try {
+      // Timeout is 1000ms; retry fires at min(1200, 1000/2) = 500ms
+      const healthy = await nm.verifyDnsProxyResponding(server.port, 1000);
+      assert.strictEqual(healthy, true, 'Retry must recover from single transient packet drop');
+      assert.strictEqual(queryCount, 2, 'Must have received exactly 2 queries (original + retry)');
+    } finally {
+      await server.close();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // SafeBrowse Health Probe Policy Isolation & Lifecycle Deterministic Suite (Tests 93-99)
+  // -------------------------------------------------------------------------
+
+  // Test 93: Parental policy blocks dns.google, but infrastructure health remains HEALTHY and watchdog does NOT fail open
+  it('93. policy isolation: parental policy blocking dns.google does NOT trigger health failure or watchdog fail-open', async () => {
+    // 1. Setup proxy with strict parental policy that explicitly blocks dns.google
+    const policyWithDnsGoogleBlocked = makeMockPolicy({
+      rules: [makeMockRule('dns.google', 'BLOCK')],
+    });
+    const upstreamServer = await createMockDnsServer();
+    const proxy = new DnsFilterProxy(() => policyWithDnsGoogleBlocked, '127.0.0.1', 0);
+    proxy.setUpstreamServers([{ host: '127.0.0.1', port: upstreamServer.port }]);
+    const proxyPort = await proxy.start(0);
+
+    const backupFile = path.join(tmpDir, 'backup-test-93.json');
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('linux');
+
+    const adapters: MockAdapterState[] = [
+      {
+        InterfaceIndex: 6,
+        InterfaceAlias: 'Wi-Fi',
+        Gateway: '192.168.1.1',
+        ServerAddresses: ['127.0.0.1'],
+        DhcpEnabled: true,
+      },
+    ];
+    nm.setMockAdaptersForTesting(adapters);
+    nm.setMaxConsecutiveHealthFailuresForTesting(3);
+    nm.setConfiguredUpstreams([{ host: '127.0.0.1', port: upstreamServer.port }]);
+
+    try {
+      // 2. Verify that ordinary user query to proxy for 'dns.google' is blocked by policy
+      const isProxyRespondingGoogle = await nm.probeDirectDnsServer('127.0.0.1', proxyPort, 500, 'dns.google');
+      // When blocked, proxy returns NXDOMAIN (or block response), which probeDirectDnsServer rejects
+      assert.strictEqual(isProxyRespondingGoogle, false, 'Client dns.google query must be blocked by parental policy');
+
+      // 3. Verify that infrastructure health check returns true because:
+      //    a) local proxy responds to internal health query (bypasses policy)
+      //    b) upstream is probed directly over UDP (bypasses proxy and policy)
+      const isHealthy = await nm.verifyEndToEndResolverHealth(proxyPort, {
+        upstreams: [{ host: '127.0.0.1', port: upstreamServer.port }],
+      });
+      assert.strictEqual(isHealthy, true, 'Infrastructure health check must be HEALTHY even though policy blocks dns.google');
+
+      // 4. Verify that watchdog reconciliation loop NEVER triggers fail-open
+      for (let tick = 1; tick <= 5; tick++) {
+        const res = await nm.reconcileAdapters(proxyPort);
+        assert.strictEqual(res.status, 'IN_SYNC', `Tick ${tick} must remain IN_SYNC`);
+        assert.strictEqual(nm.getConsecutiveHealthFailuresForTesting(), 0, `Watchdog failure count must stay 0 on tick ${tick}`);
+        assert.deepStrictEqual(adapters[0].ServerAddresses, ['127.0.0.1'], 'Adapter must remain enforced with 127.0.0.1');
+      }
+    } finally {
+      await proxy.stop();
+      await upstreamServer.close();
+    }
+  });
+
+  // Test 94: Local proxy alive + upstream healthy => healthy
+  it('94. health isolation: local proxy alive + upstream healthy => healthy', async () => {
+    const proxyServer = await createMockDnsServer();
+    const upstreamServer = await createMockDnsServer();
+    const nm = new WindowsNetworkManager();
+
+    try {
+      const isHealthy = await nm.verifyEndToEndResolverHealth(proxyServer.port, {
+        upstreams: [{ host: '127.0.0.1', port: upstreamServer.port }],
+      });
+      assert.strictEqual(isHealthy, true, 'End-to-end health must be true when proxy is alive and upstream is healthy');
+    } finally {
+      await proxyServer.close();
+      await upstreamServer.close();
+    }
+  });
+
+  // Test 95: Local proxy alive + all upstreams unhealthy => unhealthy
+  it('95. health isolation: local proxy alive + all upstreams unhealthy => unhealthy', async () => {
+    const proxyServer = await createMockDnsServer();
+    const deadUpstream = await createMockDnsServer();
+    const deadPort = deadUpstream.port;
+    await deadUpstream.close(); // Port is now closed/dead
+
+    const nm = new WindowsNetworkManager();
+
+    try {
+      const isHealthy = await nm.verifyEndToEndResolverHealth(proxyServer.port, {
+        timeoutMs: 300,
+        upstreams: [{ host: '127.0.0.1', port: deadPort }],
+      });
+      assert.strictEqual(isHealthy, false, 'End-to-end health must be false when all upstreams are unhealthy');
+    } finally {
+      await proxyServer.close();
+    }
+  });
+
+  // Test 96: Local proxy unavailable => unhealthy
+  it('96. health isolation: local proxy unavailable => unhealthy', async () => {
+    const deadProxy = await createMockDnsServer();
+    const deadProxyPort = deadProxy.port;
+    await deadProxy.close(); // Proxy port is dead
+
+    const liveUpstream = await createMockDnsServer();
+    const nm = new WindowsNetworkManager();
+
+    try {
+      const isHealthy = await nm.verifyEndToEndResolverHealth(deadProxyPort, {
+        timeoutMs: 300,
+        upstreams: [{ host: '127.0.0.1', port: liveUpstream.port }],
+      });
+      assert.strictEqual(isHealthy, false, 'End-to-end health must be false when local proxy is unavailable');
+    } finally {
+      await liveUpstream.close();
+    }
+  });
+
+  // Test 97: Multi-upstream fallback: first upstream unavailable + second upstream healthy => healthy
+  it('97. multi-upstream fallback: first upstream unavailable + second upstream healthy => healthy', async () => {
+    const proxyServer = await createMockDnsServer();
+    const deadUpstream = await createMockDnsServer();
+    const deadPort = deadUpstream.port;
+    await deadUpstream.close(); // Upstream 1 is down
+
+    const liveUpstream = await createMockDnsServer(); // Upstream 2 is healthy
+    const nm = new WindowsNetworkManager();
+
+    try {
+      const isHealthy = await nm.verifyEndToEndResolverHealth(proxyServer.port, {
+        timeoutMs: 400,
+        upstreams: [
+          { host: '127.0.0.1', port: deadPort },
+          { host: '127.0.0.1', port: liveUpstream.port },
+        ],
+      });
+      assert.strictEqual(isHealthy, true, 'Must succeed when at least one configured upstream is healthy');
+    } finally {
+      await proxyServer.close();
+      await liveUpstream.close();
+    }
+  });
+
+  // Test 98: Policy evaluation is never invoked during infrastructure health probing
+  it('98. policy isolation: policy evaluation is never invoked during health probing', async () => {
+    let policyEvaluationCount = 0;
+    const trackedPolicy = makeMockPolicy({
+      rules: [makeMockRule('bad.com', 'BLOCK')],
+    });
+
+    const proxy = new DnsFilterProxy(() => {
+      policyEvaluationCount++;
+      return trackedPolicy;
+    }, '127.0.0.1', 0);
+    const proxyPort = await proxy.start(0);
+
+    const upstreamServer = await createMockDnsServer();
+    const nm = new WindowsNetworkManager();
+
+    try {
+      // 1. Local proxy liveness probe (health.safebrowse.internal)
+      const proxyAlive = await nm.verifyLocalProxyAlive(proxyPort);
+      assert.strictEqual(proxyAlive, true, 'Local proxy liveness check must succeed');
+      assert.strictEqual(policyEvaluationCount, 0, 'Internal liveness check must NEVER trigger policy evaluation');
+
+      // 2. Direct upstream probe
+      const upstreamAlive = await nm.probeDirectDnsServer('127.0.0.1', upstreamServer.port);
+      assert.strictEqual(upstreamAlive, true, 'Direct upstream probe must succeed');
+      assert.strictEqual(policyEvaluationCount, 0, 'Direct upstream probe must NEVER trigger proxy policy evaluation');
+
+      // 3. Combined end-to-end resolver health
+      const resolverHealthy = await nm.verifyEndToEndResolverHealth(proxyPort, {
+        upstreams: [{ host: '127.0.0.1', port: upstreamServer.port }],
+      });
+      assert.strictEqual(resolverHealthy, true, 'Resolver health check must succeed');
+      assert.strictEqual(policyEvaluationCount, 0, 'End-to-end resolver health check must NEVER trigger policy evaluation');
+
+      // 4. Contrast: verify that an ordinary user DNS query DOES invoke policy evaluation
+      await nm.probeDirectDnsServer('127.0.0.1', proxyPort, 500, 'bad.com');
+      assert.ok(policyEvaluationCount > 0, 'User DNS query must invoke policy evaluation');
+    } finally {
+      await proxy.stop();
+      await upstreamServer.close();
+    }
+  });
+
+  // Test 99: Logging hygiene: repeated retainUpstreams() calls deduplicate and do not generate duplicate log entries
+  it('99. logging hygiene: repeated retainUpstreams() calls deduplicate and do not generate duplicate log entries', () => {
+    const proxy = new DnsFilterProxy(() => null);
+    proxy.resetLastRetainedHostsForTesting();
+
+    const loggedMessages: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: any[]) => {
+      loggedMessages.push(args.join(' '));
+      originalLog(...args);
+    };
+
+    try {
+      proxy.setUpstreams(['8.8.8.8', '4.4.2.2']);
+
+      // Call retainUpstreams 10 times in a row (simulates 10 ticks = 30 seconds of reconciliation)
+      for (let i = 0; i < 10; i++) {
+        proxy.retainUpstreams();
+      }
+
+      // Assert that "[DnsProxy] Retaining known-good upstreams: [8.8.8.8, 4.4.2.2]" was logged EXACTLY ONCE
+      const retain8888Count = loggedMessages.filter((m) =>
+        m.includes('[DnsProxy] Retaining known-good upstreams: [8.8.8.8, 4.4.2.2]')
+      ).length;
+      assert.strictEqual(
+        retain8888Count,
+        1,
+        `Retain log message must be deduplicated to exactly 1 entry, got ${retain8888Count}`
+      );
+
+      // Change upstreams to new state
+      proxy.setUpstreams(['1.1.1.1']);
+
+      // Call retainUpstreams 5 times for new state
+      for (let i = 0; i < 5; i++) {
+        proxy.retainUpstreams();
+      }
+
+      // Assert that "[DnsProxy] Retaining known-good upstreams: [1.1.1.1]" was logged EXACTLY ONCE
+      const retain1111Count = loggedMessages.filter((m) =>
+        m.includes('[DnsProxy] Retaining known-good upstreams: [1.1.1.1]')
+      ).length;
+      assert.strictEqual(
+        retain1111Count,
+        1,
+        `Retain log message for new state must be deduplicated to exactly 1 entry, got ${retain1111Count}`
+      );
+    } finally {
+      console.log = originalLog;
+    }
+  });
+
+  // Test 100: Active-upstream consistency: proxy configured with dead upstream fails health even if independent DNS is reachable
+  it('100. active-upstream consistency: proxy configured with dead upstream fails health even if independent DNS is reachable', async () => {
+    // 1. Setup local proxy server
+    const proxyServer = await createMockDnsServer();
+
+    // 2. Setup dead upstream (port closed / unreachable)
+    const deadUpstream = await createMockDnsServer();
+    const deadPort = deadUpstream.port;
+    await deadUpstream.close();
+
+    // 3. Setup a separate, independently reachable healthy DNS server (representing 1.1.1.1 or other DNS)
+    const reachableDnsServer = await createMockDnsServer();
+
+    // 4. Setup DnsFilterProxy configured ONLY to forward to the dead upstream
+    const proxy = new DnsFilterProxy(() => null);
+    proxy.setUpstreamServers([{ host: '127.0.0.1', port: deadPort }]);
+
+    // 5. Setup WindowsNetworkManager with activeUpstreamProvider wired to proxy
+    const nm = new WindowsNetworkManager();
+    nm.setActiveUpstreamProvider(() => proxy.getUpstreamServers());
+
+    // Even if NetworkManager independently had other reachable DNS in configuredUpstreams:
+    nm.setConfiguredUpstreams([{ host: '127.0.0.1', port: reachableDnsServer.port }]);
+
+    try {
+      // Step A: verifyEndToEndResolverHealth MUST fail because the proxy's actual configured upstream is DEAD
+      // Watchdog must NOT claim healthy based on reachableDnsServer or fallback 1.1.1.1!
+      const isHealthy = await nm.verifyEndToEndResolverHealth(proxyServer.port, { timeoutMs: 300 });
+      assert.strictEqual(
+        isHealthy,
+        false,
+        'Watchdog must NOT claim healthy based on independent DNS when proxy actual upstream is dead'
+      );
+
+      // Step B: Update proxy upstreams to [dead-upstream, healthy-upstream]
+      proxy.setUpstreamServers([
+        { host: '127.0.0.1', port: deadPort },
+        { host: '127.0.0.1', port: reachableDnsServer.port },
+      ]);
+
+      // Step C: verifyEndToEndResolverHealth MUST succeed because at least one actual configured proxy upstream works
+      const isNowHealthy = await nm.verifyEndToEndResolverHealth(proxyServer.port, { timeoutMs: 400 });
+      assert.strictEqual(
+        isNowHealthy,
+        true,
+        'Watchdog must report healthy when at least one actual configured proxy upstream works'
+      );
+    } finally {
+      await proxyServer.close();
+      await reachableDnsServer.close();
+    }
   });
 });

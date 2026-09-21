@@ -1,5 +1,6 @@
 import dgram from 'dgram';
 import { evaluatePolicy, Policy } from '@safebrowse/shared';
+import { logServiceMessage } from './network-manager';
 
 export interface UpstreamDnsServer {
   host: string;
@@ -37,11 +38,35 @@ export class DnsFilterProxy {
           !(s.host.startsWith('127.') && (s.port === 53 || (this.listeningPort && s.port === this.listeningPort)))
       );
 
-    if (valid.length > 0) {
-      this.upstreamServers = valid;
-    } else {
-      this.upstreamServers = [{ host: '1.1.1.1', port: 53 }];
+    const targetServers = valid.length > 0 ? valid : [{ host: '1.1.1.1', port: 53 }];
+
+    const currentHosts = this.upstreamServers.map((s) => s.host).join(', ');
+    const newHosts = targetServers.map((s) => s.host).join(', ');
+
+    if (currentHosts !== newHosts) {
+      logServiceMessage('INFO', `[DnsProxy] Upstreams changed: [${currentHosts}] -> [${newHosts}]`);
+      this.upstreamServers = targetServers;
+      this.lastRetainedHosts = null;
     }
+  }
+
+  private lastRetainedHosts: string | null = null;
+
+  /**
+   * Retains existing known-good proxy upstreams and logs observability message.
+   * State-change based: deduplicates repeated log entries across consecutive ticks.
+   */
+  public retainUpstreams(): UpstreamDnsServer[] {
+    const currentHosts = this.upstreamServers.map((s) => s.host).join(', ');
+    if (this.lastRetainedHosts !== currentHosts) {
+      logServiceMessage('INFO', `[DnsProxy] Retaining known-good upstreams: [${currentHosts}]`);
+      this.lastRetainedHosts = currentHosts;
+    }
+    return [...this.upstreamServers];
+  }
+
+  public resetLastRetainedHostsForTesting(): void {
+    this.lastRetainedHosts = null;
   }
 
   public setUpstreams(hosts: string[], port: number = 53): void {
@@ -236,6 +261,14 @@ export class DnsFilterProxy {
 
       this.socket.on('message', (msg, rinfo) => {
         const query = this.extractQueryFromDnsPacket(msg);
+
+        // Internal infrastructure health probe (bypasses parental policy; loopback only)
+        if (query && query.domain.toLowerCase() === 'health.safebrowse.internal') {
+          const healthResp = this.buildARecordResponse(msg, '127.0.0.1');
+          this.socket?.send(healthResp, rinfo.port, rinfo.address);
+          return;
+        }
+
         const policy = this.getPolicy();
 
         if (query && policy) {

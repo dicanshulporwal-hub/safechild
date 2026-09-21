@@ -282,9 +282,18 @@ async function runServiceMode(): Promise<void> {
 
   // 3. Initialize DNS Filter Proxy on port 53 with physical network's upstream DNS
   currentEngineStatus = 'DNS_PROXY_STARTING';
-  const initialUpstreams = await networkManager.getUpstreamDnsServers();
+  const physicalUpstreams = await networkManager.getCurrentPhysicalDnsServers();
+  const initialUpstreams = physicalUpstreams.length > 0 ? physicalUpstreams : ['1.1.1.1'];
+  networkManager.setConfiguredUpstreams(initialUpstreams);
   dnsProxy = new DnsFilterProxy(() => syncClient!.getActivePolicy(), initialUpstreams[0] || '1.1.1.1', 53);
   dnsProxy.setUpstreams(initialUpstreams);
+  networkManager.setActiveUpstreamProvider(() => dnsProxy?.getUpstreamServers() ?? []);
+  networkManager.setUpstreamSyncHandler((upstreams) => {
+    if (dnsProxy && upstreams && upstreams.length > 0) {
+      dnsProxy.setUpstreams(upstreams);
+      networkManager.setConfiguredUpstreams(upstreams);
+    }
+  });
   let activeDnsPort = 53;
   try {
     activeDnsPort = await dnsProxy.start(53);
@@ -347,11 +356,17 @@ async function runServiceMode(): Promise<void> {
 
   // 6. Start Persistent Network Reconciliation Loop (every 3000ms)
   networkManager.startReconciliationLoop(activeDnsPort, 3000, async (success, reason) => {
-    // Dynamically update upstream DNS servers if physical network DNS changed
+    // Dynamically update upstream DNS servers ONLY if physical network DNS is visible
     try {
-      const currentUpstreams = await networkManager.getUpstreamDnsServers();
-      if (dnsProxy) {
-        dnsProxy.setUpstreams(currentUpstreams);
+      const physical = await networkManager.getCurrentPhysicalDnsServers();
+      if (physical.length > 0) {
+        if (dnsProxy) {
+          dnsProxy.setUpstreams(physical);
+        }
+      } else if (dnsProxy) {
+        // Adapter is probably already enforced.
+        // RETAIN existing known-good proxy upstreams. Never substitute stale backup!
+        dnsProxy.retainUpstreams();
       }
     } catch {}
 

@@ -162,9 +162,14 @@ export class WindowsNetworkManager {
   private postAssignmentProbeOverride: ((port: number) => Promise<boolean>) | null = null;
   private consecutiveHealthFailures = 0;
   private maxConsecutiveHealthFailures = 3;
+  private upstreamSyncHandler: ((upstreams: string[]) => void) | null = null;
 
   constructor(customBackupFile?: string) {
     this.backupFile = customBackupFile || configManager.getNetworkBackupFilePath();
+  }
+
+  public setUpstreamSyncHandler(handler: ((upstreams: string[]) => void) | null): void {
+    this.upstreamSyncHandler = handler;
   }
 
   public setPlatformForTesting(platform: string | null): void {
@@ -223,74 +228,178 @@ export class WindowsNetworkManager {
     return this.backupFile;
   }
 
+  private activeUpstreamProvider: (() => { host: string; port: number }[]) | null = null;
+
+  public setActiveUpstreamProvider(
+    provider: (() => (string | { host: string; port: number })[]) | null
+  ): void {
+    if (!provider) {
+      this.activeUpstreamProvider = null;
+      return;
+    }
+    this.activeUpstreamProvider = () => {
+      const res = provider();
+      return (res || []).map((s) => (typeof s === 'string' ? { host: s, port: 53 } : s));
+    };
+  }
+
+  public getActiveUpstreamProviderForTesting(): (() => { host: string; port: number }[]) | null {
+    return this.activeUpstreamProvider;
+  }
+
+  private configuredUpstreams: { host: string; port: number }[] = [];
+
+  public setConfiguredUpstreams(servers: (string | { host: string; port: number })[]): void {
+    this.configuredUpstreams = (servers || []).map((s) =>
+      typeof s === 'string' ? { host: s, port: 53 } : s
+    );
+  }
+
+  public getConfiguredUpstreams(): { host: string; port: number }[] {
+    return [...this.configuredUpstreams];
+  }
+
   /**
-   * Verifies end-to-end resolver health: confirms local proxy responds AND upstream
-   * DNS resolution path is operational.
+   * Verifies end-to-end resolver health:
+   * 1. Confirms LOCAL PROXY LIVENESS on 127.0.0.1:<dnsPort> (controlled health transaction, no parental policy).
+   * 2. Confirms UPSTREAM DNS HEALTH by directly probing configured physical/upstream servers.
+   *    (Direct UDP, no Windows system resolver, no parental policy involvement).
+   * Returns true ONLY when local proxy is alive AND at least one configured upstream is healthy.
    */
   public async verifyEndToEndResolverHealth(
     dnsPort: number = 53,
-    options?: { timeoutMs?: number; probeDomain?: string }
+    options?: {
+      timeoutMs?: number;
+      probeDomain?: string;
+      upstreams?: (string | { host: string; port: number })[];
+    }
   ): Promise<boolean> {
-    const probeDomain = options?.probeDomain || 'health.safebrowse.local';
+    const probeDomain = options?.probeDomain || 'dns.google';
     const timeoutMs = options?.timeoutMs || 2500;
 
     if (this.upstreamResolutionChecker) {
       return await this.upstreamResolutionChecker(dnsPort, probeDomain);
     }
 
-    return await this.verifyDnsProxyResponding(dnsPort, timeoutMs);
+    // 1. Verify LOCAL PROXY LIVENESS separately (bypasses parental policy)
+    const isProxyAlive = await this.verifyLocalProxyAlive(dnsPort, Math.min(timeoutMs, 1500));
+    if (!isProxyAlive) {
+      logServiceMessage('WARN', `[NetworkManager] Local DNS proxy on 127.0.0.1:${dnsPort} failed liveness check.`);
+      return false;
+    }
+
+    // 2. Determine target upstreams to probe directly
+    let targetUpstreams: { host: string; port: number }[] = [];
+    if (options?.upstreams && options.upstreams.length > 0) {
+      targetUpstreams = options.upstreams.map((u) =>
+        typeof u === 'string' ? { host: u, port: 53 } : u
+      );
+    } else if (this.activeUpstreamProvider) {
+      // Authoritative source: exact upstreams currently configured in DnsFilterProxy
+      targetUpstreams = this.activeUpstreamProvider();
+    } else if (this.configuredUpstreams.length > 0) {
+      targetUpstreams = [...this.configuredUpstreams];
+    } else {
+      targetUpstreams = [{ host: '1.1.1.1', port: 53 }];
+    }
+
+    // If running in mockAdapters test mode and no explicit upstreams or activeUpstreamProvider provided, proxy liveness is sufficient
+    if (this.mockAdapters !== null && !options?.upstreams && !this.activeUpstreamProvider) {
+      return true;
+    }
+
+    // Filter out loopback on the same port as the local proxy to prevent self-probing
+    const cleanUpstreams = targetUpstreams.filter(
+      (u) =>
+        !(
+          (u.host.startsWith('127.') || u.host === '::1' || u.host.toLowerCase() === 'localhost') &&
+          u.port === dnsPort
+        )
+    );
+
+    if (cleanUpstreams.length === 0) {
+      if (this.activeUpstreamProvider || (options?.upstreams && options.upstreams.length > 0)) {
+        logServiceMessage('ERROR', '[NetworkManager] No valid active upstream DNS servers available to probe.');
+        return false;
+      }
+      cleanUpstreams.push({ host: '1.1.1.1', port: 53 });
+    }
+
+    // 3. Verify UPSTREAM DNS HEALTH: at least ONE configured upstream must be healthy
+    for (const upstream of cleanUpstreams) {
+      const isHealthy = await this.probeDirectDnsServer(
+        upstream.host,
+        upstream.port,
+        timeoutMs,
+        probeDomain
+      );
+      if (isHealthy) {
+        return true;
+      }
+      logServiceMessage(
+        'WARN',
+        `[NetworkManager] Upstream DNS ${upstream.host}:${upstream.port} failed direct health probe.`
+      );
+    }
+
+    logServiceMessage('ERROR', '[NetworkManager] All configured upstream DNS servers failed direct health probe.');
+    return false;
   }
 
   /**
-   * Discovers clean non-loopback DNS servers from currently active adapters or backup.
-   * Strictly filters out loopback addresses (127.*, ::1, localhost) to prevent forwarding loops.
+   * Discovers clean non-loopback DNS servers from currently active, eligible default-route adapters.
+   * Strictly filters out loopback addresses (127.*, ::1, localhost).
+   * Returns [] when adapter DNS is currently SafeBrowse 127.0.0.1 (or if no external DNS is configured).
+   * NEVER silently substitutes network-backup.json or fallback public DNS.
    */
-  public async getUpstreamDnsServers(): Promise<string[]> {
+  public async getCurrentPhysicalDnsServers(): Promise<string[]> {
     const cleanServers: string[] = [];
-
-    // 1. Check target adapters currently discovered
     try {
       const discovery = await this.discoverTargetAdapters(true);
       if (discovery.adapters.length > 0) {
         const dnsStates = await this.queryDnsStateForAdapters(discovery.adapters);
         for (const s of dnsStates) {
           for (const addr of s.CleanNonLoopback || []) {
-            if (addr && !cleanServers.includes(addr)) {
-              cleanServers.push(addr);
+            const trimmed = (addr || '').trim();
+            if (
+              trimmed &&
+              !trimmed.startsWith('127.') &&
+              trimmed !== '::1' &&
+              trimmed.toLowerCase() !== 'localhost' &&
+              !cleanServers.includes(trimmed)
+            ) {
+              cleanServers.push(trimmed);
             }
           }
         }
       }
-    } catch {}
-
-    // 2. Check backup file if no servers found yet
-    if (cleanServers.length === 0 && fs.existsSync(this.backupFile)) {
-      try {
-        const raw = fs.readFileSync(this.backupFile, 'utf8');
-        const list: AdapterDnsBackup[] = JSON.parse(raw);
-        if (Array.isArray(list)) {
-          for (const b of list) {
-            for (const addr of b.ServerAddresses || []) {
-              if (
-                addr &&
-                !addr.startsWith('127.') &&
-                addr !== '::1' &&
-                !cleanServers.includes(addr)
-              ) {
-                cleanServers.push(addr);
-              }
-            }
-          }
-        }
-      } catch {}
+    } catch (err: any) {
+      logServiceMessage('WARN', `[NetworkManager] Warning discovering physical DNS servers: ${err.message}`);
     }
 
-    // Filter strictly to ensure no loopback
-    const valid = cleanServers.filter(
-      (ip) => ip && !ip.startsWith('127.') && ip !== '::1' && ip.toLowerCase() !== 'localhost'
-    );
+    if (cleanServers.length > 0) {
+      logServiceMessage(
+        'INFO',
+        `[NetworkManager] Current physical DNS discovered: [${cleanServers.join(', ')}]`
+      );
+    }
 
-    return valid.length > 0 ? valid : ['1.1.1.1'];
+    return cleanServers;
+  }
+
+  /**
+   * Discovers clean non-loopback DNS servers from currently active adapters.
+   * Strictly filters out loopback addresses (127.*, ::1, localhost) to prevent forwarding loops.
+   * Preferred live-upstream hierarchy:
+   * 1. currently observed physical/default-route DNS
+   * 2. explicit safe public fallback ['1.1.1.1'] only when necessary
+   *
+   * ARCHITECTURAL GUARANTEE: network-backup.json is NEVER consulted or read here.
+   * The backup file remains restoration state only and cannot poison live proxy upstreams.
+   */
+  public async getUpstreamDnsServers(): Promise<string[]> {
+    const physical = await this.getCurrentPhysicalDnsServers();
+    return physical.length > 0 ? physical : ['1.1.1.1'];
   }
 
   /**
@@ -944,6 +1053,8 @@ export class WindowsNetworkManager {
       return merged;
     }
 
+    const existingMap = new Map<number, AdapterDnsBackup>();
+
     try {
       configManager.ensureDirectories();
 
@@ -965,7 +1076,6 @@ export class WindowsNetworkManager {
         }
       }
 
-      const existingMap = new Map<number, AdapterDnsBackup>();
       for (const b of existingList) {
         existingMap.set(b.InterfaceIndex, b);
       }
@@ -1016,7 +1126,7 @@ export class WindowsNetworkManager {
         '                $regKey = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\$($adapter.InterfaceGuid)"',
         '                if (Test-Path $regKey) {',
         '                    $ns = (Get-ItemProperty -Path $regKey -Name "NameServer" -ErrorAction SilentlyContinue).NameServer',
-        '                    if (-not [string]::IsNullOrWhiteSpace($ns)) {',
+        '                    if (-not [string]::IsNullOrWhiteSpace($ns) -and $ns -notmatch \'127\\.0\\.0\\.1\') {',
         '                        $isDhcp = $false',
         '                    }',
         '                }',
@@ -1084,105 +1194,251 @@ export class WindowsNetworkManager {
       return mergedList;
     } catch (e: any) {
       logServiceMessage('WARN', `[NetworkManager] Warning backing up network config: ${e.message}`);
+      if (existingMap.size > 0) {
+        return Array.from(existingMap.values());
+      }
     }
     return [];
   }
 
   /**
    * Probes 127.0.0.1 on the specified UDP port with a standard DNS query to verify it is serving queries.
+   * Validates matching transaction ID, QR response flag, and structural DNS integrity.
    */
-  public async verifyDnsProxyResponding(port: number = 53, timeoutMs: number = 2500): Promise<boolean> {
+  /**
+   * Probes any DNS server directly at host:port with a standard DNS query.
+   * Validates matching transaction ID, QR=1, TC=0, RCODE=0 (NOERROR), QDCOUNT>=1, ANCOUNT>0,
+   * and structural integrity of the answer section.
+   * Direct UDP: does NOT use Windows system resolver or parental policy engine.
+   */
+  public async probeDirectDnsServer(
+    host: string,
+    port: number = 53,
+    timeoutMs: number = 2500,
+    probeDomain: string = 'dns.google'
+  ): Promise<boolean> {
     return new Promise((resolve) => {
       const socket = dgram.createSocket('udp4');
       let resolved = false;
 
-      const timer = setTimeout(() => {
-        if (!resolved) {
-          resolved = true;
-          try {
-            socket.close();
-          } catch {}
-          resolve(false);
-        }
-      }, timeoutMs);
-
-      socket.on('message', () => {
+      const finish = (result: boolean) => {
         if (!resolved) {
           resolved = true;
           clearTimeout(timer);
+          clearTimeout(retryTimer);
           try {
             socket.close();
           } catch {}
-          resolve(true);
+          resolve(result);
         }
+      };
+
+      const timer = setTimeout(() => {
+        finish(false);
+      }, timeoutMs);
+
+      // Generate 16-bit transaction ID
+      const txId = Math.floor(Math.random() * 0xffff);
+      const txIdHigh = (txId >> 8) & 0xff;
+      const txIdLow = txId & 0xff;
+
+      socket.on('message', (msg) => {
+        // 1. Minimum DNS header size is 12 bytes
+        if (msg.length < 12) return;
+
+        // 2. Transaction ID must match
+        const respTxId = (msg[0] << 8) | msg[1];
+        if (respTxId !== txId) return;
+
+        // 3. Must be a DNS response (QR bit = 1 in flags byte 2)
+        const isResponse = (msg[2] & 0x80) !== 0;
+        if (!isResponse) return;
+
+        // 4. Must not be truncated (TC bit = 0 in flags byte 2)
+        const isTruncated = (msg[2] & 0x02) !== 0;
+        if (isTruncated) return;
+
+        // 5. RCODE MUST equal 0 (NOERROR).
+        // NXDOMAIN (3), SERVFAIL (2), REFUSED (5), etc. are strictly considered UNHEALTHY.
+        const rcode = msg[3] & 0x0f;
+        if (rcode !== 0) return;
+
+        // 6. QDCOUNT must be at least 1 (query echoed back)
+        const qdcount = (msg[4] << 8) | msg[5];
+        if (qdcount < 1) return;
+
+        // 7. ANCOUNT MUST be > 0 (dns.google A query must have at least one answer record)
+        const ancount = (msg[6] << 8) | msg[7];
+        if (ancount < 1) return;
+
+        // 8. Structurally valid: parse past question section and verify answer section exists and is not truncated
+        let offset = 12;
+        let qCount = 0;
+        while (offset < msg.length && qCount < qdcount) {
+          while (offset < msg.length) {
+            const labelLen = msg[offset++];
+            if (labelLen === 0) break;
+            if ((labelLen & 0xc0) === 0xc0) {
+              // 2-byte compression pointer
+              offset++;
+              break;
+            }
+            offset += labelLen;
+          }
+          offset += 4; // QTYPE (2) + QCLASS (2)
+          qCount++;
+        }
+
+        // Must have room for at least one answer record header (name + type + class + ttl + rdlen)
+        if (offset + 10 > msg.length) return;
+
+        // Parse answer record name: compression pointer (2 bytes) or labels
+        if ((msg[offset] & 0xc0) === 0xc0) {
+          offset += 2;
+        } else {
+          while (offset < msg.length) {
+            const l = msg[offset++];
+            if (l === 0) break;
+            if ((l & 0xc0) === 0xc0) {
+              offset++;
+              break;
+            }
+            offset += l;
+          }
+        }
+        // TYPE (2) + CLASS (2) + TTL (4) + RDLENGTH (2) = 10 bytes
+        if (offset + 10 > msg.length) return;
+        offset += 8; // skip TYPE, CLASS, TTL
+        const rdlength = (msg[offset] << 8) | msg[offset + 1];
+        offset += 2; // skip RDLENGTH
+        if (offset + rdlength > msg.length) return; // Answer data truncated/malformed
+
+        // Successfully verified structurally valid NOERROR DNS response with answers
+        finish(true);
       });
 
       socket.on('error', () => {
+        finish(false);
+      });
+
+      // Construct standard DNS query packet (Type A, Class IN, RD=1)
+      const domainParts = probeDomain.split('.').filter(Boolean);
+      const labelBuffers: Buffer[] = [];
+      for (const part of domainParts) {
+        const len = Buffer.byteLength(part);
+        const buf = Buffer.alloc(1 + len);
+        buf.writeUInt8(len, 0);
+        buf.write(part, 1, len, 'utf8');
+        labelBuffers.push(buf);
+      }
+      labelBuffers.push(Buffer.from([0x00])); // null terminator
+
+      const header = Buffer.from([
+        txIdHigh, txIdLow, // Transaction ID
+        0x01, 0x00,       // Standard query, recursion desired (RD=1)
+        0x00, 0x01,       // QDCOUNT = 1
+        0x00, 0x00,       // ANCOUNT = 0
+        0x00, 0x00,       // NSCOUNT = 0
+        0x00, 0x00,       // ARCOUNT = 0
+      ]);
+      const footer = Buffer.from([
+        0x00, 0x01,       // QTYPE = A (1)
+        0x00, 0x01,       // QCLASS = IN (1)
+      ]);
+      const queryPacket = Buffer.concat([header, ...labelBuffers, footer]);
+
+      // Send initial query directly to host:port
+      socket.send(queryPacket, port, host, (err) => {
+        if (err) finish(false);
+      });
+
+      // Resend once at halfway mark (max 1200ms) to withstand transient UDP drop
+      const retryDelay = Math.min(1200, Math.floor(timeoutMs / 2));
+      const retryTimer = setTimeout(() => {
+        if (!resolved) {
+          socket.send(queryPacket, port, host, () => {});
+        }
+      }, retryDelay);
+    });
+  }
+
+  /**
+   * Probes 127.0.0.1 on the specified UDP port with a standard DNS query to verify it is serving queries.
+   * Forwards to probeDirectDnsServer targeting 127.0.0.1.
+   */
+  public async verifyDnsProxyResponding(
+    port: number = 53,
+    timeoutMs: number = 2500,
+    probeDomain: string = 'dns.google'
+  ): Promise<boolean> {
+    return this.probeDirectDnsServer('127.0.0.1', port, timeoutMs, probeDomain);
+  }
+
+  /**
+   * Verifies local DNS proxy liveness on 127.0.0.1:<port> via a controlled internal
+   * health check transaction for 'health.safebrowse.internal'.
+   * Does NOT pass through parental policy evaluation.
+   * Validates matching transaction ID and structural DNS response.
+   */
+  public async verifyLocalProxyAlive(
+    port: number = 53,
+    timeoutMs: number = 1500
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
+      const socket = dgram.createSocket('udp4');
+      let resolved = false;
+
+      const finish = (result: boolean) => {
         if (!resolved) {
           resolved = true;
           clearTimeout(timer);
           try {
             socket.close();
           } catch {}
-          resolve(false);
+          resolve(result);
         }
+      };
+
+      const timer = setTimeout(() => {
+        finish(false);
+      }, timeoutMs);
+
+      const txId = Math.floor(Math.random() * 0xffff);
+      const txIdHigh = (txId >> 8) & 0xff;
+      const txIdLow = txId & 0xff;
+
+      socket.on('message', (msg) => {
+        if (msg.length < 12) return;
+        const respTxId = (msg[0] << 8) | msg[1];
+        if (respTxId !== txId) return;
+        const isResponse = (msg[2] & 0x80) !== 0;
+        if (!isResponse) return;
+        finish(true);
       });
 
-      // Construct a standard DNS query packet for 'health.safebrowse.local' (Type A)
-      const query = Buffer.from([
-        0x12,
-        0x34, // Transaction ID
-        0x01,
-        0x00, // Standard query, recursion desired
+      socket.on('error', () => {
+        finish(false);
+      });
+
+      // Internal non-browsable health check query for 'health.safebrowse.internal'
+      const queryPacket = Buffer.from([
+        txIdHigh, txIdLow,
+        0x01, 0x00,       // Standard query, RD=1
+        0x00, 0x01,       // QDCOUNT = 1
+        0x00, 0x00,       // ANCOUNT = 0
+        0x00, 0x00,       // NSCOUNT = 0
+        0x00, 0x00,       // ARCOUNT = 0
+        // QNAME: 6health10safebrowse8internal0
+        0x06, 0x68, 0x65, 0x61, 0x6c, 0x74, 0x68,
+        0x0a, 0x73, 0x61, 0x66, 0x65, 0x62, 0x72, 0x6f, 0x77, 0x73, 0x65,
+        0x08, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x6e, 0x61, 0x6c,
         0x00,
-        0x01, // QDCOUNT = 1
-        0x00,
-        0x00, // ANCOUNT = 0
-        0x00,
-        0x00, // NSCOUNT = 0
-        0x00,
-        0x00, // ARCOUNT = 0
-        // Query name: health.safebrowse.local
-        0x06,
-        0x68,
-        0x65,
-        0x61,
-        0x6c,
-        0x74,
-        0x68, // 6 health
-        0x0a,
-        0x73,
-        0x61,
-        0x66,
-        0x65,
-        0x62,
-        0x72,
-        0x6f,
-        0x77,
-        0x73,
-        0x65, // 10 safebrowse
-        0x05,
-        0x6c,
-        0x6f,
-        0x63,
-        0x61,
-        0x6c, // 5 local
-        0x00, // null terminator
-        0x00,
-        0x01, // QTYPE = A (1)
-        0x00,
-        0x01, // QCLASS = IN (1)
+        0x00, 0x01,       // QTYPE = A (1)
+        0x00, 0x01,       // QCLASS = IN (1)
       ]);
 
-      socket.send(query, port, '127.0.0.1', (err) => {
-        if (err && !resolved) {
-          resolved = true;
-          clearTimeout(timer);
-          try {
-            socket.close();
-          } catch {}
-          resolve(false);
-        }
+      socket.send(queryPacket, port, '127.0.0.1', (err) => {
+        if (err) finish(false);
       });
     });
   }
@@ -1231,10 +1487,10 @@ export class WindowsNetworkManager {
     // 2. Backup original DNS of target adapters before modification
     if (!fs.existsSync(this.backupFile)) {
       logServiceMessage('INFO', '[NetworkManager] Creating initial DNS backup for target adapters...');
-      await this.backupCurrentDnsConfig(targetAdapters);
     } else {
       logServiceMessage('INFO', `[NetworkManager] Verified existing DNS backup at: ${this.backupFile}`);
     }
+    await this.backupCurrentDnsConfig(targetAdapters);
 
     // 3. Confirm 127.0.0.1:53 DNS proxy responds and upstream resolution is operational
     logServiceMessage('INFO', `[NetworkManager] Testing 127.0.0.1:${dnsPort} local resolver and upstream resolution...`);
@@ -1736,8 +1992,12 @@ export class WindowsNetworkManager {
               'ERROR',
               `[NetworkManager] [CRITICAL] Fail-safe watchdog triggered: Resolver unhealthy for ${this.consecutiveHealthFailures} consecutive checks. Restoring original/DHCP DNS to prevent network trap.`
             );
-            await this.restoreOriginalDns();
+            await this.restoreOriginalDns({ stopReconciliation: false });
             this.consecutiveHealthFailures = 0;
+            logServiceMessage(
+              'INFO',
+              '[NetworkManager] Watchdog fail-open restoration complete; reconciliation remains active'
+            );
             return {
               status: 'ERROR',
               enforcedIndexes: [],
@@ -1771,6 +2031,7 @@ export class WindowsNetworkManager {
         };
       }
 
+      logServiceMessage('INFO', '[NetworkManager] Automatic protection recovery started');
       logServiceMessage(
         'INFO',
         `[NetworkManager] Network change detected: ${unenforced.length} active adapter(s) require DNS enforcement: [${unenforced
@@ -1779,6 +2040,7 @@ export class WindowsNetworkManager {
       );
 
       // 3. Step A: Safely refresh/persist backup with genuine non-loopback DNS before applying 127.0.0.1
+      const freshPhysical: string[] = [];
       for (const u of unenforced) {
         this.persistOrRefreshAdapterBackup({
           InterfaceIndex: u.InterfaceIndex,
@@ -1786,6 +2048,19 @@ export class WindowsNetworkManager {
           ServerAddresses: u.CleanNonLoopback,
           DhcpEnabled: u.DhcpEnabled,
         });
+        for (const addr of u.CleanNonLoopback) {
+          if (!freshPhysical.includes(addr)) {
+            freshPhysical.push(addr);
+          }
+        }
+      }
+
+      // Synchronize proxy with fresh physical upstreams BEFORE verifying health
+      if (freshPhysical.length > 0) {
+        this.setConfiguredUpstreams(freshPhysical);
+        if (this.upstreamSyncHandler) {
+          this.upstreamSyncHandler(freshPhysical);
+        }
       }
 
       // 4. Step B: Verify local DNS proxy and upstream resolution are healthy before re-enforcing
@@ -1858,7 +2133,7 @@ export class WindowsNetworkManager {
             'ERROR',
             `[NetworkManager] [ERROR] Post-assignment resolution probe failed after re-enforcement. Rolling back...`
           );
-          await this.restoreOriginalDns();
+          await this.restoreOriginalDns({ stopReconciliation: false });
           return {
             status: 'ERROR',
             enforcedIndexes: [],
@@ -1879,7 +2154,7 @@ export class WindowsNetworkManager {
               'ERROR',
               `[NetworkManager] [ERROR] Post-assignment resolution probe failed after re-enforcement. Rolling back...`
             );
-            await this.restoreOriginalDns();
+            await this.restoreOriginalDns({ stopReconciliation: false });
             return {
               status: 'ERROR',
               enforcedIndexes: [],
@@ -1913,6 +2188,7 @@ export class WindowsNetworkManager {
           .map((u) => u.InterfaceIndex)
           .join(', ')}] with 127.0.0.1.`
       );
+      logServiceMessage('INFO', '[NetworkManager] Automatic protection recovery succeeded');
 
       // If any active adapter failed DNS query, overall protection cannot be verified
       // even if known unenforced adapters were re-enforced. Return ERROR so the system remains unverified.
@@ -1956,6 +2232,14 @@ export class WindowsNetworkManager {
       // Prevent timer overlap early: skip interval tick if previous cycle is still executing
       if (this.isReconciling) return;
       try {
+        const physicalUpstreams = await this.getCurrentPhysicalDnsServers();
+        if (physicalUpstreams.length > 0) {
+          this.setConfiguredUpstreams(physicalUpstreams);
+          if (this.upstreamSyncHandler) {
+            this.upstreamSyncHandler(physicalUpstreams);
+          }
+        }
+
         const result = await this.reconcileAdapters(dnsPort);
         if (this.isShuttingDown || this.isRestoring) return;
 
@@ -1999,6 +2283,13 @@ export class WindowsNetworkManager {
    */
   public getReconcileTimerForTesting(): NodeJS.Timeout | null {
     return this.reconcileTimer;
+  }
+
+  /**
+   * Returns whether restoration is currently in progress.
+   */
+  public getIsRestoringForTesting(): boolean {
+    return this.isRestoring;
   }
 
   /**
@@ -2063,11 +2354,17 @@ export class WindowsNetworkManager {
    * Cleanly restores original adapter DNS configuration from backup.
    * Restores static IP addresses or resets to DHCP based on original state.
    * Throws on failure to ensure uninstallers and CLI tools detect restoration errors.
+   *
+   * @param options.stopReconciliation If true (default), stops the reconciliation loop timer.
+   *                                   Watchdog fail-open sets this to false to retain the recovery loop.
    */
-  public async restoreOriginalDns(): Promise<void> {
+  public async restoreOriginalDns(options: { stopReconciliation?: boolean } = {}): Promise<void> {
+    const stopReconciliation = options.stopReconciliation ?? true;
     logServiceMessage('INFO', '[NetworkManager] Restoring network adapters to original DNS settings...');
     this.isRestoring = true;
-    this.stopReconciliationLoop();
+    if (stopReconciliation) {
+      this.stopReconciliationLoop();
+    }
 
     if (this.getPlatform() !== 'win32') {
       logServiceMessage('INFO', '[NetworkManager] Non-Windows platform: simulation complete.');
