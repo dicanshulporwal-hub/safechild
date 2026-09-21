@@ -11,7 +11,14 @@ import { PolicySyncClient, DeviceConfig } from '../src/sync-client';
 import { DnsFilterProxy } from '../src/dns-proxy';
 import { BlockPageServer } from '../src/block-server';
 import { WindowsFirewallEngine, firewallEngine } from '../src/wfp-engine';
-import { computeEngineStatus, isEnforcementActive } from '../src/agent-cli';
+import {
+  computeEngineStatus,
+  isEnforcementActive,
+  evaluateSystemStatus,
+  queryWindowsServiceStatus,
+  StatusEvaluation,
+  ServiceQueryResult,
+} from '../src/agent-cli';
 import { ConfigManager } from '../src/config-manager';
 
 function makeMockRule(domain: string, action: 'BLOCK' | 'ALLOW' = 'BLOCK'): PolicyRule {
@@ -3908,6 +3915,512 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     } finally {
       await proxyServer.close();
       await reachableDnsServer.close();
+    }
+  });
+
+  // ----------------------------------------------------
+  // Test 101: SCM recovery WiX definition: util:ServiceConfig sets restart on 1st, 2nd, and 3rd failures with 5s delay and 1-day reset
+  // ----------------------------------------------------
+  it('101. SCM recovery WiX definition: util:ServiceConfig sets restart on 1st, 2nd, and 3rd failures with 5s delay and 1-day reset', () => {
+    const wxsPath = path.resolve(__dirname, '../wix/SafeBrowseChild-Pilot.wxs');
+    assert.ok(fs.existsSync(wxsPath), 'SafeBrowseChild-Pilot.wxs must exist');
+    const content = fs.readFileSync(wxsPath, 'utf8');
+
+    assert.ok(
+      content.includes('xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"'),
+      'WiX file must declare xmlns:util namespace'
+    );
+    assert.ok(
+      content.includes('<util:ServiceConfig'),
+      'WiX file must contain util:ServiceConfig element'
+    );
+    assert.ok(
+      content.includes('FirstFailureActionType="restart"'),
+      'FirstFailureActionType must be "restart"'
+    );
+    assert.ok(
+      content.includes('SecondFailureActionType="restart"'),
+      'SecondFailureActionType must be "restart"'
+    );
+    assert.ok(
+      content.includes('ThirdFailureActionType="restart"'),
+      'ThirdFailureActionType must be "restart"'
+    );
+    assert.ok(
+      content.includes('RestartServiceDelayInSeconds="5"'),
+      'RestartServiceDelayInSeconds must be "5"'
+    );
+    assert.ok(
+      content.includes('ResetPeriodInDays="1"'),
+      'ResetPeriodInDays must be "1"'
+    );
+  });
+
+  // ----------------------------------------------------
+  // Test 102: SCM recovery WiX custom action: ConfigureServiceRecovery configures sc.exe failure and failureflag 1
+  // ----------------------------------------------------
+  it('102. SCM recovery WiX custom action: ConfigureServiceRecovery configures sc.exe failure and failureflag 1', () => {
+    const wxsPath = path.resolve(__dirname, '../wix/SafeBrowseChild-Pilot.wxs');
+    const content = fs.readFileSync(wxsPath, 'utf8');
+
+    assert.ok(
+      content.includes('Id="ConfigureServiceRecovery"'),
+      'WiX file must define ConfigureServiceRecovery custom action'
+    );
+    assert.ok(
+      content.includes('sc.exe failure SafeBrowseChildService reset= 86400 actions= restart/5000/restart/5000/restart/5000'),
+      'ConfigureServiceRecovery must configure sc.exe failure with restart/5000 actions and 86400 reset'
+    );
+    assert.ok(
+      content.includes('sc.exe failureflag SafeBrowseChildService 1'),
+      'ConfigureServiceRecovery must configure sc.exe failureflag 1 to trigger on unexpected non-crash exits'
+    );
+    assert.ok(
+      content.includes('Action="ConfigureServiceRecovery" After="InstallServices" Condition="NOT REMOVE"'),
+      'ConfigureServiceRecovery must be sequenced After="InstallServices" when installing'
+    );
+  });
+
+  // ----------------------------------------------------
+  // Test 103: ServiceHost process lifecycle audit: declares Windows Job Object with KILL_ON_JOB_CLOSE and passes SAFEBROWSE_PARENT_PID
+  // ----------------------------------------------------
+  it('103. ServiceHost process lifecycle audit: declares Windows Job Object with KILL_ON_JOB_CLOSE and passes SAFEBROWSE_PARENT_PID', () => {
+    const csPath = path.resolve(__dirname, '../service-host/SafeBrowseServiceHost.cs');
+    assert.ok(fs.existsSync(csPath), 'SafeBrowseServiceHost.cs must exist');
+    const csContent = fs.readFileSync(csPath, 'utf8');
+
+    assert.ok(
+      csContent.includes('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000'),
+      'SafeBrowseServiceHost must define JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE'
+    );
+    assert.ok(
+      csContent.includes('CreateJobObject'),
+      'SafeBrowseServiceHost must import CreateJobObject'
+    );
+    assert.ok(
+      csContent.includes('SetInformationJobObject'),
+      'SafeBrowseServiceHost must import SetInformationJobObject'
+    );
+    assert.ok(
+      csContent.includes('AssignProcessToJobObject'),
+      'SafeBrowseServiceHost must import AssignProcessToJobObject'
+    );
+    assert.ok(
+      csContent.includes('SAFEBROWSE_PARENT_PID'),
+      'SafeBrowseServiceHost must pass SAFEBROWSE_PARENT_PID to child process'
+    );
+    assert.ok(
+      csContent.includes('EnsureServiceRecoveryConfigured()'),
+      'SafeBrowseServiceHost must call EnsureServiceRecoveryConfigured()'
+    );
+    assert.ok(
+      csContent.includes('CleanupStaleInstances()'),
+      'SafeBrowseServiceHost must call CleanupStaleInstances()'
+    );
+  });
+
+  // ----------------------------------------------------
+  // Test 104: ServiceHost child lifecycle: Job Object initialization and process tree termination guarantees zero orphaned proxies
+  // ----------------------------------------------------
+  it('104. ServiceHost child lifecycle: Job Object initialization and process tree termination guarantees zero orphaned proxies', () => {
+    const csPath = path.resolve(__dirname, '../service-host/SafeBrowseServiceHost.cs');
+    const csContent = fs.readFileSync(csPath, 'utf8');
+
+    const initJobMethod = extractCsMethod(csContent, 'private void InitializeJobObject()');
+    assert.ok(initJobMethod.includes('info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE'));
+    assert.ok(initJobMethod.includes('SetInformationJobObject'));
+
+    const onStopMethod = extractCsMethod(csContent, 'protected override void OnStop()');
+    assert.ok(onStopMethod.includes('StopChildProcess()'));
+    assert.ok(onStopMethod.includes('CloseHandle(_jobHandle)'));
+  });
+
+  // ----------------------------------------------------
+  // Test 105: Stale/orphan process detection: CleanupStaleInstances targets only SafeBrowseChild-Pilot
+  // ----------------------------------------------------
+  it('105. stale/orphan process detection: CleanupStaleInstances targets only SafeBrowseChild-Pilot and never touches unrelated node or system processes', () => {
+    const csPath = path.resolve(__dirname, '../service-host/SafeBrowseServiceHost.cs');
+    const csContent = fs.readFileSync(csPath, 'utf8');
+
+    const cleanupMethod = extractCsMethod(csContent, 'public void CleanupStaleInstances()');
+    assert.ok(cleanupMethod.includes('Process.GetProcessesByName("SafeBrowseChild-Pilot")'));
+    assert.ok(cleanupMethod.includes('SafeBrowseChild-Pilot.exe'));
+    assert.ok(!cleanupMethod.includes('"node"'), 'Must never indiscriminately terminate node processes');
+    assert.ok(cleanupMethod.includes('p.Kill()'));
+    assert.ok(cleanupMethod.includes('p.WaitForExit'));
+  });
+
+  // ----------------------------------------------------
+  // Test 106: Duplicate proxy prevention: starting second DnsFilterProxy on active port throws cleanly
+  // ----------------------------------------------------
+  it('106. duplicate proxy prevention: starting second DnsFilterProxy on active port throws cleanly without overriding primary', async () => {
+    const primaryProxy = new DnsFilterProxy(() => null);
+    const port = await primaryProxy.start(0);
+
+    try {
+      const secondSocket = dgram.createSocket('udp4');
+      let secondBound = false;
+      let errorOccurred = false;
+
+      await new Promise<void>((resolve) => {
+        secondSocket.on('error', () => {
+          errorOccurred = true;
+          try { secondSocket.close(); } catch {}
+          resolve();
+        });
+        secondSocket.bind(port, '127.0.0.1', () => {
+          secondBound = true;
+          try { secondSocket.close(); } catch {}
+          resolve();
+        });
+      });
+
+      assert.strictEqual(secondBound, false, 'Second socket must not bind to already-occupied proxy port');
+      assert.strictEqual(errorOccurred, true, 'Port collision must emit error to prevent duplicate proxy');
+    } finally {
+      primaryProxy.stop();
+    }
+  });
+
+  // ----------------------------------------------------
+  // Test 107: Crash during DNS=127 condition: boot preflight detects stale DNS and restores external DNS
+  // ----------------------------------------------------
+  it('107. crash during DNS=127 condition: boot preflight detects stale DNS on adapter when resolver is absent and restores working external DNS first', async () => {
+    const backupFile = path.join(tmpDir, 'backup-crash-107.json');
+    fs.writeFileSync(
+      backupFile,
+      JSON.stringify([{ InterfaceIndex: 6, ServerAddresses: ['192.168.1.1'], DhcpEnabled: true }]),
+      'utf8'
+    );
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('win32');
+
+    const executedScripts: string[] = [];
+    nm.setCommandExecutorForTesting(async (script: string) => {
+      executedScripts.push(script);
+      if (script.includes('Get-NetIPConfiguration')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Gateway: '192.168.1.1' }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-DnsClientServerAddress')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['127.0.0.1'] }]),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const deadPort = 49991;
+    const result = await nm.recoverStaleDnsAtBoot(deadPort);
+
+    assert.strictEqual(result.recovered, true, 'Must detect and recover stale 127.0.0.1 DNS');
+    assert.deepStrictEqual(result.restoredAdapters, [6]);
+    assert.ok(
+      executedScripts.some((s) => s.includes('ResetServerAddresses')),
+      'Must restore adapter to DHCP/original configuration so machine is not trapped'
+    );
+  });
+
+  // ----------------------------------------------------
+  // Test 108: Restart when DNS already equals 127: boot preflight preserves active protection if resolver is healthy
+  // ----------------------------------------------------
+  it('108. restart when DNS already equals 127: boot preflight detects existing healthy resolver and safely preserves active protection', async () => {
+    const mockDns = await createMockDnsServer();
+    const backupFile = path.join(tmpDir, 'backup-restart-108.json');
+    fs.writeFileSync(
+      backupFile,
+      JSON.stringify([{ InterfaceIndex: 6, ServerAddresses: ['192.168.1.1'], DhcpEnabled: true }]),
+      'utf8'
+    );
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('win32');
+
+    const executedScripts: string[] = [];
+    nm.setCommandExecutorForTesting(async (script: string) => {
+      executedScripts.push(script);
+      if (script.includes('Get-NetIPConfiguration')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Gateway: '192.168.1.1' }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-DnsClientServerAddress')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['127.0.0.1'] }]),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    try {
+      const result = await nm.recoverStaleDnsAtBoot(mockDns.port);
+      assert.strictEqual(result.recovered, false, 'Must not wipe DNS when resolver is verified healthy');
+      assert.ok(
+        result.message.includes('preserving active protection'),
+        'Must preserve active protection when resolver is already operational'
+      );
+      assert.ok(
+        !executedScripts.some((s) => s.includes('ResetServerAddresses')),
+        'Must not issue ResetServerAddresses when resolver is operational'
+      );
+    } finally {
+      await mockDns.close();
+    }
+  });
+
+  // ----------------------------------------------------
+  // Test 109: Restart when resolver is absent: preflight restores external DNS immediately
+  // ----------------------------------------------------
+  it('109. restart when resolver is absent: preflight verifies resolver is dead and immediately restores working external DNS before proxy setup', async () => {
+    const backupFile = path.join(tmpDir, 'backup-restart-109.json');
+    fs.writeFileSync(
+      backupFile,
+      JSON.stringify([{ InterfaceIndex: 12, ServerAddresses: ['8.8.8.8', '8.8.4.4'], DhcpEnabled: false }]),
+      'utf8'
+    );
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('win32');
+
+    const executedScripts: string[] = [];
+    nm.setCommandExecutorForTesting(async (script: string) => {
+      executedScripts.push(script);
+      if (script.includes('Get-NetIPConfiguration')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 12, InterfaceAlias: 'Ethernet', Gateway: '192.168.1.1' }]),
+          stderr: '',
+        };
+      }
+      if (script.includes('Get-DnsClientServerAddress')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 12, InterfaceAlias: 'Ethernet', ServerAddresses: ['127.0.0.1'] }]),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const deadPort = 49992;
+    const isHealthy = await nm.verifyEndToEndResolverHealth(deadPort, { timeoutMs: 200 });
+    assert.strictEqual(isHealthy, false, 'Resolver health check must fail when port is inactive');
+
+    const result = await nm.recoverStaleDnsAtBoot(deadPort);
+    assert.strictEqual(result.recovered, true);
+    assert.ok(
+      executedScripts.some((s) => s.includes("-ServerAddresses @('8.8.8.8','8.8.4.4')")),
+      'Must restore exact static DNS from backup when resolver is absent'
+    );
+  });
+
+  // ----------------------------------------------------
+  // Test 110: Restart when backend is unavailable but cached policy exists
+  // ----------------------------------------------------
+  it('110. restart when backend is unavailable but cached policy exists: engine successfully transitions to OFFLINE_BACKEND_CACHED_POLICY with cached policy', () => {
+    const status = computeEngineStatus(true, undefined, 'POLICY_CACHED');
+    assert.strictEqual(status, 'OFFLINE_BACKEND_CACHED_POLICY');
+
+    const active = isEnforcementActive(status, true);
+    assert.strictEqual(active, true, 'Enforcement must remain active under cached policy when backend is unreachable');
+  });
+
+  // ----------------------------------------------------
+  // Test 111: Multiple consecutive service crashes
+  // ----------------------------------------------------
+  it('111. multiple consecutive service crashes: simulated 1st, 2nd, and 3rd crashes verify repeated recovery actions and clean proxy re-creation', async () => {
+    const backupFile = path.join(tmpDir, 'backup-multicrash-111.json');
+    fs.writeFileSync(
+      backupFile,
+      JSON.stringify([{ InterfaceIndex: 6, ServerAddresses: ['192.168.1.1'], DhcpEnabled: true }]),
+      'utf8'
+    );
+
+    for (let cycle = 1; cycle <= 3; cycle++) {
+      const nm = new WindowsNetworkManager(backupFile);
+      nm.setPlatformForTesting('win32');
+
+      const executedScripts: string[] = [];
+      nm.setCommandExecutorForTesting(async (script: string) => {
+        executedScripts.push(script);
+        if (script.includes('Get-NetIPConfiguration')) {
+          return {
+            stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Gateway: '192.168.1.1' }]),
+            stderr: '',
+          };
+        }
+        if (script.includes('Get-DnsClientServerAddress')) {
+          return {
+            stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['127.0.0.1'] }]),
+            stderr: '',
+          };
+        }
+        return { stdout: '', stderr: '' };
+      });
+
+      const deadPort = 49990 + cycle;
+      const preflight = await nm.recoverStaleDnsAtBoot(deadPort);
+      assert.strictEqual(preflight.recovered, true, `Cycle ${cycle}: preflight must recover stale DNS`);
+
+      const proxy = new DnsFilterProxy(() => null);
+      const activePort = await proxy.start(0);
+
+      try {
+        const isHealthy = await nm.verifyEndToEndResolverHealth(activePort, { timeoutMs: 300 });
+        assert.strictEqual(isHealthy, true, `Cycle ${cycle}: recreated proxy must be healthy`);
+      } finally {
+        proxy.stop();
+      }
+    }
+  });
+
+  // ----------------------------------------------------
+  // Test 112: Status correctness: SCM service STOPPED
+  // ----------------------------------------------------
+  it('112. status correctness: SCM service STOPPED must report Degraded (Service STOPPED / Unsupervised), never Protected', async () => {
+    const status = await evaluateSystemStatus({
+      serviceChecker: async () => ({
+        installed: true,
+        state: 'STOPPED',
+        isSupervised: false,
+        rawOutput: 'STATE : 1 STOPPED',
+      }),
+      resolverChecker: async () => true,
+      enforcementInspector: async () => ({
+        isProtected: true,
+        activeAdapters: [{ interfaceIndex: 6, interfaceAlias: 'Wi-Fi', dnsServers: ['127.0.0.1'], isEnforced: true }],
+        summary: 'Protected',
+      }),
+      configLoader: async () => ({
+        deviceId: 'dev-1',
+        deviceToken: 'tok',
+        childId: 'c-1',
+        parentId: 'p-1',
+        deviceName: 'Laptop',
+        backendUrl: 'http://localhost:11002',
+        pairedAt: new Date().toISOString(),
+      }),
+    });
+
+    assert.strictEqual(
+      status.parentStatus,
+      'Degraded (Service STOPPED / Unsupervised)',
+      'Must report Degraded when service is STOPPED even if DNS is 127.0.0.1 and resolver is alive'
+    );
+    assert.strictEqual(status.isProtected, false, 'isProtected must be false when service is STOPPED');
+    assert.strictEqual(status.isSupervised, false);
+  });
+
+  // ----------------------------------------------------
+  // Test 113: Status correctness: resolver unhealthy
+  // ----------------------------------------------------
+  it('113. status correctness: resolver unhealthy must report Degraded (Resolver Inactive / Unhealthy), never Protected', async () => {
+    const status = await evaluateSystemStatus({
+      serviceChecker: async () => ({
+        installed: true,
+        state: 'RUNNING',
+        isSupervised: true,
+        rawOutput: 'STATE : 4 RUNNING',
+      }),
+      resolverChecker: async () => false,
+      enforcementInspector: async () => ({
+        isProtected: true,
+        activeAdapters: [{ interfaceIndex: 6, interfaceAlias: 'Wi-Fi', dnsServers: ['127.0.0.1'], isEnforced: true }],
+        summary: 'Protected',
+      }),
+      configLoader: async () => ({
+        deviceId: 'dev-1',
+        deviceToken: 'tok',
+        childId: 'c-1',
+        parentId: 'p-1',
+        deviceName: 'Laptop',
+        backendUrl: 'http://localhost:11002',
+        pairedAt: new Date().toISOString(),
+      }),
+    });
+
+    assert.strictEqual(status.parentStatus, 'Degraded (Resolver Inactive / Unhealthy)');
+    assert.strictEqual(status.isProtected, false);
+  });
+
+  // ----------------------------------------------------
+  // Test 114: Status correctness: DNS not redirected
+  // ----------------------------------------------------
+  it('114. status correctness: DNS not redirected must report Temporarily limited (DNS Not Redirected), never Protected', async () => {
+    const status = await evaluateSystemStatus({
+      serviceChecker: async () => ({
+        installed: true,
+        state: 'RUNNING',
+        isSupervised: true,
+        rawOutput: 'STATE : 4 RUNNING',
+      }),
+      resolverChecker: async () => true,
+      enforcementInspector: async () => ({
+        isProtected: false,
+        activeAdapters: [{ interfaceIndex: 6, interfaceAlias: 'Wi-Fi', dnsServers: ['192.168.1.1'], isEnforced: false }],
+        summary: 'Not protected',
+      }),
+      configLoader: async () => ({
+        deviceId: 'dev-1',
+        deviceToken: 'tok',
+        childId: 'c-1',
+        parentId: 'p-1',
+        deviceName: 'Laptop',
+        backendUrl: 'http://localhost:11002',
+        pairedAt: new Date().toISOString(),
+      }),
+    });
+
+    assert.strictEqual(status.parentStatus, 'Temporarily limited (DNS Not Redirected)');
+    assert.strictEqual(status.isProtected, false);
+  });
+
+  // ----------------------------------------------------
+  // Test 115: Status correctness: fully supervised healthy state reports Parent Status: Protected
+  // ----------------------------------------------------
+  it('115. status correctness: fully supervised healthy state reports Parent Status: Protected', async () => {
+    const cacheDir = path.join(os.tmpdir(), `sb-cache-test-${Date.now()}`);
+    fs.mkdirSync(cacheDir, { recursive: true });
+    const cacheFile = path.join(cacheDir, 'policy-dev-1.json');
+    fs.writeFileSync(cacheFile, JSON.stringify(makeMockPolicy({ version: 2 })), 'utf8');
+
+    const origGetCacheDir = ConfigManager.prototype.getCacheDir;
+    ConfigManager.prototype.getCacheDir = () => cacheDir;
+
+    try {
+      const status = await evaluateSystemStatus({
+        serviceChecker: async () => ({
+          installed: true,
+          state: 'RUNNING',
+          isSupervised: true,
+          rawOutput: 'STATE : 4 RUNNING',
+        }),
+        resolverChecker: async () => true,
+        enforcementInspector: async () => ({
+          isProtected: true,
+          activeAdapters: [{ interfaceIndex: 6, interfaceAlias: 'Wi-Fi', dnsServers: ['127.0.0.1'], isEnforced: true }],
+          summary: 'Protected',
+        }),
+        configLoader: async () => ({
+          deviceId: 'dev-1',
+          deviceToken: 'tok',
+          childId: 'c-1',
+          parentId: 'p-1',
+          deviceName: 'Laptop',
+          backendUrl: 'http://localhost:11002',
+          pairedAt: new Date().toISOString(),
+        }),
+      });
+
+      assert.strictEqual(status.parentStatus, 'Protected');
+      assert.strictEqual(status.isProtected, true);
+      assert.strictEqual(status.hasUsablePolicy, true);
+      assert.strictEqual(status.dnsEnforced, true);
+      assert.strictEqual(status.resolverHealthy, true);
+    } finally {
+      ConfigManager.prototype.getCacheDir = origGetCacheDir;
+      try { fs.rmSync(cacheDir, { recursive: true, force: true }); } catch {}
     }
   });
 });

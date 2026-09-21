@@ -144,6 +144,7 @@ jobs:
         shell: pwsh
         run: |
           dotnet tool install --global wix --version 4.0.5
+          wix extension add WixToolset.Util.wixext/4.0.5
 
       - name: Build SafeBrowseChild-Pilot.msi via WiX Toolset
         shell: pwsh
@@ -157,7 +158,7 @@ jobs:
           Write-Host "Source Directory: $sourceDir"
           Write-Host "MSI Output: $msiOutput"
 
-          wix build -arch x64 "$wxsPath" -d SourceDir="$sourceDir" -o "$msiOutput"
+          wix build -arch x64 "$wxsPath" -ext WixToolset.Util.wixext -d SourceDir="$sourceDir" -o "$msiOutput"
           $wixExitCode = $LASTEXITCODE
 
           if ($wixExitCode -ne 0) {

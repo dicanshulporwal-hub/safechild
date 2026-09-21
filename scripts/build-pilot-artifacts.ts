@@ -183,7 +183,10 @@ async function buildWindowsExe() {
   if (process.platform === 'win32' && fs.existsSync(wxsPath)) {
     try {
       console.log('Attempting WiX Toolset v4 MSI build...');
-      execSync(`wix build -arch x64 "${wxsPath}" -d SourceDir="${windowsReleaseDir}" -o "${msiOutput}"`, { stdio: 'inherit' });
+      try {
+        execSync('wix extension add WixToolset.Util.wixext', { stdio: 'inherit' });
+      } catch {}
+      execSync(`wix build -arch x64 "${wxsPath}" -ext WixToolset.Util.wixext -d SourceDir="${windowsReleaseDir}" -o "${msiOutput}"`, { stdio: 'inherit' });
       if (fs.existsSync(msiOutput)) {
         const msiSha = crypto.createHash('sha256').update(fs.readFileSync(msiOutput)).digest('hex');
         fs.writeFileSync(`${msiOutput}.sha256`, `${msiSha} *SafeBrowseChild-Pilot.msi\n`);

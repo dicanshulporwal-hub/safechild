@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.ServiceProcess;
 using System.Threading;
 
@@ -13,6 +14,195 @@ namespace SafeBrowse
         private Thread _monitorThread;
         private volatile bool _stopping;
         private string _logPath;
+
+        #region Windows Job Object & Native Process Supervision Interop
+
+        private enum JobObjectInfoType
+        {
+            ExtendedLimitInformation = 9
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+        {
+            public Int64 PerProcessUserTimeLimit;
+            public Int64 PerJobUserTimeLimit;
+            public UInt32 LimitFlags;
+            public UIntPtr MinimumWorkingSetSize;
+            public UIntPtr MaximumWorkingSetSize;
+            public UInt32 ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public UInt32 PriorityClass;
+            public UInt32 SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IO_COUNTERS
+        {
+            public UInt64 ReadOperationCount;
+            public UInt64 WriteOperationCount;
+            public UInt64 OtherOperationCount;
+            public UInt64 ReadTransferCount;
+            public UInt64 WriteTransferCount;
+            public UInt64 OtherTransferCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+        {
+            public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+            public IO_COUNTERS IoInfo;
+            public UIntPtr ProcessMemoryLimit;
+            public UIntPtr JobMemoryLimit;
+            public UIntPtr PeakProcessMemoryLimit;
+            public UIntPtr PeakJobMemoryLimit;
+        }
+
+        private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+        private IntPtr _jobHandle = IntPtr.Zero;
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string lpName);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetInformationJobObject(
+            IntPtr hJob,
+            JobObjectInfoType JobObjectInformationClass,
+            IntPtr lpJobObjectInformation,
+            uint cbJobObjectInformationLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseHandle(IntPtr hObject);
+
+        private void InitializeJobObject()
+        {
+            try
+            {
+                _jobHandle = CreateJobObject(IntPtr.Zero, null);
+                if (_jobHandle == IntPtr.Zero)
+                {
+                    Log(string.Format("[WARN] CreateJobObject failed (error {0}). Standard process supervision will be used.", Marshal.GetLastWin32Error()));
+                    return;
+                }
+
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+                int length = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+                IntPtr ptr = Marshal.AllocHGlobal(length);
+                try
+                {
+                    Marshal.StructureToPtr(info, ptr, false);
+                    if (SetInformationJobObject(_jobHandle, JobObjectInfoType.ExtendedLimitInformation, ptr, (uint)length))
+                    {
+                        Log("[INFO] Windows Job Object created with KILL_ON_JOB_CLOSE limit. Process tree ownership bound to ServiceHost.");
+                    }
+                    else
+                    {
+                        Log(string.Format("[WARN] SetInformationJobObject failed: Win32 error {0}", Marshal.GetLastWin32Error()));
+                    }
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(ptr);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("[WARN] Exception initializing Job Object: {0}", ex.Message));
+            }
+        }
+
+        public void EnsureServiceRecoveryConfigured()
+        {
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = "/c sc.exe failure SafeBrowseChildService reset= 86400 actions= restart/5000/restart/5000/restart/5000 & sc.exe failureflag SafeBrowseChildService 1",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                using (Process proc = Process.Start(psi))
+                {
+                    if (proc != null && proc.WaitForExit(5000))
+                    {
+                        Log("[INFO] SCM service recovery verified: RESTART (5000ms delay) configured for unexpected termination.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("[WARN] Could not configure SCM recovery actions: {0}", ex.Message));
+            }
+        }
+
+        public void CleanupStaleInstances()
+        {
+            try
+            {
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                string targetExe = Path.Combine(baseDir, "SafeBrowseChild-Pilot.exe");
+                Process[] processes = Process.GetProcessesByName("SafeBrowseChild-Pilot");
+                foreach (Process p in processes)
+                {
+                    try
+                    {
+                        if (_childProcess != null && p.Id == _childProcess.Id)
+                        {
+                            continue;
+                        }
+
+                        bool isSafeBrowse = false;
+                        try
+                        {
+                            string procPath = p.MainModule.FileName;
+                            if (string.Equals(procPath, targetExe, StringComparison.OrdinalIgnoreCase))
+                            {
+                                isSafeBrowse = true;
+                            }
+                        }
+                        catch
+                        {
+                            // If MainModule is inaccessible (e.g. cross-bitness or elevation),
+                            // SafeBrowseChild-Pilot is unique to SafeBrowse.
+                            isSafeBrowse = true;
+                        }
+
+                        if (isSafeBrowse)
+                        {
+                            Log(string.Format("[WARN] Detected stale/orphaned SafeBrowse child process (PID {0}). Terminating to prevent port 53 conflict...", p.Id));
+                            p.Kill();
+                            p.WaitForExit(3000);
+                            Log(string.Format("[OK] Stale child process PID {0} terminated.", p.Id));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log(string.Format("[WARN] Could not terminate stale process PID {0}: {1}", p.Id, ex.Message));
+                    }
+                    finally
+                    {
+                        p.Dispose();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("[WARN] Exception during stale instance cleanup: {0}", ex.Message));
+            }
+        }
+
+        #endregion
 
         public SafeBrowseServiceHost()
         {
@@ -108,6 +298,15 @@ namespace SafeBrowse
             Log("SafeBrowse Service Host starting...");
             _stopping = false;
 
+            // 1. Ensure Windows SCM recovery configuration is active (RESTART on failure)
+            EnsureServiceRecoveryConfigured();
+
+            // 2. Initialize Windows Job Object with KILL_ON_JOB_CLOSE for deterministic process tree lifetime
+            InitializeJobObject();
+
+            // 3. Clean up any stale/orphaned child process instances before launching worker loop
+            CleanupStaleInstances();
+
             // SCM NON-BLOCKING INVARIANT:
             // Windows SCM expects OnStart() to return promptly (<30s).
             // Do NOT synchronously block OnStart() on PowerShell, CIM, route discovery,
@@ -156,6 +355,7 @@ namespace SafeBrowse
                         "$validRoutes = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -and $_.NextHop -ne '0.0.0.0' -and $_.NextHop -ne '::' }); " +
                         "$routeIndexes = @($validRoutes | ForEach-Object { [int]$_.InterfaceIndex }); " +
                         "$allDns = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue); " +
+                        "$trappedAdapters = @(); " +
                         "foreach ($dns in $allDns) { " +
                         "    $idx = [int]$dns.InterfaceIndex; " +
                         "    $addrs = @($dns.ServerAddresses); " +
@@ -168,22 +368,53 @@ namespace SafeBrowse
                         "        $ips = @(Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.IPAddress }); " +
                         "        $usableIps = @($ips | Where-Object { $_ -and -not $_.StartsWith('169.254.') -and -not $_.StartsWith('127.') }); " +
                         "        if ($usableIps.Count -eq 0) { continue }; " +
-                        "        if ($backupMap.ContainsKey($idx)) { " +
-                        "            $rec = $backupMap[$idx]; " +
-                        "            $cleanAddrs = @($rec.ServerAddresses) | Where-Object { $_ -and $_ -notlike '*127.0.0.1*' -and $_ -notlike '*::1*' }; " +
-                        "            if ($rec.DhcpEnabled -eq $true -or $cleanAddrs.Count -eq 0) { " +
-                        "                Set-DnsClientServerAddress -InterfaceIndex $idx -ResetServerAddresses -ErrorAction SilentlyContinue; " +
-                        "            } else { " +
-                        "                Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses $cleanAddrs -ErrorAction SilentlyContinue; " +
-                        "            }; " +
-                        "            $staleRecovered = $true; " +
-                        "        } else { " +
-                        "            Set-DnsClientServerAddress -InterfaceIndex $idx -ResetServerAddresses -ErrorAction SilentlyContinue; " +
-                        "            $staleRecovered = $true; " +
-                        "        } " +
+                        "        $trappedAdapters += $idx; " +
                         "    } " +
                         "}; " +
-                        "if ($staleRecovered) { Clear-DnsClientCache -ErrorAction SilentlyContinue; Write-Output 'STALE_DNS_RECOVERED'; } else { Write-Output 'DNS_CLEAN'; }";
+                        "if ($trappedAdapters.Count -gt 0) { " +
+                        "    $resolverHealthy = $false; " +
+                        "    try { " +
+                        "        $udpClient = New-Object System.Net.Sockets.UdpClient; " +
+                        "        $udpClient.Client.ReceiveTimeout = 1000; " +
+                        "        $udpClient.Connect('127.0.0.1', 53); " +
+                        "        $query = [byte[]](0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, " +
+                        "                           0x06, 0x68, 0x65, 0x61, 0x6c, 0x74, 0x68, " +
+                        "                           0x0a, 0x73, 0x61, 0x66, 0x65, 0x62, 0x72, 0x6f, 0x77, 0x73, 0x65, " +
+                        "                           0x08, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x6e, 0x61, 0x6c, 0x00, " +
+                        "                           0x00, 0x01, 0x00, 0x01); " +
+                        "        [void]$udpClient.Send($query, $query.Length); " +
+                        "        $remoteEp = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0); " +
+                        "        $resp = $udpClient.Receive([ref]$remoteEp); " +
+                        "        if ($resp -and $resp.Length -ge 12) { " +
+                        "            $flags = ($resp[2] -shl 8) -bor $resp[3]; " +
+                        "            $rcode = $flags -band 0x000F; " +
+                        "            if ($rcode -eq 0 -and ($flags -band 0x8000) -ne 0) { $resolverHealthy = $true; } " +
+                        "        }; " +
+                        "        $udpClient.Close(); " +
+                        "    } catch {}; " +
+                        "    if ($resolverHealthy) { " +
+                        "        Write-Output 'RESOLVER_HEALTHY_PRESERVED'; " +
+                        "    } else { " +
+                        "        foreach ($idx in $trappedAdapters) { " +
+                        "            if ($backupMap.ContainsKey($idx)) { " +
+                        "                $rec = $backupMap[$idx]; " +
+                        "                $cleanAddrs = @($rec.ServerAddresses) | Where-Object { $_ -and $_ -notlike '*127.0.0.1*' -and $_ -notlike '*::1*' }; " +
+                        "                if ($rec.DhcpEnabled -eq $true -or $cleanAddrs.Count -eq 0) { " +
+                        "                    Set-DnsClientServerAddress -InterfaceIndex $idx -ResetServerAddresses -ErrorAction SilentlyContinue; " +
+                        "                } else { " +
+                        "                    Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses $cleanAddrs -ErrorAction SilentlyContinue; " +
+                        "                }; " +
+                        "                $staleRecovered = $true; " +
+                        "            } else { " +
+                        "                Set-DnsClientServerAddress -InterfaceIndex $idx -ResetServerAddresses -ErrorAction SilentlyContinue; " +
+                        "                $staleRecovered = $true; " +
+                        "            } " +
+                        "        }; " +
+                        "        if ($staleRecovered) { Clear-DnsClientCache -ErrorAction SilentlyContinue; Write-Output 'STALE_DNS_RECOVERED'; } else { Write-Output 'DNS_CLEAN'; } " +
+                        "    } " +
+                        "} else { " +
+                        "    Write-Output 'DNS_CLEAN'; " +
+                        "}";
 
                     ProcessStartInfo psi = new ProcessStartInfo
                     {
@@ -200,7 +431,12 @@ namespace SafeBrowse
                         if (proc != null && proc.WaitForExit(15000))
                         {
                             string output = proc.StandardOutput.ReadToEnd().Trim();
-                            if (output.Contains("STALE_DNS_RECOVERED"))
+                            if (output.Contains("RESOLVER_HEALTHY_PRESERVED"))
+                            {
+                                Log("[OK] Boot pre-flight: 127.0.0.1 detected on active adapter, and legitimate SafeBrowse resolver is operational. Preserving DNS protection.");
+                                return true;
+                            }
+                            else if (output.Contains("STALE_DNS_RECOVERED"))
                             {
                                 Log("[OK] Boot pre-flight: Detected and successfully restored stale 127.0.0.1 DNS to DHCP/original configuration.");
                                 return true;
@@ -248,7 +484,14 @@ namespace SafeBrowse
             // 2. Terminate child process
             StopChildProcess();
 
-            // 3. Await monitor thread completion
+            // 3. Close Job Object handle
+            if (_jobHandle != IntPtr.Zero)
+            {
+                try { CloseHandle(_jobHandle); } catch { }
+                _jobHandle = IntPtr.Zero;
+            }
+
+            // 4. Await monitor thread completion
             if (_monitorThread != null && _monitorThread.IsAlive)
             {
                 _monitorThread.Join(5000);
@@ -436,6 +679,9 @@ namespace SafeBrowse
             {
                 try
                 {
+                    // Ensure any stale child instance is terminated before launching
+                    CleanupStaleInstances();
+
                     string baseDir = AppDomain.CurrentDomain.BaseDirectory;
                     string targetExe = Path.Combine(baseDir, "SafeBrowseChild-Pilot.exe");
 
@@ -456,13 +702,33 @@ namespace SafeBrowse
                         RedirectStandardOutput = false,
                         RedirectStandardError = false
                     };
+                    psi.EnvironmentVariables["SAFEBROWSE_PARENT_PID"] = Process.GetCurrentProcess().Id.ToString();
 
                     Log(string.Format("Launching child process: {0} service", targetExe));
                     lastStartTime = DateTime.UtcNow;
                     _childProcess = Process.Start(psi);
 
-                    if (_childProcess != null)
+                    if (_childProcess != null && !_childProcess.HasExited)
                     {
+                        if (_jobHandle != IntPtr.Zero)
+                        {
+                            try
+                            {
+                                if (AssignProcessToJobObject(_jobHandle, _childProcess.Handle))
+                                {
+                                    Log(string.Format("[OK] Child process PID {0} bound to Windows Job Object with KILL_ON_JOB_CLOSE.", _childProcess.Id));
+                                }
+                                else
+                                {
+                                    Log(string.Format("[WARN] AssignProcessToJobObject failed for PID {0} (Win32 error: {1}).", _childProcess.Id, Marshal.GetLastWin32Error()));
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Log(string.Format("[WARN] Error assigning child PID {0} to Job Object: {1}", _childProcess.Id, ex.Message));
+                            }
+                        }
+
                         _childProcess.WaitForExit();
                         int exitCode = _childProcess.ExitCode;
                         Log(string.Format("Child process exited with code: {0}", exitCode));
@@ -479,6 +745,7 @@ namespace SafeBrowse
                 // Restore network state to prevent internet loss while backing off for restart.
                 Log("[WARN] Unexpected child process termination detected. Restoring network DNS before restart delay...");
                 RunEmergencyRestore(1, 10000);
+                CleanupStaleInstances();
 
                 // If child ran for more than 60 seconds, reset restart count
                 if ((DateTime.UtcNow - lastStartTime).TotalSeconds > 60)

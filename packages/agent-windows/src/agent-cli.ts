@@ -3,7 +3,7 @@ import { BlockPageServer } from './block-server';
 import { DnsFilterProxy } from './dns-proxy';
 import { WindowsProcessLimiter } from './process-limiter';
 import { configManager, DeviceConfig, ConfigManager } from './config-manager';
-import { networkManager, logServiceMessage } from './network-manager';
+import { networkManager, logServiceMessage, CurrentEnforcementInspection } from './network-manager';
 import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
@@ -201,9 +201,74 @@ async function runServiceMode(): Promise<void> {
     return currentEngineStatus;
   };
 
+  // Manage PID file for single-instance / process tracking
+  const pidFile = path.join(configManager.getBaseDir(), 'agent.pid');
+  try {
+    if (fs.existsSync(pidFile)) {
+      const oldPid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+      if (!isNaN(oldPid) && oldPid !== process.pid) {
+        let isRunning = false;
+        try {
+          process.kill(oldPid, 0);
+          isRunning = true;
+        } catch {
+          isRunning = false;
+        }
+        if (isRunning) {
+          logServiceMessage('WARN', `[SafeBrowse Service] Existing agent instance found with PID ${oldPid}.`);
+        }
+      }
+    }
+    fs.writeFileSync(pidFile, String(process.pid), 'utf8');
+  } catch (err: any) {
+    logServiceMessage('WARN', `[SafeBrowse Service] Could not write agent.pid: ${err.message}`);
+  }
+
+  // Parent ServiceHost Supervision Watchdog:
+  // If spawned by SafeBrowseServiceHost, monitor parent PID.
+  // If parent dies unexpectedly, self-terminate immediately with emergency DNS restoration.
+  let parentWatchdogTimer: NodeJS.Timeout | null = null;
+  const parentPidStr = process.env.SAFEBROWSE_PARENT_PID;
+  if (parentPidStr) {
+    const parentPid = parseInt(parentPidStr, 10);
+    if (!isNaN(parentPid) && parentPid > 0) {
+      logServiceMessage('INFO', `[SafeBrowse Service] Supervised by parent ServiceHost PID ${parentPid}. Initializing parent liveness watchdog.`);
+      parentWatchdogTimer = setInterval(async () => {
+        let parentAlive = false;
+        try {
+          process.kill(parentPid, 0);
+          parentAlive = true;
+        } catch (e: any) {
+          parentAlive = e.code === 'EPERM';
+        }
+
+        if (!parentAlive) {
+          logServiceMessage(
+            'WARN',
+            `[SafeBrowse Service] [CRITICAL] Parent ServiceHost PID ${parentPid} has terminated. Initiating fail-safe emergency DNS restore and self-terminating...`
+          );
+          if (parentWatchdogTimer) clearInterval(parentWatchdogTimer);
+          try {
+            await networkManager.restoreOriginalDns();
+          } catch (e: any) {
+            logServiceMessage('ERROR', `[SafeBrowse Service] Error during emergency DNS restore: ${e.message}`);
+          }
+          process.exit(1);
+        }
+      }, 1500);
+      parentWatchdogTimer.unref();
+    }
+  }
+
   const gracefulShutdown = async (signal: string) => {
     if (isShuttingDown) return;
     isShuttingDown = true;
+    if (parentWatchdogTimer) clearInterval(parentWatchdogTimer);
+    try {
+      if (fs.existsSync(pidFile)) {
+        fs.unlinkSync(pidFile);
+      }
+    } catch {}
     networkManager.setShuttingDown(true);
     networkManager.stopReconciliationLoop();
     currentEngineStatus = 'STOPPING';
@@ -405,6 +470,176 @@ async function runServiceMode(): Promise<void> {
   }
 }
 
+export interface ServiceQueryResult {
+  installed: boolean;
+  state: string;
+  isSupervised: boolean;
+  rawOutput: string;
+}
+
+export async function queryWindowsServiceStatus(): Promise<ServiceQueryResult> {
+  if (process.platform !== 'win32') {
+    return {
+      installed: true,
+      state: 'RUNNING',
+      isSupervised: true,
+      rawOutput: 'Non-Windows test environment: simulated service RUNNING',
+    };
+  }
+
+  try {
+    const { stdout } = await execAsync('sc.exe query SafeBrowseChildService');
+    const out = stdout || '';
+    let state = 'UNKNOWN';
+    let isSupervised = false;
+
+    if (out.includes('STATE') && out.includes('RUNNING')) {
+      state = 'RUNNING';
+      isSupervised = true;
+    } else if (out.includes('STATE') && out.includes('STOPPED')) {
+      state = 'STOPPED';
+      isSupervised = false;
+    } else if (out.includes('STATE') && out.includes('START_PENDING')) {
+      state = 'START_PENDING';
+      isSupervised = false;
+    } else if (out.includes('STATE') && out.includes('STOP_PENDING')) {
+      state = 'STOP_PENDING';
+      isSupervised = false;
+    } else if (out.includes('STATE') && out.includes('PAUSED')) {
+      state = 'PAUSED';
+      isSupervised = false;
+    } else {
+      state = 'UNKNOWN';
+      isSupervised = false;
+    }
+
+    return {
+      installed: true,
+      state,
+      isSupervised,
+      rawOutput: out.trim(),
+    };
+  } catch (err: any) {
+    const msg = err.message || '';
+    if (msg.includes('1060') || msg.toLowerCase().includes('does not exist')) {
+      return {
+        installed: false,
+        state: 'NOT_INSTALLED',
+        isSupervised: false,
+        rawOutput: 'Service not currently installed.',
+      };
+    }
+    return {
+      installed: false,
+      state: 'ERROR',
+      isSupervised: false,
+      rawOutput: `Service query failed: ${msg}`,
+    };
+  }
+}
+
+export interface StatusEvaluation {
+  parentStatus: string;
+  isProtected: boolean;
+  serviceState: string;
+  isSupervised: boolean;
+  dnsEnforced: boolean;
+  resolverHealthy: boolean;
+  isPaired: boolean;
+  hasUsablePolicy: boolean;
+  activeAdapters: Array<{
+    interfaceIndex: number;
+    interfaceAlias: string;
+    dnsServers: string[];
+    isEnforced: boolean;
+    queryStatus?: 'OK' | 'QUERY_FAILED';
+  }>;
+  summary: string;
+}
+
+export async function evaluateSystemStatus(options?: {
+  serviceChecker?: () => Promise<ServiceQueryResult>;
+  resolverChecker?: () => Promise<boolean>;
+  enforcementInspector?: () => Promise<CurrentEnforcementInspection>;
+  configLoader?: () => Promise<DeviceConfig | null>;
+}): Promise<StatusEvaluation> {
+  const svcChecker = options?.serviceChecker || queryWindowsServiceStatus;
+  const svcResult = await svcChecker();
+
+  const cfgLoader = options?.configLoader || (() => configManager.loadDeviceConfig());
+  const config = await cfgLoader();
+  const isPaired = !!config;
+
+  let hasUsablePolicy = false;
+  if (config) {
+    const cacheFile = path.join(configManager.getCacheDir(), `policy-${config.deviceId}.json`);
+    if (fs.existsSync(cacheFile)) {
+      try {
+        const raw = fs.readFileSync(cacheFile, 'utf8');
+        const p = JSON.parse(raw);
+        if (p && typeof p.version === 'number') {
+          hasUsablePolicy = true;
+        }
+      } catch {}
+    }
+  }
+
+  const inspector = options?.enforcementInspector || (() => networkManager.inspectCurrentEnforcement());
+  let inspection: CurrentEnforcementInspection;
+  try {
+    inspection = await inspector();
+  } catch {
+    inspection = { isProtected: false, activeAdapters: [], summary: 'Status query failed' };
+  }
+
+  const resChecker =
+    options?.resolverChecker ||
+    (() => networkManager.verifyEndToEndResolverHealth(53, { timeoutMs: 1500 }));
+  let resolverHealthy = false;
+  try {
+    resolverHealthy = await resChecker();
+  } catch {
+    resolverHealthy = false;
+  }
+
+  let parentStatus: string;
+  let isProtected = false;
+
+  if (!isPaired) {
+    parentStatus = 'Temporarily limited (Device Not Paired)';
+  } else if (inspection.activeAdapters.length === 0) {
+    parentStatus = 'Temporarily limited (No Active Network)';
+  } else if (!svcResult.isSupervised) {
+    if (!svcResult.installed) {
+      parentStatus = 'Degraded (Service Not Installed)';
+    } else {
+      parentStatus = `Degraded (Service ${svcResult.state} / Unsupervised)`;
+    }
+  } else if (!resolverHealthy) {
+    parentStatus = 'Degraded (Resolver Inactive / Unhealthy)';
+  } else if (!inspection.isProtected) {
+    parentStatus = 'Temporarily limited (DNS Not Redirected)';
+  } else if (!hasUsablePolicy) {
+    parentStatus = 'Degraded (Policy Unavailable)';
+  } else {
+    parentStatus = 'Protected';
+    isProtected = true;
+  }
+
+  return {
+    parentStatus,
+    isProtected,
+    serviceState: svcResult.state,
+    isSupervised: svcResult.isSupervised,
+    dnsEnforced: inspection.isProtected,
+    resolverHealthy,
+    isPaired,
+    hasUsablePolicy,
+    activeAdapters: inspection.activeAdapters,
+    summary: inspection.summary,
+  };
+}
+
 async function showStatus(): Promise<void> {
   console.log('==================================================');
   console.log('[SafeBrowse] SafeBrowse Windows Agent Status');
@@ -462,40 +697,37 @@ async function showStatus(): Promise<void> {
       }
     }
   }
+
+  const statusEval = await evaluateSystemStatus();
+
   console.log(`\n[Network Protection State]`);
   console.log(`  DNS Backup:    ${backupStatus}`);
 
-  try {
-    const inspection = await networkManager.inspectCurrentEnforcement();
-    if (inspection.isProtected) {
-      const enforcedAliases = inspection.activeAdapters.map((a) => a.interfaceAlias).join(', ');
-      console.log(`  DNS Redirect:  ENFORCED (127.0.0.1 on: ${enforcedAliases})`);
-      console.log(`  Parent Status: Protected`);
+  if (statusEval.dnsEnforced) {
+    const enforcedAliases = statusEval.activeAdapters.map((a) => a.interfaceAlias).join(', ');
+    console.log(`  DNS Redirect:  ENFORCED (127.0.0.1 on: ${enforcedAliases})`);
+  } else {
+    if (statusEval.activeAdapters.length === 0) {
+      console.log(`  DNS Redirect:  NOT ACTIVE (No active default route)`);
     } else {
-      if (inspection.activeAdapters.length === 0) {
-        console.log(`  DNS Redirect:  NOT ACTIVE (No active default route)`);
-        console.log(`  Parent Status: Temporarily limited (No Active Network)`);
-      } else {
-        const unenforced = inspection.activeAdapters
-          .filter((a) => !a.isEnforced)
-          .map((a) => {
-            if (a.queryStatus === 'QUERY_FAILED') {
-              return `${a.interfaceAlias} [DNS_QUERY_FAILED]`;
-            }
-            return `${a.interfaceAlias} [${a.dnsServers.join(', ') || 'NONE'}]`;
-          })
-          .join('; ');
-        console.log(`  DNS Redirect:  NOT ACTIVE (Active adapter(s) not redirected: ${unenforced})`);
-        console.log(`  Parent Status: Temporarily limited (DNS Not Redirected)`);
-      }
+      const unenforced = statusEval.activeAdapters
+        .filter((a) => !a.isEnforced)
+        .map((a) => {
+          if (a.queryStatus === 'QUERY_FAILED') {
+            return `${a.interfaceAlias} [DNS_QUERY_FAILED]`;
+          }
+          return `${a.interfaceAlias} [${a.dnsServers.join(', ') || 'NONE'}]`;
+        })
+        .join('; ');
+      console.log(`  DNS Redirect:  NOT ACTIVE (Active adapter(s) not redirected: ${unenforced})`);
     }
-  } catch {
-    console.log(`  DNS Redirect:  Status query failed`);
-    console.log(`  Parent Status: Temporarily limited (Status Query Error)`);
   }
 
-  if (process.platform === 'win32') {
+  console.log(`  Resolver:      ${statusEval.resolverHealthy ? 'HEALTHY (UDP 127.0.0.1:53)' : 'INACTIVE / UNHEALTHY'}`);
+  console.log(`  Service State: ${statusEval.serviceState} (SafeBrowseChildService)`);
+  console.log(`  Parent Status: ${statusEval.parentStatus}`);
 
+  if (process.platform === 'win32') {
     try {
       const { stdout } = await execAsync('sc.exe query SafeBrowseChildService');
       console.log('\n[Windows Service Status]');
