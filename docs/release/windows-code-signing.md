@@ -1,6 +1,6 @@
 # SafeBrowse Windows Authenticode Release Code Signing Architecture & Pipeline Specification
 
-- **Specification Version:** `1.0.0`
+- **Specification Version:** `1.1.0`
 - **Classification:** `RELEASE PREPARATION — NOT GA READY`
 - **Target Platform:** Windows 10 / Windows 11 x64
 - **Digest Standard:** SHA-256 with RFC3161 Authenticode Timestamping
@@ -25,38 +25,46 @@ Production deployment of SafeBrowse on Microsoft Windows requires digital Authen
 To ensure that the Windows Installer package contains verified signed binaries, signing must occur in a strict hierarchical order:
 
 ```
-[1. Build TypeScript SEA Bundle] ───> SafeBrowseChild-Pilot.exe (Unsigned)
-[2. Compile C# Host Wrapper]    ───> SafeBrowseServiceHost.exe (Unsigned)
-                                               │
-                                               ▼
-                              [3. Authenticode Sign SafeBrowseChild-Pilot.exe]
-                              [4. Authenticode Sign SafeBrowseServiceHost.exe]
-                                               │
-                                               ▼
-                              [5. Strict Signature Verification Gate]
-                              (Get-AuthenticodeSignature & signtool verify)
-                                               │
-                                               ▼
-                              [6. WiX Toolset v4 MSI Assembly]
-                              (Packs signed executables into SafeBrowseChild-Pilot.msi)
-                                               │
-                                               ▼
-                              [7. Authenticode Sign SafeBrowseChild-Pilot.msi]
-                                               │
-                                               ▼
-                              [8. Strict MSI Signature Verification Gate]
-                                               │
-                                               ▼
-                              [9. Generate signing-manifest.json & SHA256SUMS.txt]
-                                               │
-                                               ▼
-                              [10. Publish Signed Release Candidate Artifact]
+[1. Tag & Version Validation Gate] ───> Validates refs/tags/v* -> ProductVersion (Major.Minor.Build.0)
+                                                │
+                                                ▼
+[2. Build TypeScript SEA Bundle]   ───> SafeBrowseChild-Pilot.exe (Unsigned)
+[3. Compile C# Host Wrapper]      ───> SafeBrowseServiceHost.exe (Unsigned)
+                                                │
+                                                ▼
+                                  [4. Authenticode Sign SafeBrowseChild-Pilot.exe]
+                                  [5. Authenticode Sign SafeBrowseServiceHost.exe]
+                                                │
+                                                ▼
+                                  [6. Strict Dual Verification Gate]
+                                  (Get-AuthenticodeSignature & signtool.exe verify /pa /all /v)
+                                                │
+                                                ▼
+                                  [7. WiX Toolset v4 MSI Assembly with Injected ProductVersion]
+                                  (Packs signed executables into SafeBrowseChild-Pilot.msi)
+                                                │
+                                                ▼
+                                  [8. Strict Actual MSI ProductVersion Verification Gate]
+                                  (Queries WindowsInstaller.Installer COM Property table)
+                                                │
+                                                ▼
+                                  [9. Authenticode Sign SafeBrowseChild-Pilot.msi]
+                                                │
+                                                ▼
+                                  [10. Strict MSI Dual Verification Gate]
+                                  (Get-AuthenticodeSignature & signtool.exe verify /pa /all /v)
+                                                │
+                                                ▼
+                                  [11. Generate signing-manifest.json & SHA256SUMS.txt]
+                                                │
+                                                ▼
+                                  [12. Publish SafeBrowse-Windows-Release-Candidate Artifact]
 ```
 
 ### Critical Ordering Invariants
 - Executables (`SafeBrowseChild-Pilot.exe` and `SafeBrowseServiceHost.exe`) **must be signed before WiX MSI assembly**. WiX embeds these files into the MSI's internal cabinet (`cab`) file. Signing them after MSI assembly would require unpacking or would leave the installed files unsigned.
 - The assembled MSI (`SafeBrowseChild-Pilot.msi`) **must be signed as the final binary step**.
-- The release job **fails closed**: if signature verification fails at any stage, the build aborts immediately, and no release artifacts are published.
+- The release job **fails closed**: if signature verification fails at any stage, or if metadata/versioning mismatches, the build aborts immediately, and no release artifacts are published.
 
 ---
 
@@ -66,174 +74,193 @@ To ensure that the Windows Installer package contains verified signed binaries, 
 - **File Digest Algorithm:** `SHA-256` (strictly `/fd SHA256`).
 - **Timestamp Digest Algorithm:** `SHA-256` (strictly `/td SHA256`).
 - **Timestamp Protocol:** **RFC3161** compliant timestamping.
+- **Timestamp Server Allowlist:** Only approved, trusted RFC3161 timestamping endpoints may be used:
+  - Primary: `http://timestamp.digicert.com` (or `https://timestamp.digicert.com`)
+  - Fallback: `http://timestamp.sectigo.com` (or `https://timestamp.sectigo.com`)
+  - Any server outside this allowlist is rejected, causing the workflow to fail closed.
 - **Legacy Algorithms:** **Zero SHA-1 usage**. SHA-1 is cryptographically broken and rejected by modern Windows Defender and SmartScreen policies.
 
-### 3.2 Certificate Types & Key Storage
-Commercial code signing certificates must adhere to CA/Browser Forum Baseline Requirements:
-- **Extended Validation (EV) or Cloud Hardware Security Module (HSM):** Private keys must be stored on FIPS 140-2 Level 2+ hardware (e.g. YubiKey, Azure Key Vault, AWS CloudHSM, DigiCert KeyLocker).
-- **Standard Code Signing (OV):** Allowed during beta/staging cohorts, but requires building SmartScreen reputation.
+### 3.2 Preferred Production Key Storage: Cloud HSM & Non-Exportable Keys
+Commercial code signing certificates must adhere to CA/Browser Forum Baseline Requirements. The **preferred production architecture** utilizes hardware-backed or cloud-managed non-exportable keys:
+- **Cloud HSM / Managed Code Signing (Preferred Public Production Model):**
+  - Private keys reside inside FIPS 140-2 Level 2+ / Level 3 Hardware Security Modules.
+  - Private key material **never leaves the HSM** and is never exported as a file to the GitHub runner.
+  - Integration options include:
+    - Azure Trusted Signing / Azure Key Vault HSM via OpenID Connect (OIDC) federation (`id-token: write`).
+    - DigiCert ONE / Software Trust Manager (SSM) client tools.
+    - AWS CloudHSM or vendor-neutral PKCS#11 cryptographic providers.
+- **Software PFX Container (Compatibility / Staging / Private PKI Only):**
+  - Exported `.pfx` / `.p12` containers stored as repository secrets are supported strictly as a compatibility path for internal testing, staging, and automated CI pipelines.
+  - PFX containers in GitHub Secrets are **not** the preferred public production model due to exportability and long-lived credential risks.
 
 ---
 
-## 4. GitHub Actions CI Secret & Provider Interface
+## 4. Protected GitHub Signing Environment (`windows-production-signing`)
 
-### 4.1 Model A: Secret PFX Provider (Staging / Automated CI)
-For automated runner signing using an exported PFX certificate:
-- **Secret: `WINDOWS_SIGNING_CERT_BASE64`**
-  - Content: Base64-encoded string of the `.pfx` (or `.p12`) certificate container.
-  - Injected into runner environment only during the signing step.
-- **Secret: `WINDOWS_SIGNING_CERT_PASSWORD`**
-  - Content: Strong passphrase protecting the PFX container.
-  - Automatically masked from all build logs via `::add-mask::`.
+To isolate production signing credentials and prevent unauthorized or unapproved releases:
 
-#### Ephemeral Lifetime & Secure Cleanup
-Temporary certificate files are written to `$RUNNER_TEMP` (an isolated ramdisk/temp path) and securely scrubbed using cryptographically secure random bytes prior to file deletion:
-```powershell
-try {
-    # Execute signtool sign ...
-} finally {
-    if (Test-Path $tempCertPath) {
-        $len = (Get-Item $tempCertPath).Length
-        $wipe = New-Object byte[] $len
-        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($wipe)
-        [System.IO.File]::WriteAllBytes($tempCertPath, $wipe)
-        Remove-Item -Path $tempCertPath -Force
-    }
-}
-```
-
-### 4.2 Model B: Cloud HSM / OIDC Provider (Production Release Candidate)
-For production environments where private keys cannot be exported from hardware:
-- **Azure Trusted Signing / Azure Key Vault:** Uses Azure CLI or Azure Sign Tool with GitHub Actions OIDC federation (`id-token: write`).
-- **DigiCert ONE / KeyLocker:** Uses DigiCert Secure Software Manager (SSM) client tools.
-- **Architecture Compatibility:** The build pipeline `.github/workflows/build-windows-release.yml` structures the signing step around `signtool.exe`, allowing drop-in substitution of cloud CSP/KSP providers (e.g., `/csp "eToken Base Cryptographic Provider"` or Azure Sign Tool) without changing the surrounding build sequence.
+1. **Dedicated Environment:** The production signing job is bound to GitHub Environment `windows-production-signing`.
+2. **Environment Protection Rules:**
+   - **Deployment Branches / Tags:** Restricted strictly to approved release tags (`v*`). Feature branches and pull requests **cannot** access this environment.
+   - **Required Reviewers:** Release engineering leads / designated security administrators must approve any execution referencing `windows-production-signing`.
+   - **Prevent Self-Approval:** Self-approval is disabled where supported.
+3. **Environment Secrets:**
+   - `WINDOWS_SIGNING_CERT_BASE64`
+   - `WINDOWS_SIGNING_CERT_PASSWORD`
+   - (Or Cloud HSM / OIDC client credentials)
+4. **Dry-Run Job Isolation:** The `dry-run-windows-build` job does **not** define an environment and has zero access to production credentials.
 
 ---
 
-## 5. Verification Gates & Manifest Generation
+## 5. Ephemeral Runner Credential Handling & Forensic Semantics
 
-### 5.1 Verification Commands
-Every binary and installer package is verified through two complementary Windows verification mechanisms:
+When the PFX compatibility mode is used on the GitHub runner:
+
+1. **Log Masking:** The certificate passphrase is immediately masked from runner logs using `::add-mask::$certPassword`.
+2. **Ephemeral File Creation:** The temporary PFX file is written to `$RUNNER_TEMP` (an isolated ephemeral runner path).
+3. **Accurate Storage & Erasure Semantics:**
+   - `$RUNNER_TEMP` is an ephemeral directory on the runner host disk; it is **not guaranteed to reside in RAM**.
+   - Before deletion, the temporary certificate file is overwritten with cryptographically secure pseudo-random bytes (`[RandomNumberGenerator]::Create().GetBytes(...)`) inside a `finally` block before calling `Remove-Item -Force`.
+   - **Forensic Reality:** While best-effort overwrite defends against simple casual inspection, it does **not** provide cryptographic guarantees of forensic erasure on modern copy-on-write filesystems, SSDs with wear-leveling controllers, or virtualized cloud block devices.
+   - **Architectural Mitigation:** This limitation is precisely why **hardware-backed / cloud-backed non-exportable keys** (Section 3.2) represent the preferred production model, eliminating disk-based private keys on CI runners entirely.
+
+---
+
+## 6. Dual Verification Gates & Required Tooling
+
+### 6.1 Strict SignTool Requirement
+Production Authenticode signing strictly requires the official Windows SDK `signtool.exe`. If `signtool.exe` is absent from the runner environment, the release workflow **fails closed** immediately. Silent downgrade to PowerShell `Set-AuthenticodeSignature` is forbidden in production signing.
+
+### 6.2 Dual Verification Policy
+Every binary (`SafeBrowseChild-Pilot.exe`, `SafeBrowseServiceHost.exe`) and installer (`SafeBrowseChild-Pilot.msi`) must pass two independent verification gates:
 
 1. **PowerShell `Get-AuthenticodeSignature`:**
    ```powershell
    $sig = Get-AuthenticodeSignature -FilePath $targetFile
    if ($sig.Status -ne "Valid") {
-       throw "Signature verification failed: $($sig.StatusMessage)"
+       throw "Authenticode signature validation failed for $targetFile: $($sig.StatusMessage)"
+   }
+   if (-not $sig.TimeStamperCertificate) {
+       throw "Missing RFC3161 timestamp certificate on $targetFile"
    }
    ```
-2. **Windows SDK `signtool verify`:**
+2. **Windows SDK `signtool.exe verify`:**
    ```cmd
    signtool.exe verify /pa /all /v <targetFile>
    ```
-   - `/pa`: Uses Default Authentication Verification Policy (Authenticode).
-   - `/all`: Verifies all signatures in multi-signed files.
-   - `/v`: Verbose output detailing chain of trust, root CA, and RFC3161 timestamp.
+   - `/pa`: Authenticode verification policy check.
+   - `/all`: Validates all signatures.
+   - `/v`: Full chain-of-trust, root CA, and RFC3161 timestamp verification.
 
-### 5.2 Machine-Readable Signing Manifest (`signing-manifest.json`)
-The release build generates a structured JSON manifest accompanying every build artifact:
-```json
-{
-  "manifestVersion": "1.0",
-  "buildType": "SIGNED_RELEASE_CANDIDATE",
-  "productName": "SafeBrowse Child Protection",
-  "productVersion": "1.0.0.0",
-  "commitSha": "256e4863835e4ffbb8cd599f6f560db0c9f58f65",
-  "branch": "feature/stage11-step4-device-enforcement",
-  "workflowRunId": "35578114690",
-  "workflowRunNumber": 20,
-  "timestamp": "2026-09-24T05:50:00.000Z",
-  "signingMode": "PRODUCTION_AUTHENTICODE",
-  "timestampServer": "http://timestamp.digicert.com",
-  "digestAlgorithm": "SHA256",
-  "artifacts": [
-    {
-      "name": "SafeBrowseChild-Pilot.exe",
-      "path": "release/windows/SafeBrowseChild-Pilot.exe",
-      "sha256": "1e00ac2ba5327385edfede5acda38edc440e0bf0e5e3f1b8d59b179c4429d003",
-      "signatureStatus": "Valid",
-      "statusMessage": "Signature verified.",
-      "signerCertificate": {
-        "subject": "CN=SafeBrowse Technologies Inc., O=SafeBrowse Technologies Inc., C=US",
-        "issuer": "CN=DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1, O=DigiCert Inc, C=US",
-        "thumbprint": "ABCDEF1234567890ABCDEF1234567890ABCDEF12",
-        "validFrom": "2026-01-01T00:00:00.000Z",
-        "validTo": "2029-01-01T23:59:59.000Z"
-      },
-      "timestamp": {
-        "subject": "CN=DigiCert Timestamp 2026, O=DigiCert Inc, C=US",
-        "issuer": "CN=DigiCert Trusted G4 RSA4096 SHA384 2021 CA1, O=DigiCert Inc, C=US",
-        "thumbprint": "1234567890ABCDEF1234567890ABCDEF12345678"
-      }
-    }
-  ]
-}
+Failure of either verification command aborts the pipeline immediately.
+
+---
+
+## 7. Versioning, Upgrade Code Invariance & Tag Mapping
+
+### 7.1 UpgradeCode Invariance
+- **`UpgradeCode` (`B7C5E643-81D2-4A7F-991A-7110C99AA511`):** **IMMUTABLE**. The `UpgradeCode` identifies the application family across all releases. Changing it breaks Windows Installer `MajorUpgrade` detection, resulting in orphaned parallel installations.
+- **`ProductCode`:** Auto-generated (`*`) per build by WiX v4 to enable clean major upgrade semantics.
+
+### 7.2 Deterministic ProductVersion Injection
+In [`packages/agent-windows/wix/SafeBrowseChild-Pilot.wxs`](file:///home/agdev2/projects/safebrowse/packages/agent-windows/wix/SafeBrowseChild-Pilot.wxs):
+```xml
+<?ifndef ProductVersion?>
+<?define ProductVersion = "1.0.0.0" ?>
+<?endif?>
+<Package
+    Name="SafeBrowse Child Pilot"
+    Manufacturer="SafeBrowse"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="B7C5E643-81D2-4A7F-991A-7110C99AA511"
+    Scope="perMachine">
 ```
+- In pilot builds and local dev, `ProductVersion` defaults to `1.0.0.0`.
+- In release builds, `wix build` receives `-d ProductVersion="$effectiveVersion"`.
+- Format must strictly follow `Major.Minor.Build.0` (e.g. `1.0.1.0`).
+
+### 7.3 Release Tag Validation & Deterministic Mapping
+Production release packaging triggered by Git tags must follow strict semantic tag rules:
+- **Tag Format:** `refs/tags/v<Major>.<Minor>.<Patch>` (e.g. `refs/tags/v1.0.1`).
+- **Deterministic Mapping:** `v1.0.1` maps to `ProductVersion 1.0.1.0`.
+- **Fail-Closed Mismatch Check:** If an explicit `releaseVersion` input was provided and does not equal the tag-derived version, or if the tag does not conform to the pattern, the job aborts immediately (`exit 1`).
+- Production signing on non-tag branches is blocked.
+
+### 7.4 Actual MSI ProductVersion Verification Gate
+After `SafeBrowseChild-Pilot.msi` is compiled, the workflow queries the Windows Installer COM database directly:
+```powershell
+$com = New-Object -ComObject WindowsInstaller.Installer
+$db = $com.OpenDatabase($msiPath, 0)
+$view = $db.OpenView("SELECT Value FROM Property WHERE Property = 'ProductVersion'")
+$view.Execute()
+$rec = $view.Fetch()
+$actualVersion = $rec.StringData(1)
+```
+If `$actualVersion` does not match the expected version, the workflow **fails closed**.
 
 ---
 
-## 6. Pilot vs. Release Candidate Workflow Separation
+## 8. Dry-Run vs. Release Candidate Separation
 
-To guarantee that internal physical validation and ongoing development are never blocked by certificate access or signing infrastructure:
-
-| Attribute | Pilot Workflow (`build-windows-msi.yml`) | Release Workflow (`build-windows-release.yml`) |
+| Attribute | Dry-Run Build (`dry-run-windows-build`) | Production Release (`production-sign-windows-release`) |
 |---|---|---|
-| **Trigger** | Push to `feature/*` or manual dispatch | Protected tags (`v*`) or manual release dispatch |
-| **Output Type** | `UNSIGNED (Local Pilot Physical Validation)` | `SIGNED_RELEASE_CANDIDATE` (or `DRY_RUN`) |
-| **Signing Enforcement** | None (Unsigned) | Mandatory Authenticode SHA-256 + RFC3161 |
-| **Failure Policy** | Continues without signing | **Fails closed** if signing fails |
-| **Artifact Name** | `SafeBrowseChild-Pilot-MSI` | `SafeBrowse-Windows-Release-Candidate` |
-| **Target Audience** | Engineering lab & physical pilot testing | Staging cohort, beta testers, public release |
+| **Trigger** | `workflow_dispatch` with `dryRun: true` | Pushed release tag (`v*`) |
+| **GitHub Environment** | None (unprotected) | `windows-production-signing` (protected) |
+| **Signing Secrets Access** | None | Ephemeral injection |
+| **Artifact Name** | `SafeBrowse-Windows-Dry-Run-UNSIGNED` | `SafeBrowse-Windows-Release-Candidate` |
+| **Labeling** | `UNSIGNED - NOT FOR DISTRIBUTION - NOT RELEASE CANDIDATE - TEST ONLY` | `AUTHENTICODE_SIGNED RELEASE CANDIDATE` |
+| **ProductVersion Injection** | Enabled (`releaseVersion` input) | Enabled (deterministic tag mapping) |
+| **Actual MSI Verification** | Yes (Property table query) | Yes (Property table query) |
+| **Signing & Verification** | None | Mandatory dual verification (`signtool` + `pwsh`) |
 
 ---
 
-## 7. Versioning & Upgrade Strategy
+## 9. Supply-Chain Hardening: Pinned GitHub Actions
 
-### 7.1 Windows Installer Identifiers
-- **`UpgradeCode` (`B7C5E643-81D2-4A7F-991A-7110C99AA511`):** **NEVER CHANGE**. The UpgradeCode identifies the application family across all versions. Changing it breaks automatic upgrades and leaves orphaned previous installations.
-- **`ProductCode`:** Auto-generated (`*`) per build by WiX v4. This enables clean major-upgrade semantics.
-- **`ProductVersion`:** Format must be strictly `Major.Minor.Build.0` (e.g. `1.0.1.0`, `1.1.0.0`).
-  - Windows Installer compares only the first three fields (`Major.Minor.Build`).
-  - Same-version installations (e.g., installing `1.0.0.0` over `1.0.0.0`) are treated as maintenance/repair mode and do not run standard `MajorUpgrade` uninstall/reinstall sequences.
+All external GitHub Actions used in [`.github/workflows/build-windows-release.yml`](file:///home/agdev2/projects/safebrowse/.github/workflows/build-windows-release.yml) are pinned to immutable 40-character full commit SHAs:
 
-### 7.2 Release Versioning Recommendation
-1. For pilot testing: Keep `1.0.0.0` (requiring clean uninstall before reinstall, as documented in Run #20).
-2. For first signed Release Candidate: Increment to `1.0.1.0`.
-3. For General Availability: Start with `1.1.0.0`.
-4. Connect CI input `releaseVersion` to dynamically pass `-d Version="$releaseVersion"` during WiX compilation.
+| Action | Pinned Commit SHA | Official Release Tag |
+|---|---|---|
+| `actions/checkout` | `11d5960a326750d5838078e36cf38b85af677262` | `v4.4.0` |
+| `actions/setup-node` | `49933ea5288caeca8642d1e84afbd3f7d6820020` | `v4.4.0` |
+| `actions/upload-artifact` | `ea165f8d65b6e75b540449e92b4886f43607fa02` | `v4.6.2` |
 
 ---
 
-## 8. Dry-Run & Test Mode Specifications
+## 10. Truthful Signing Manifest (`signing-manifest.json`)
 
-Because production signing credentials should not be created unnecessarily or committed to git:
-- The release workflow supports a **`dryRun`** input (boolean).
-- If `dryRun == true`:
-  - Binaries are built and packaged normally.
-  - The signing step detects missing secrets and issues a visible GitHub warning: `::warning::[DRY-RUN / TEST MODE] Windows code signing is not configured.`
-  - The build succeeds and generates an `UNSIGNED_DRY_RUN` manifest.
-  - **Crucial Rule:** Dry-run artifacts are explicitly labelled `UNSIGNED` and must **never** be distributed as release candidates.
-- If `dryRun == false` (default for release builds):
-  - Missing `WINDOWS_SIGNING_CERT_BASE64` secret results in an immediate **fatal exit 1**, preventing unsigned builds from being produced in production workflows.
+The manifest records only **actual observed, verified parameters** rather than requested or default parameters:
+- `buildType`: `SIGNED_RELEASE_CANDIDATE` (or `UNSIGNED_DRY_RUN`)
+- `distributionAllowed`: boolean (`true` only if fully signed and verified)
+- `releaseCandidate`: boolean (`true` only if fully signed and verified)
+- `actualMsiProductVersion`: Extracted directly from MSI database
+- `commitSha`: Verified Git commit SHA
+- `gitRef`: Git tag or branch
+- `workflowRunId` & `workflowRunNumber`: Official GitHub run identifiers
+- SHA256 hashes for all binaries and MSI
+- Actual observed signature status, signer certificate metadata, and RFC3161 timestamp metadata
 
 ---
 
-## 9. Security Controls & Operational Procedures
+## 11. Backend URL Audit & GA Scope Boundary
 
-### 9.1 Fork PR Isolation
-- Secrets (`WINDOWS_SIGNING_CERT_*`) are restricted to repository maintainers.
-- Fork pull requests do not have access to repository secrets by GitHub Actions default security design.
-- The release workflow only triggers on pushes to the base repository or manual dispatches by authenticated collaborators.
+- **Audit Result:** The previous workflow input `backendUrl` only populated release metadata and did **not** configure or alter the compiled `SafeBrowseChild-Pilot.exe` binary.
+- **Current Operational Baseline:** The client agent continues to default to the pilot Tailscale backend endpoint (`http://100.88.17.16:11002`) or accepts runtime configuration via `SafeBrowse-Pair.cmd`.
+- **Misleading Metadata Removed:** The `backendUrl` parameter has been removed from release workflow inputs to ensure no false claims of production HTTPS endpoint configuration are published.
+- **GA Blocker:** Provisioning high-availability production HTTPS endpoints (`https://api.safebrowse.io`) with strict certificate validation and mTLS remains an independent release milestone.
 
-### 9.2 Key Compromise & Revocation Procedure
-In the event of private key exposure:
-1. Immediately contact the issuing Certificate Authority (e.g., DigiCert / Sectigo) and request immediate certificate revocation with an explicit revocation reason (*Key Compromise*).
-2. Because RFC3161 timestamps record the exact signing time, binaries signed **prior** to the revocation timestamp remain valid, while binaries signed **after** the revocation timestamp are rejected.
-3. Update GitHub repository secrets with a freshly issued certificate and new password.
-4. Trigger an immediate emergency release build with incremented `ProductVersion`.
+---
 
-### 9.3 Release Rollback Procedure
-If a signed release exhibits an unexpected regression:
+## 12. Security Controls & Incident Response
+
+### 12.1 Key Compromise Procedure
+1. Contact issuing Certificate Authority (DigiCert / Sectigo) immediately to revoke the certificate with reason *Key Compromise*.
+2. Due to RFC3161 timestamping, binaries signed prior to the revocation timestamp remain valid, while subsequent signatures are rejected.
+3. Update GitHub Environment secrets or Cloud HSM key identifiers.
+4. Trigger an emergency release build with incremented `ProductVersion`.
+
+### 12.2 Rollback Procedure
+If a regression is discovered in a signed release:
 1. Revoke the release tag in GitHub Releases.
-2. In the Parent Web Portal and device management API, deploy a policy update or maintenance flag directing client agents to roll back or stop enforcement.
-3. Distribute the previous known-good signed MSI installer (`1.0.x.0`). Because `MajorUpgrade` prevents automatic downgrade, the rollback installer should be executed with clean uninstall parameters or built with an incremented version number containing reverted binary payloads.
+2. Signal device rollbacks via backend policy or maintenance flags.
+3. Distribute a known-good signed MSI installer (`1.0.x.0`) with incremented version number or via clean uninstall/reinstall.

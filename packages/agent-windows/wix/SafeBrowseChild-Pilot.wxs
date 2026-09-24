@@ -1,9 +1,12 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <?ifndef ProductVersion?>
+  <?define ProductVersion = "1.0.0.0" ?>
+  <?endif?>
   <Package
       Name="SafeBrowse Child Pilot"
       Manufacturer="SafeBrowse"
-      Version="1.0.0.0"
+      Version="$(var.ProductVersion)"
       UpgradeCode="B7C5E643-81D2-4A7F-991A-7110C99AA511"
       Scope="perMachine">
 
