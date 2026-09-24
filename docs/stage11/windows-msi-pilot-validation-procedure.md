@@ -280,12 +280,12 @@ This guarantees immediate restoration of standard Internet connectivity.
 7. UDP 127.0.0.1:53 ownership recovery (freed immediately, re-bound cleanly)
 8. Truthful Degraded status when service is stopped (`sc.exe query` verification)
 9. Safe DNS fail-open (zero trapped DNS states during crash)
-10. Automatic DNS re-protection (reconciliation restores 127.0.0.1 within 3s)
-11. Backend outage with cached policy (`OFFLINE_BACKEND_CACHED_POLICY`)
-12. Backend automatic recovery (seamless reconnect and policy delta sync)
+10. Automatic DNS re-protection (completed without manual intervention; full DNS re-enforcement observed within approximately 20 seconds in repeated crash cycles)
+11. Backend outage with cached policy (cached policy remained present, DNS enforcement active, protection maintained)
+12. Backend automatic recovery (backend connectivity was restored without disrupting local protection)
 13. Controlled Windows reboot recovery (`Delayed-Auto` start confirmed)
 14. Wi-Fi -> mobile hotspot -> Wi-Fi roaming (reconciliation re-binds adapter)
-15. Modern Standby / Sleep -> Wake (persists across sleep/resume)
+15. Modern Standby / Sleep -> Wake (service running, single process tree, port 53 healthy, DNS 127.0.0.1, Protected status, internet working)
 16. Internet availability throughout applicable fail-open scenarios (browsing preserved)
 
 ### Final Healthy State Baseline

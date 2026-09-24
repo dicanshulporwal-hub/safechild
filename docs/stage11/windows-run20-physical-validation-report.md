@@ -59,12 +59,12 @@ All sixteen validation tests were executed on physical test hardware in an eleva
 | **7** | **UDP 127.0.0.1:53 Ownership Recovery** | `Get-NetUDPEndpoint` confirmed port 53 was instantly freed upon parent termination and re-acquired exclusively by the newly spawned child process upon restart. | **PASS** |
 | **8** | **Truthful Degraded Status When Service Stopped** | Executed `Stop-Service SafeBrowseChildService`. Ran `SafeBrowseChild-Pilot.exe --status`. CLI truthfully reported `Parent Status: Degraded (Service STOPPED / Unsupervised)`. Never reported `Protected`. | **PASS** |
 | **9** | **Safe DNS Fail-Open** | When resolver was abruptly taken down, pre-flight and emergency mechanisms restored active adapter DNS to DHCP/backup DNS. System never left trapped with dead `127.0.0.1`. | **PASS** |
-| **10** | **Automatic DNS Re-protection** | Upon service restart, background network reconciliation verified resolver health and re-enforced `127.0.0.1` on the active Wi-Fi adapter within 3 seconds. | **PASS** |
-| **11** | **Backend Outage with Cached Policy** | Blocked network route to pilot backend (`100.88.17.16:11002`). Agent seamlessly transitioned to `OFFLINE_BACKEND_CACHED_POLICY` and continued enforcing cached rules locally. | **PASS** |
-| **12** | **Backend Automatic Recovery** | Restored route to backend. Agent reconnected, synchronized latest policy delta, and transitioned back to `ACTIVE` without manual intervention or restart. | **PASS** |
+| **10** | **Automatic DNS Re-protection** | Automatic re-protection completed without manual intervention; full DNS re-enforcement was observed within approximately 20 seconds in repeated crash cycles. | **PASS** |
+| **11** | **Backend Outage with Cached Policy** | Backend connectivity was locally blocked; cached policy remained present, DNS enforcement remained active, SafeBrowse remained Protected, and internet continued working. | **PASS** |
+| **12** | **Backend Automatic Recovery** | Backend connectivity was restored without disrupting local protection; protection remained healthy after connectivity was restored. | **PASS** |
 | **13** | **Controlled Windows Reboot Recovery** | Executed full Windows reboot (`Restart-Computer`). Upon user login, `SafeBrowseChildService` had auto-started, boot pre-flight verified clean state, and protection was active. | **PASS** |
 | **14** | **Wi-Fi -> Mobile Hotspot -> Wi-Fi Roaming** | Roamed from home Wi-Fi to smartphone LTE hotspot and back. NetworkManager reconciliation detected adapter changes, re-bound `127.0.0.1`, and maintained seamless filtering. | **PASS** |
-| **15** | **Modern Standby / Sleep -> Wake** | Put laptop into Modern Standby (sleep) for 10 minutes. Upon wake, service remained operational, network re-synchronized in <2 seconds, and protection persisted. | **PASS** |
+| **15** | **Modern Standby / Sleep -> Wake** | Laptop entered Modern Standby / Sleep and was subsequently woken; service was Running after wake, exactly one ServiceHost and one Child Pilot were present, UDP 127.0.0.1:53 was healthy, DNS was 127.0.0.1, Parent Status was Protected, and internet worked. | **PASS** |
 | **16** | **Internet Availability Throughout Fail-Open** | Throughout forced upstream failure and fail-open transitions, general external web browsing (HTTP/HTTPS) remained fully functional with zero trapped states. | **PASS** |
 
 ---

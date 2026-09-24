@@ -57,12 +57,12 @@ On 2026-09-24, Windows physical validation completed successfully under **Run #2
 7. **UDP 127.0.0.1:53 Ownership Recovery**: Port 53 freed instantly upon host termination and cleanly bound by new child.
 8. **Truthful Degraded Status When Service Stopped**: With service stopped, `SafeBrowseChild-Pilot.exe --status` reported `Parent Status: Degraded (Service STOPPED / Unsupervised)`. Never reported `Protected`.
 9. **Safe DNS Fail-Open**: No trapped DNS state; restored active adapter DNS to DHCP/backup during crash/unresolvable states.
-10. **Automatic DNS Re-protection**: Re-enforced `127.0.0.1` upon service restart within 3 seconds.
-11. **Backend Outage with Cached Policy**: Seamlessly transitioned to `OFFLINE_BACKEND_CACHED_POLICY` and enforced cached rules locally.
-12. **Backend Automatic Recovery**: Reconnected, synchronized latest policy delta, and transitioned back to `ACTIVE`.
+10. **Automatic DNS Re-protection**: Automatic re-protection completed without manual intervention; full DNS re-enforcement was observed within approximately 20 seconds in repeated crash cycles.
+11. **Backend Outage with Cached Policy**: Backend connectivity was locally blocked; cached policy remained present, DNS enforcement remained active, SafeBrowse remained Protected, and internet continued working.
+12. **Backend Automatic Recovery**: Backend connectivity was restored without disrupting local protection; protection remained healthy after connectivity was restored.
 13. **Controlled Windows Reboot Recovery**: Service auto-started after reboot; boot preflight verified clean state; protection restored.
 14. **Wi-Fi -> Mobile Hotspot -> Wi-Fi Roaming**: Network roaming handled seamlessly by persistent reconciliation loop.
-15. **Modern Standby / Sleep -> Wake**: Service remained running; network re-synchronized in <2 seconds.
+15. **Modern Standby / Sleep -> Wake**: Laptop entered Modern Standby / Sleep and was subsequently woken; service was Running after wake, exactly one ServiceHost and one Child Pilot were present, UDP 127.0.0.1:53 was healthy, DNS was 127.0.0.1, Parent Status was Protected, and internet worked.
 16. **Internet Availability Throughout Fail-Open**: Web browsing remained operational during fail-open transitions without manual DNS repair.
 
 ### Final Healthy State Baseline
