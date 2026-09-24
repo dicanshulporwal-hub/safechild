@@ -1,10 +1,10 @@
 # SafeBrowse Stage 11 Step 4: Windows MSI Pilot Physical Validation Procedure
 
-**Target Platform:** Windows 10 / Windows 11 x64  
-**Target Package:** `SafeBrowseChild-Pilot.msi`  
-**Pilot Backend Endpoint:** `http://100.88.17.16:11002` (VM1 Tailscale-only mesh IP)  
-**Binary Architecture:** WiX Toolset v4 MSI + Native Service Host (`SafeBrowseServiceHost.exe`) + Node SEA (`SafeBrowseChild-Pilot.exe`)  
-**Storage Root:** `C:\ProgramData\SafeBrowse\`  
+**Target Platform:** Windows 10 / Windows 11 x64
+**Target Package:** `SafeBrowseChild-Pilot.msi`
+**Pilot Backend Endpoint:** `http://100.88.17.16:11002` (VM1 Tailscale-only mesh IP)
+**Binary Architecture:** WiX Toolset v4 MSI + Native Service Host (`SafeBrowseServiceHost.exe`) + Node SEA (`SafeBrowseChild-Pilot.exe`)
+**Storage Root:** `C:\ProgramData\SafeBrowse\`
 **Installation Directory:** `C:\Program Files\SafeBrowse\`
 
 ---
@@ -208,7 +208,7 @@ netstat -ano | findstr ":53 "
 ## 6. Uninstallation & Rollback Phase
 
 ### 6.1 Clean MSI Uninstall
-Open **Settings > Apps > Installed apps**, locate **SafeBrowse Child Pilot**, and click **Uninstall**.  
+Open **Settings > Apps > Installed apps**, locate **SafeBrowse Child Pilot**, and click **Uninstall**.
 Or execute from an elevated Command Prompt:
 ```cmd
 msiexec.exe /x "C:\Install\SafeBrowseChild-Pilot.msi" /l*v "C:\Install\safebrowse_uninstall.log"
@@ -255,3 +255,59 @@ Get-NetAdapter | ForEach-Object { Set-DnsClientServerAddress -InterfaceIndex $_.
 Clear-DnsClientCache
 ```
 This guarantees immediate restoration of standard Internet connectivity.
+
+---
+
+## 8. Run #20 Physical Validation Closure Addendum (2026-09-24)
+
+**Status:** `PHYSICALLY VALIDATED — RUN #20 COMPLETE (PILOT PASS)`
+**Validated Commit:** `256e4863835e4ffbb8cd599f6f560db0c9f58f65`
+**CI Workflow:** `Windows MSI Pilot Packaging` (Run #20, ID: `35578114690`)
+**Artifact ID:** `10629450446` (`SafeBrowseChild-Pilot-MSI`)
+
+### Authoritative Run #20 SHA-256 Hashes
+- `SafeBrowseChild-Pilot.exe`: `1e00ac2ba5327385edfede5acda38edc440e0bf0e5e3f1b8d59b179c4429d003`
+- `SafeBrowseServiceHost.exe`: `510eacd3d42ba148f061a4fb51d55ceb65753262876b53f87574bef3eb8e35c2`
+- `SafeBrowseChild-Pilot.msi`: `6ea50223a374f79d1be06f10a22fabb4025d904e9716a8a31ab9ae07f1547a27`
+
+### 16/16 Verification Items: All PASS
+1. SCM automatic recovery configuration (`sc.exe qfailure` confirms RESTART actions)
+2. Hard ServiceHost crash recovery cycle #1 (auto-restart in ~5s)
+3. Hard ServiceHost crash recovery cycle #2 (auto-restart in ~5s)
+4. Hard ServiceHost crash recovery cycle #3 (auto-restart in ~5s)
+5. Job Object / orphan child cleanup (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`)
+6. No duplicate SafeBrowse processes (exactly 1 host, 1 child at all times)
+7. UDP 127.0.0.1:53 ownership recovery (freed immediately, re-bound cleanly)
+8. Truthful Degraded status when service is stopped (`sc.exe query` verification)
+9. Safe DNS fail-open (zero trapped DNS states during crash)
+10. Automatic DNS re-protection (reconciliation restores 127.0.0.1 within 3s)
+11. Backend outage with cached policy (`OFFLINE_BACKEND_CACHED_POLICY`)
+12. Backend automatic recovery (seamless reconnect and policy delta sync)
+13. Controlled Windows reboot recovery (`Delayed-Auto` start confirmed)
+14. Wi-Fi -> mobile hotspot -> Wi-Fi roaming (reconciliation re-binds adapter)
+15. Modern Standby / Sleep -> Wake (persists across sleep/resume)
+16. Internet availability throughout applicable fail-open scenarios (browsing preserved)
+
+### Final Healthy State Baseline
+- `SafeBrowseChildService` : `RUNNING`
+- Process Tree            : 1 `SafeBrowseServiceHost`, 1 `SafeBrowseChild-Pilot`
+- UDP `127.0.0.1:53`      : Owned by child process
+- Wi-Fi DNS              : `127.0.0.1` (Local Resolver HEALTHY)
+- Parent Status          : `Protected`
+- Internet Access        : Fully Functional
+
+### Physical Resolution of Prior Defects
+- **P0-A (SCM Recovery Actions):** **PHYSICALLY RESOLVED**
+- **P0-B (Orphan Process on Port 53):** **PHYSICALLY RESOLVED**
+- **P0-C (Misleading "Protected" Status):** **PHYSICALLY RESOLVED**
+
+### Remaining Release-Hardening & GA Blockers
+> [!WARNING]
+> **PILOT PASS — NOT GA READY**: Commercial release requires completing:
+> 1. Windows executable and MSI Authenticode code signing.
+> 2. Secure silent background auto-updater.
+> 3. Production HTTPS backend and public endpoint replacing pilot Tailscale endpoint.
+> 4. Windows multi-user and Fast User Switching validation.
+> 5. Android production signing and physical validation.
+> 6. Dependency and security hardening (SBOM, vulnerability audit).
+> 7. Final Release Candidate validation soak test.

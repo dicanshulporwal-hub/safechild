@@ -1,26 +1,84 @@
 {
-  "testDate": "2026-09-03",
+  "testDate": "2026-09-24",
   "stage": "Stage 11 Step 4",
-  "evaluator": "SafeBrowse Security Engineering",
-  "status": "IMPLEMENTED — AWAITING PHYSICAL VALIDATION",
+  "evaluator": "SafeBrowse Device Verification Engineering",
+  "status": "WINDOWS PILOT VALIDATED (RUN #20 COMPLETE — PILOT PASS) — AWAITING RELEASE HARDENING (NOT GA)",
+  "validatedCommit": "256e4863835e4ffbb8cd599f6f560db0c9f58f65",
+  "ciRun": {
+    "workflow": "Windows MSI Pilot Packaging",
+    "runNumber": 20,
+    "runId": "35578114690",
+    "artifactId": "10629450446",
+    "artifactName": "SafeBrowseChild-Pilot-MSI",
+    "branch": "feature/stage11-step4-device-enforcement"
+  },
   "artifacts": {
     "androidApk": {
       "file": "release/android/safebrowse-child-pilot.apk",
-      "sha256": "b4f93a192f67d9d1393b0d38e55106873952ef9e4f2635eca2d35c1deecf5acd",
+      "sha256": "df58d8c6a673d872360bc11c0dd008422909d7a235e335edd007fd12a1e43a40",
       "version": "1.0.0",
       "minSdk": 26,
       "targetSdk": 34,
       "signing": "Debug / Pilot"
     },
-    "windowsExe": {
-      "file": "release/windows/SafeBrowseChild-Pilot.exe",
-      "sha256": "8df631fec111192c46a039cc26d69f2cd5aeefd348f40f1465094cf6ce6407ad",
-      "version": "1.0.0",
-      "platform": "Windows 10/11 x64",
-      "signing": "Unsigned / Local Pilot Testing"
+    "windowsPilot": {
+      "msi": {
+        "file": "release/windows/SafeBrowseChild-Pilot.msi",
+        "sha256": "6ea50223a374f79d1be06f10a22fabb4025d904e9716a8a31ab9ae07f1547a27",
+        "version": "1.0.0.0",
+        "upgradeCode": "B7C5E643-81D2-4A7F-991A-7110C99AA511"
+      },
+      "agentExe": {
+        "file": "release/windows/SafeBrowseChild-Pilot.exe",
+        "sha256": "1e00ac2ba5327385edfede5acda38edc440e0bf0e5e3f1b8d59b179c4429d003",
+        "version": "1.0.0"
+      },
+      "serviceHostExe": {
+        "file": "packages/agent-windows/dist/SafeBrowseServiceHost.exe",
+        "sha256": "510eacd3d42ba148f061a4fb51d55ceb65753262876b53f87574bef3eb8e35c2",
+        "serviceName": "SafeBrowseChildService"
+      }
     }
   },
-  "capabilitiesTested": 21,
-  "bypassProbesRun": 17,
-  "passRate": "100% of implemented protocol features verified"
+  "run20PhysicalValidation": {
+    "totalTests": 16,
+    "passed": 16,
+    "failed": 0,
+    "defectsResolved": [
+      {
+        "id": "P0-A",
+        "title": "SCM lacked automatic restart recovery actions",
+        "resolution": "PHYSICALLY RESOLVED in Run #20 via util:ServiceConfig, deferred custom action, and runtime SCM config"
+      },
+      {
+        "id": "P0-B",
+        "title": "Orphaned child/proxy process surviving ServiceHost crash on UDP 53",
+        "resolution": "PHYSICALLY RESOLVED in Run #20 via Job Object KILL_ON_JOB_CLOSE, parent watchdog, and CleanupStaleInstances"
+      },
+      {
+        "id": "P0-C",
+        "title": "Misleading Parent Status Protected when service was stopped",
+        "resolution": "PHYSICALLY RESOLVED in Run #20 via evaluateSystemStatus SCM query reporting Degraded (Service STOPPED / Unsupervised)"
+      }
+    ],
+    "finalHealthyState": {
+      "service": "SafeBrowseChildService RUNNING",
+      "serviceHost": "1 instance active",
+      "childPilot": "1 instance active",
+      "port53Owner": "SafeBrowseChild-Pilot PID",
+      "adapterDns": "127.0.0.1",
+      "resolverHealth": "HEALTHY",
+      "parentStatus": "Protected",
+      "internetWorking": true
+    }
+  },
+  "remainingGaBlockers": [
+    "Windows executable/MSI code signing",
+    "Secure silent auto-updater",
+    "Production HTTPS backend/public endpoint replacing pilot Tailscale HTTP endpoint",
+    "Windows multi-user / Fast User Switching validation",
+    "Android release signing and physical validation",
+    "Dependency/security hardening",
+    "Final Release Candidate validation"
+  ]
 }
