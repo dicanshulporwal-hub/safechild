@@ -1,0 +1,620 @@
+name: Windows Release Packaging & Authenticode Signing
+
+on:
+  workflow_dispatch:
+    inputs:
+      releaseVersion:
+        description: 'Release Version (Major.Minor.Build.0)'
+        required: false
+        type: string
+        default: '1.0.0.0'
+      backendUrl:
+        description: 'Target Backend Production Endpoint URL'
+        required: false
+        type: string
+        default: 'https://api.safebrowse.io'
+      dryRun:
+        description: 'Dry-run mode (builds and verifies control flow without failing if signing secrets are absent)'
+        required: false
+        type: boolean
+        default: false
+      timestampServer:
+        description: 'Primary RFC3161 Timestamp Server URL'
+        required: false
+        type: string
+        default: 'http://timestamp.digicert.com'
+
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-sign-windows-release:
+    name: Build & Authenticode Sign Windows Release Package
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared and protocol workspaces
+        run: |
+          npm run build:shared
+          npm run build:protocol
+
+      - name: Build Windows agent
+        run: npm run build:windows
+
+      - name: Run Windows agent automated tests
+        timeout-minutes: 10
+        run: npm run test --workspace=@safebrowse/agent-windows
+
+      - name: Compile Windows Service Host Wrapper (SafeBrowseServiceHost.exe)
+        shell: pwsh
+        run: |
+          $cscPath = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not (Test-Path $cscPath)) {
+            $cscCmd = Get-Command csc.exe -ErrorAction SilentlyContinue
+            if ($cscCmd) {
+              $cscPath = $cscCmd.Source
+            } else {
+              $cscPath = "csc.exe"
+            }
+          }
+
+          $relSource = "packages/agent-windows/service-host/SafeBrowseServiceHost.cs"
+          if (-not (Test-Path $relSource)) {
+            Write-Error "Source file does not exist at expected path: $relSource"
+            exit 1
+          }
+
+          $sourceFile = (Resolve-Path $relSource).Path
+          Write-Host "Resolved C# source path: $sourceFile"
+
+          $pkgDir = (Resolve-Path "packages/agent-windows").Path
+          $outDir = Join-Path $pkgDir "dist"
+          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+
+          $outputExe = Join-Path $outDir "SafeBrowseServiceHost.exe"
+          Write-Host "Resolved output executable path: $outputExe"
+          Write-Host "Compiling SafeBrowseServiceHost with $cscPath..."
+
+          & $cscPath `
+            /target:exe `
+            /optimize+ `
+            "/out:$outputExe" `
+            /r:System.ServiceProcess.dll `
+            "$sourceFile"
+
+          $cscExitCode = $LASTEXITCODE
+          if ($cscExitCode -ne 0) {
+            Write-Error "csc.exe compilation failed with exit code $cscExitCode"
+            exit $cscExitCode
+          }
+
+          if (-not (Test-Path $outputExe)) {
+            Write-Error "Compiled executable not found at: $outputExe"
+            exit 1
+          }
+          Write-Host "Compiled SafeBrowseServiceHost.exe successfully."
+
+      - name: Build Single Executable Application (SafeBrowseChild-Pilot.exe)
+        shell: pwsh
+        run: |
+          $releaseWinDir = "release/windows"
+          if (-not (Test-Path $releaseWinDir)) { New-Item -ItemType Directory -Path $releaseWinDir -Force }
+
+          $bundleJs = "$releaseWinDir/bundle.js"
+          $seaConfig = "$releaseWinDir/sea-config.json"
+          $seaBlob = "$releaseWinDir/sea-prep.blob"
+          $targetExe = "$releaseWinDir/SafeBrowseChild-Pilot.exe"
+          $entryTs = "packages/agent-windows/src/agent-cli.ts"
+
+          # 1. Bundle TypeScript agent with esbuild
+          Write-Host "Bundling agent-cli.ts with esbuild..."
+          npx esbuild "$entryTs" --bundle --platform=node --target=node20 --outfile="$bundleJs"
+
+          # 2. Generate SEA blob
+          @{ main = $bundleJs; output = $seaBlob } | ConvertTo-Json | Set-Content -Path $seaConfig -Encoding UTF8
+          Write-Host "Generating Node SEA blob..."
+          node --experimental-sea-config "$seaConfig"
+
+          # 3. Copy host node.exe
+          $nodeExe = (Get-Command node).Source
+          Write-Host "Copying host node binary ($nodeExe) to $targetExe..."
+          Copy-Item -Path $nodeExe -Destination $targetExe -Force
+
+          # 4. Inject SEA blob into executable via postject
+          Write-Host "Injecting SEA blob with postject..."
+          npx --yes postject "$targetExe" NODE_SEA_BLOB "$seaBlob" --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
+
+          # Copy SafeBrowseServiceHost.exe and helper scripts to release/windows
+          Copy-Item "packages/agent-windows/dist/SafeBrowseServiceHost.exe" "$releaseWinDir/SafeBrowseServiceHost.exe" -Force
+          Copy-Item "packages/agent-windows/wix/SafeBrowse-Pair.cmd" "$releaseWinDir/SafeBrowse-Pair.cmd" -Force
+          Copy-Item "packages/agent-windows/wix/SafeBrowse-EmergencyRestore.cmd" "$releaseWinDir/SafeBrowse-EmergencyRestore.cmd" -Force
+
+          $scriptsDest = "$releaseWinDir/scripts"
+          if (-not (Test-Path $scriptsDest)) { New-Item -ItemType Directory -Path $scriptsDest -Force }
+          Copy-Item "packages/agent-windows/scripts/configure-dns.ps1" "$scriptsDest/configure-dns.ps1" -Force
+          Copy-Item "packages/agent-windows/scripts/restore-dns.ps1" "$scriptsDest/restore-dns.ps1" -Force
+
+          # Cleanup intermediate build files
+          Remove-Item $bundleJs, $seaConfig, $seaBlob -ErrorAction SilentlyContinue
+
+          if (-not (Test-Path $targetExe)) {
+            Write-Error "Failed to generate SafeBrowseChild-Pilot.exe"
+            exit 1
+          }
+          Write-Host "SafeBrowseChild-Pilot.exe generated successfully."
+
+      - name: Verify Unsigned Binaries Integrity
+        shell: pwsh
+        run: |
+          $releaseWinDir = "release/windows"
+          $childExe = "$releaseWinDir/SafeBrowseChild-Pilot.exe"
+          $hostExe = "$releaseWinDir/SafeBrowseServiceHost.exe"
+
+          if (-not (Test-Path $childExe)) { Write-Error "Missing $childExe"; exit 1 }
+          if (-not (Test-Path $hostExe)) { Write-Error "Missing $hostExe"; exit 1 }
+
+          $childSize = (Get-Item $childExe).Length
+          $hostSize = (Get-Item $hostExe).Length
+
+          Write-Host "SafeBrowseChild-Pilot.exe size: $childSize bytes"
+          Write-Host "SafeBrowseServiceHost.exe size: $hostSize bytes"
+
+          if ($childSize -lt 10000000) { Write-Error "SafeBrowseChild-Pilot.exe size suspicious (<10MB)"; exit 1 }
+          if ($hostSize -lt 10000) { Write-Error "SafeBrowseServiceHost.exe size suspicious (<10KB)"; exit 1 }
+
+          Write-Host "[OK] Unsigned PE32+ binaries verified."
+
+      - name: Locate Windows SDK signtool.exe
+        id: locate-signtool
+        shell: pwsh
+        run: |
+          $signtoolPaths = @(
+            "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe",
+            "C:\Program Files\Windows Kits\10\bin\*\x64\signtool.exe"
+          )
+          $tool = $null
+          foreach ($pattern in $signtoolPaths) {
+            $found = Get-Item -Path $pattern -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+            if ($found) {
+              $tool = $found.FullName
+              break
+            }
+          }
+          if (-not $tool) {
+            $cmd = Get-Command signtool.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $tool = $cmd.Source }
+          }
+
+          if ($tool) {
+            Write-Host "Located signtool.exe at: $tool"
+            echo "signtool=$tool" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "signtool.exe not found via standard SDK paths; will use PowerShell Get-AuthenticodeSignature"
+            echo "signtool=" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Authenticode Sign Child Executable & Service Host
+        id: sign-binaries
+        shell: pwsh
+        env:
+          SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+          SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+          SIGNTOOL_PATH: ${{ steps.locate-signtool.outputs.signtool }}
+          DRY_RUN: ${{ inputs.dryRun || false }}
+          TIMESTAMP_URL: ${{ inputs.timestampServer || 'http://timestamp.digicert.com' }}
+        run: |
+          $releaseWinDir = "release/windows"
+          $childExe = "$releaseWinDir/SafeBrowseChild-Pilot.exe"
+          $hostExe = "$releaseWinDir/SafeBrowseServiceHost.exe"
+          $signtool = $env:SIGNTOOL_PATH
+
+          $certBase64 = $env:SIGNING_CERT_BASE64
+          $certPassword = $env:SIGNING_CERT_PASSWORD
+          $isDryRun = [System.Convert]::ToBoolean($env:DRY_RUN)
+
+          if ([string]::IsNullOrWhiteSpace($certBase64)) {
+            if ($isDryRun) {
+              Write-Host "::warning::[DRY-RUN / TEST MODE] WINDOWS_SIGNING_CERT_BASE64 secret is not configured. Binaries will remain UNSIGNED."
+              echo "signed=false" >> $env:GITHUB_OUTPUT
+              exit 0
+            } else {
+              Write-Error "FATAL: Production release packaging requires WINDOWS_SIGNING_CERT_BASE64 secret. Signing credentials are unavailable. Set dryRun: true for testing."
+              exit 1
+            }
+          }
+
+          # Mask password from GitHub logs
+          if (-not [string]::IsNullOrEmpty($certPassword)) {
+            Write-Host "::add-mask::$certPassword"
+          }
+
+          # Materialize temporary PFX in runner temp
+          $tempCertPath = [System.IO.Path]::Combine($env:RUNNER_TEMP, [System.IO.Path]::GetRandomFileName() + ".pfx")
+          $certBytes = [System.Convert]::FromBase64String($certBase64)
+          [System.IO.File]::WriteAllBytes($tempCertPath, $certBytes)
+
+          $targets = @($childExe, $hostExe)
+          try {
+            foreach ($target in $targets) {
+              Write-Host "Signing $target with SHA-256 and RFC3161 timestamp..."
+              $signArgs = @(
+                "sign",
+                "/fd", "SHA256",
+                "/f", $tempCertPath,
+                "/tr", $env:TIMESTAMP_URL,
+                "/td", "SHA256",
+                "/d", "SafeBrowse Child Protection",
+                "/du", "https://safebrowse.io"
+              )
+              if (-not [string]::IsNullOrEmpty($certPassword)) {
+                $signArgs += @("/p", $certPassword)
+              }
+              $signArgs += $target
+
+              if (-not [string]::IsNullOrEmpty($signtool) -and (Test-Path $signtool)) {
+                & $signtool $signArgs
+                if ($LASTEXITCODE -ne 0) {
+                  Write-Host "Primary timestamp server failed. Retrying with Sectigo RFC3161 timestamp server..."
+                  $signArgs[6] = "http://timestamp.sectigo.com"
+                  & $signtool $signArgs
+                  if ($LASTEXITCODE -ne 0) {
+                    Write-Error "signtool failed to sign $target (exit code $LASTEXITCODE)"
+                    exit $LASTEXITCODE
+                  }
+                }
+              } else {
+                # Fallback via PowerShell Set-AuthenticodeSignature
+                $secPass = ConvertTo-SecureString $certPassword -AsPlainText -Force
+                $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($tempCertPath, $secPass)
+                Set-AuthenticodeSignature -FilePath $target -Certificate $cert -TimestampServer $env:TIMESTAMP_URL -HashAlgorithm "SHA256"
+              }
+              Write-Host "[OK] Signed $target successfully."
+            }
+            echo "signed=true" >> $env:GITHUB_OUTPUT
+          }
+          finally {
+            # Secure wipe: overwrite with random bytes before removal
+            if (Test-Path $tempCertPath) {
+              $len = (Get-Item $tempCertPath).Length
+              $wipe = New-Object byte[] $len
+              [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($wipe)
+              [System.IO.File]::WriteAllBytes($tempCertPath, $wipe)
+              Remove-Item -Path $tempCertPath -Force
+              Write-Host "Securely destroyed temporary certificate file from runner."
+            }
+          }
+
+      - name: Verify Signed Executables Authenticode Status
+        shell: pwsh
+        env:
+          DRY_RUN: ${{ inputs.dryRun || false }}
+          BINARIES_SIGNED: ${{ steps.sign-binaries.outputs.signed }}
+          SIGNTOOL_PATH: ${{ steps.locate-signtool.outputs.signtool }}
+        run: |
+          $releaseWinDir = "release/windows"
+          $childExe = "$releaseWinDir/SafeBrowseChild-Pilot.exe"
+          $hostExe = "$releaseWinDir/SafeBrowseServiceHost.exe"
+          $isDryRun = [System.Convert]::ToBoolean($env:DRY_RUN)
+          $binariesSigned = ($env:BINARIES_SIGNED -eq "true")
+          $signtool = $env:SIGNTOOL_PATH
+
+          $targets = @($childExe, $hostExe)
+          foreach ($target in $targets) {
+            $sig = Get-AuthenticodeSignature -FilePath $target
+            Write-Host "Target: (Split-Path $target -Leaf)"
+            Write-Host "  Status         : $($sig.Status)"
+            Write-Host "  StatusMessage  : $($sig.StatusMessage)"
+            Write-Host "  Signer Subject : $($sig.SignerCertificate.Subject)"
+            Write-Host "  Signer Issuer  : $($sig.SignerCertificate.Issuer)"
+            Write-Host "  Thumbprint     : $($sig.SignerCertificate.Thumbprint)"
+            Write-Host "  TimeStamper    : $($sig.TimeStamperCertificate.Subject)"
+
+            if ($binariesSigned) {
+              if ($sig.Status -ne "Valid") {
+                Write-Error "CRITICAL: Authenticode verification failed for $target! Status: $($sig.Status) ($($sig.StatusMessage))"
+                exit 1
+              }
+              if (-not [string]::IsNullOrEmpty($signtool) -and (Test-Path $signtool)) {
+                & $signtool verify /pa /all /v $target
+                if ($LASTEXITCODE -ne 0) {
+                  Write-Error "CRITICAL: signtool verify /pa /all /v failed for $target (exit code $LASTEXITCODE)"
+                  exit $LASTEXITCODE
+                }
+              }
+              Write-Host "  [VERIFIED VALID AUTHENTICODE SIGNATURE]"
+            } else {
+              Write-Host "  [UNSIGNED DRY-RUN BUILD]"
+            }
+          }
+
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 4.0.5
+          wix extension add WixToolset.Util.wixext/4.0.5
+
+      - name: Build SafeBrowseChild-Pilot.msi via WiX Toolset
+        shell: pwsh
+        run: |
+          $wxsPath = (Resolve-Path "packages/agent-windows/wix/SafeBrowseChild-Pilot.wxs").Path
+          $sourceDir = (Resolve-Path "release/windows").Path
+          $msiOutput = Join-Path $sourceDir "SafeBrowseChild-Pilot.msi"
+
+          Write-Host "Building MSI package containing signed executables with WiX Toolset v4..."
+          Write-Host "WXS Path: $wxsPath"
+          Write-Host "Source Directory: $sourceDir"
+          Write-Host "MSI Output: $msiOutput"
+
+          wix build -arch x64 "$wxsPath" -ext WixToolset.Util.wixext -d SourceDir="$sourceDir" -o "$msiOutput"
+          $wixExitCode = $LASTEXITCODE
+
+          if ($wixExitCode -ne 0) {
+            Write-Error "WiX build failed with exit code $wixExitCode"
+            exit $wixExitCode
+          }
+
+          if (-not (Test-Path $msiOutput)) {
+            Write-Error "Failed to generate SafeBrowseChild-Pilot.msi"
+            exit 1
+          }
+          Write-Host "SafeBrowseChild-Pilot.msi built successfully."
+
+      - name: Authenticode Sign Windows Installer Package (MSI)
+        id: sign-msi
+        shell: pwsh
+        env:
+          SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+          SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+          SIGNTOOL_PATH: ${{ steps.locate-signtool.outputs.signtool }}
+          DRY_RUN: ${{ inputs.dryRun || false }}
+          TIMESTAMP_URL: ${{ inputs.timestampServer || 'http://timestamp.digicert.com' }}
+        run: |
+          $releaseWinDir = "release/windows"
+          $msiPath = "$releaseWinDir/SafeBrowseChild-Pilot.msi"
+          $signtool = $env:SIGNTOOL_PATH
+
+          $certBase64 = $env:SIGNING_CERT_BASE64
+          $certPassword = $env:SIGNING_CERT_PASSWORD
+          $isDryRun = [System.Convert]::ToBoolean($env:DRY_RUN)
+
+          if ([string]::IsNullOrWhiteSpace($certBase64)) {
+            if ($isDryRun) {
+              Write-Host "::warning::[DRY-RUN / TEST MODE] WINDOWS_SIGNING_CERT_BASE64 secret is not configured. MSI will remain UNSIGNED."
+              echo "signed=false" >> $env:GITHUB_OUTPUT
+              exit 0
+            } else {
+              Write-Error "FATAL: Production release packaging requires WINDOWS_SIGNING_CERT_BASE64 secret. Signing credentials are unavailable. Set dryRun: true for testing."
+              exit 1
+            }
+          }
+
+          # Mask password from GitHub logs
+          if (-not [string]::IsNullOrEmpty($certPassword)) {
+            Write-Host "::add-mask::$certPassword"
+          }
+
+          # Materialize temporary PFX in runner temp
+          $tempCertPath = [System.IO.Path]::Combine($env:RUNNER_TEMP, [System.IO.Path]::GetRandomFileName() + ".pfx")
+          $certBytes = [System.Convert]::FromBase64String($certBase64)
+          [System.IO.File]::WriteAllBytes($tempCertPath, $certBytes)
+
+          try {
+            Write-Host "Signing $msiPath with SHA-256 and RFC3161 timestamp..."
+            $signArgs = @(
+              "sign",
+              "/fd", "SHA256",
+              "/f", $tempCertPath,
+              "/tr", $env:TIMESTAMP_URL,
+              "/td", "SHA256",
+              "/d", "SafeBrowse Child Protection Installer",
+              "/du", "https://safebrowse.io"
+            )
+            if (-not [string]::IsNullOrEmpty($certPassword)) {
+              $signArgs += @("/p", $certPassword)
+            }
+            $signArgs += $msiPath
+
+            if (-not [string]::IsNullOrEmpty($signtool) -and (Test-Path $signtool)) {
+              & $signtool $signArgs
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "Primary timestamp server failed. Retrying with Sectigo RFC3161 timestamp server..."
+                $signArgs[6] = "http://timestamp.sectigo.com"
+                & $signtool $signArgs
+                if ($LASTEXITCODE -ne 0) {
+                  Write-Error "signtool failed to sign $msiPath (exit code $LASTEXITCODE)"
+                  exit $LASTEXITCODE
+                }
+              }
+            } else {
+              $secPass = ConvertTo-SecureString $certPassword -AsPlainText -Force
+              $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($tempCertPath, $secPass)
+              Set-AuthenticodeSignature -FilePath $msiPath -Certificate $cert -TimestampServer $env:TIMESTAMP_URL -HashAlgorithm "SHA256"
+            }
+            Write-Host "[OK] Signed $msiPath successfully."
+            echo "signed=true" >> $env:GITHUB_OUTPUT
+          }
+          finally {
+            if (Test-Path $tempCertPath) {
+              $len = (Get-Item $tempCertPath).Length
+              $wipe = New-Object byte[] $len
+              [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($wipe)
+              [System.IO.File]::WriteAllBytes($tempCertPath, $wipe)
+              Remove-Item -Path $tempCertPath -Force
+              Write-Host "Securely destroyed temporary certificate file from runner."
+            }
+          }
+
+      - name: Verify Signed MSI Authenticode Status
+        shell: pwsh
+        env:
+          DRY_RUN: ${{ inputs.dryRun || false }}
+          MSI_SIGNED: ${{ steps.sign-msi.outputs.signed }}
+          SIGNTOOL_PATH: ${{ steps.locate-signtool.outputs.signtool }}
+        run: |
+          $releaseWinDir = "release/windows"
+          $msiPath = "$releaseWinDir/SafeBrowseChild-Pilot.msi"
+          $isDryRun = [System.Convert]::ToBoolean($env:DRY_RUN)
+          $msiSigned = ($env:MSI_SIGNED -eq "true")
+          $signtool = $env:SIGNTOOL_PATH
+
+          $sig = Get-AuthenticodeSignature -FilePath $msiPath
+          Write-Host "Target: SafeBrowseChild-Pilot.msi"
+          Write-Host "  Status         : $($sig.Status)"
+          Write-Host "  StatusMessage  : $($sig.StatusMessage)"
+          Write-Host "  Signer Subject : $($sig.SignerCertificate.Subject)"
+          Write-Host "  Signer Issuer  : $($sig.SignerCertificate.Issuer)"
+          Write-Host "  Thumbprint     : $($sig.SignerCertificate.Thumbprint)"
+          Write-Host "  TimeStamper    : $($sig.TimeStamperCertificate.Subject)"
+
+          if ($msiSigned) {
+            if ($sig.Status -ne "Valid") {
+              Write-Error "CRITICAL: Authenticode verification failed for $msiPath! Status: $($sig.Status) ($($sig.StatusMessage))"
+              exit 1
+            }
+            if (-not [string]::IsNullOrEmpty($signtool) -and (Test-Path $signtool)) {
+              & $signtool verify /pa /all /v $msiPath
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "CRITICAL: signtool verify /pa /all /v failed for $msiPath (exit code $LASTEXITCODE)"
+                exit $LASTEXITCODE
+              }
+            }
+            Write-Host "  [VERIFIED VALID AUTHENTICODE SIGNATURE]"
+          } else {
+            Write-Host "  [UNSIGNED DRY-RUN BUILD]"
+          }
+
+      - name: Generate Checksums and Signing Manifest
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.releaseVersion || '1.0.0.0' }}
+          BACKEND_URL: ${{ inputs.backendUrl || 'https://api.safebrowse.io' }}
+          BINARIES_SIGNED: ${{ steps.sign-binaries.outputs.signed }}
+          MSI_SIGNED: ${{ steps.sign-msi.outputs.signed }}
+          TIMESTAMP_URL: ${{ inputs.timestampServer || 'http://timestamp.digicert.com' }}
+        run: |
+          $releaseWinDir = "release/windows"
+          $exePath = "$releaseWinDir/SafeBrowseChild-Pilot.exe"
+          $serviceHostPath = "$releaseWinDir/SafeBrowseServiceHost.exe"
+          $msiPath = "$releaseWinDir/SafeBrowseChild-Pilot.msi"
+
+          $exeHash = (Get-FileHash -Path $exePath -Algorithm SHA256).Hash.ToLower()
+          $hostHash = (Get-FileHash -Path $serviceHostPath -Algorithm SHA256).Hash.ToLower()
+          $msiHash = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash.ToLower()
+
+          $isFullySigned = ($env:BINARIES_SIGNED -eq "true" -and $env:MSI_SIGNED -eq "true")
+          $buildType = if ($isFullySigned) { "SIGNED_RELEASE_CANDIDATE" } else { "UNSIGNED_DRY_RUN" }
+          $signingStatus = if ($isFullySigned) { "AUTHENTICODE_SIGNED" } else { "UNSIGNED (Dry-Run / Credentials Not Provided)" }
+
+          # 1. SHA256SUMS.txt
+          $manifestLines = @(
+            "# SafeBrowse Windows Release Checksum Manifest"
+            "BuildType: $buildType"
+            "SigningStatus: $signingStatus"
+            "ProductVersion: $env:RELEASE_VERSION"
+            "TargetBackend: $env:BACKEND_URL"
+            "CommitSha: $env:GITHUB_SHA"
+            "WorkflowRunId: $env:GITHUB_RUN_ID"
+            "Timestamp: $((Get-Date).ToUniversalTime().ToString('o'))"
+            ""
+            "$exeHash *SafeBrowseChild-Pilot.exe"
+            "$hostHash *SafeBrowseServiceHost.exe"
+            "$msiHash *SafeBrowseChild-Pilot.msi"
+          )
+          $manifestFile = "$releaseWinDir/SHA256SUMS.txt"
+          Set-Content -Path $manifestFile -Value ($manifestLines -join "`n") -Encoding UTF8
+
+          Set-Content -Path "$exePath.sha256" -Value "$exeHash *SafeBrowseChild-Pilot.exe" -Encoding UTF8
+          Set-Content -Path "$msiPath.sha256" -Value "$msiHash *SafeBrowseChild-Pilot.msi" -Encoding UTF8
+
+          # 2. signing-manifest.json
+          $artifactsData = @()
+          foreach ($file in @($exePath, $serviceHostPath, $msiPath)) {
+            $fName = Split-Path $file -Leaf
+            $fHash = (Get-FileHash -Path $file -Algorithm SHA256).Hash.ToLower()
+            $sig = Get-AuthenticodeSignature -FilePath $file
+
+            $certPublic = $null
+            if ($sig.SignerCertificate) {
+              $certPublic = @{
+                subject = $sig.SignerCertificate.Subject
+                issuer = $sig.SignerCertificate.Issuer
+                thumbprint = $sig.SignerCertificate.Thumbprint
+                validFrom = $sig.SignerCertificate.NotBefore.ToUniversalTime().ToString("o")
+                validTo = $sig.SignerCertificate.NotAfter.ToUniversalTime().ToString("o")
+              }
+            }
+
+            $tsPublic = $null
+            if ($sig.TimeStamperCertificate) {
+              $tsPublic = @{
+                subject = $sig.TimeStamperCertificate.Subject
+                issuer = $sig.TimeStamperCertificate.Issuer
+                thumbprint = $sig.TimeStamperCertificate.Thumbprint
+              }
+            }
+
+            $artifactsData += @{
+              name = $fName
+              path = "release/windows/$fName"
+              sha256 = $fHash
+              signatureStatus = if ($sig.Status) { $sig.Status.ToString() } else { "Unsigned" }
+              statusMessage = if ($sig.StatusMessage) { $sig.StatusMessage.ToString() } else { "None" }
+              signerCertificate = $certPublic
+              timestamp = $tsPublic
+            }
+          }
+
+          $jsonManifest = @{
+            manifestVersion = "1.0"
+            buildType = $buildType
+            productName = "SafeBrowse Child Protection"
+            productVersion = $env:RELEASE_VERSION
+            commitSha = $env:GITHUB_SHA
+            branch = $env:GITHUB_REF_NAME
+            workflowRunId = $env:GITHUB_RUN_ID
+            workflowRunNumber = [int]$env:GITHUB_RUN_NUMBER
+            timestamp = (Get-Date).ToUniversalTime().ToString("o")
+            signingMode = if ($isFullySigned) { "PRODUCTION_AUTHENTICODE" } else { "DRY_RUN_UNSIGNED" }
+            timestampServer = $env:TIMESTAMP_URL
+            digestAlgorithm = "SHA256"
+            artifacts = $artifactsData
+          }
+
+          $jsonPath = "$releaseWinDir/signing-manifest.json"
+          $jsonManifest | ConvertTo-Json -Depth 5 | Set-Content -Path $jsonPath -Encoding UTF8
+
+          Write-Host "=== Checksum Summary ==="
+          Write-Host "Build Type                 : $buildType"
+          Write-Host "SafeBrowseChild-Pilot.exe  : $exeHash"
+          Write-Host "SafeBrowseServiceHost.exe  : $hostHash"
+          Write-Host "SafeBrowseChild-Pilot.msi  : $msiHash"
+          Write-Host "Generated $jsonPath successfully."
+
+      - name: Upload Signed Release Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SafeBrowse-Windows-Release-Candidate
+          path: |
+            release/windows/SafeBrowseChild-Pilot.msi
+            release/windows/SafeBrowseChild-Pilot.msi.sha256
+            release/windows/SafeBrowseChild-Pilot.exe
+            release/windows/SafeBrowseChild-Pilot.exe.sha256
+            release/windows/SHA256SUMS.txt
+            release/windows/signing-manifest.json
+          if-no-files-found: error

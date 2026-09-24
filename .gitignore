@@ -68,7 +68,7 @@ packages/agent-android/.idea/
 *.zip
 *.tar.gz
 *.tgz
-release/
+/release/
 quarantine/
 .gemini/
 
