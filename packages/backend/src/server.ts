@@ -18,12 +18,15 @@ import { usageRouter } from './routes/usage.routes';
 import { notificationRouter } from './routes/notification.routes';
 import { authMiddleware } from './middleware/auth';
 import { requireVerifiedEmail } from './middleware/requireVerifiedEmail';
+import { corsMiddleware } from './middleware/cors';
+import { configureTrustProxy } from './middleware/proxy';
 import { bootstrap } from './bootstrap';
 
 const app = express();
 const port = process.env.PORT !== undefined ? process.env.PORT : 1002;
 
-app.use(cors({ origin: '*' }));
+configureTrustProxy(app);
+app.use(corsMiddleware);
 app.use(express.json());
 
 // API Routes

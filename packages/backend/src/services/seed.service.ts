@@ -3,7 +3,12 @@ import { nanoid } from 'nanoid';
 import { prisma } from '../db/prisma';
 
 export async function ensureDemoAccounts(): Promise<void> {
-  if (process.env.AUTO_SEED_DEMO === 'false' || process.env.NODE_ENV === 'test') {
+  if (
+    process.env.ENABLE_DEMO_DATA === 'false' ||
+    process.env.AUTO_SEED_DEMO === 'false' ||
+    process.env.NODE_ENV === 'production' ||
+    process.env.NODE_ENV === 'test'
+  ) {
     return;
   }
 

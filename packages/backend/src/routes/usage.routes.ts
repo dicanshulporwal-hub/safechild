@@ -194,6 +194,27 @@ usageRouter.post('/sync', deviceAuthMiddleware, async (req: AuthenticatedDeviceR
   }
 });
 
+// POST /api/usage/session -> Windows agent process-limiter session usage report (Device auth required)
+usageRouter.post('/session', deviceAuthMiddleware, async (req: AuthenticatedDeviceRequest, res: Response) => {
+  try {
+    const { appName, durationSeconds, clientWallIso } = req.body;
+    if (!appName || durationSeconds === undefined) {
+      return res.status(400).json({ error: 'Missing required session fields: appName, durationSeconds.' });
+    }
+    const result = await usageService.recordUsageSync(
+      req.childId!,
+      req.deviceId!,
+      appName,
+      'APP',
+      Number(durationSeconds),
+      clientWallIso
+    );
+    res.json(result);
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 // GET /api/usage/digest -> Weekly Privacy Digest (Parent auth + Verified Email + USAGE_READ)
 usageRouter.get('/digest', authMiddleware, requireVerifiedEmail, async (req: AuthenticatedRequest, res: Response) => {
   try {
