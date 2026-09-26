@@ -16,6 +16,8 @@ import { familyService } from '../src/services/family.service';
 import { childService } from '../src/services/child.service';
 import { deviceService } from '../src/services/device.service';
 import { policyService } from '../src/services/policy.service';
+import { wsManager } from '../src/services/websocket.service';
+import { WebSocket } from 'ws';
 import type { PolicySyncClient as PolicySyncClientType } from '../../agent-windows/dist/sync-client';
 const { PolicySyncClient } = require(path.resolve(__dirname, '../../../agent-windows/dist/sync-client')) as {
   PolicySyncClient: typeof PolicySyncClientType;
@@ -451,5 +453,251 @@ describe('SafeBrowse Stage 11 Step 4: Windows Device Policy Authentication & Syn
       { domain: 'unauthorized-attack.com', action: 'BLOCK' }
     );
     assert.strictEqual(unauthorizedPolicyRes.status, 403, 'Cross-family policy mutation must return 403');
+  });
+
+  it('12. should authenticate device connection via AUTH_DEVICE message payload without query parameters', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+
+    await new Promise<void>((resolve, reject) => {
+      ws.on('open', () => {
+        ws.send(JSON.stringify({
+          type: 'AUTH_DEVICE',
+          deviceId,
+          deviceToken,
+        }));
+      });
+
+      ws.on('message', (data) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          assert.strictEqual(msg.type, 'AUTH_SUCCESS');
+          assert.strictEqual(msg.deviceId, deviceId);
+          ws.close();
+          resolve();
+        } catch (e) {
+          ws.close();
+          reject(e);
+        }
+      });
+
+      ws.on('error', reject);
+    });
+  });
+
+  it('13. should authenticate parent connection via AUTH_PARENT message payload without query parameters', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+
+    await new Promise<void>((resolve, reject) => {
+      ws.on('open', () => {
+        ws.send(JSON.stringify({
+          type: 'AUTH_PARENT',
+          token: parentToken,
+          childId,
+        }));
+      });
+
+      ws.on('message', (data) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          assert.strictEqual(msg.type, 'AUTH_SUCCESS');
+          assert.strictEqual(msg.parentId, parentUserId);
+          ws.close();
+          resolve();
+        } catch (e) {
+          ws.close();
+          reject(e);
+        }
+      });
+
+      ws.on('error', reject);
+    });
+  });
+
+  it('14. should strictly prevent unauthenticated WebSocket connections from receiving protected broadcasts', async () => {
+    const unauthWs = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    const authedParentWs = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    const authedDeviceWs = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+
+    const unauthMessages: any[] = [];
+    const parentMessages: any[] = [];
+    const deviceMessages: any[] = [];
+
+    // Setup message collectors
+    unauthWs.on('message', (d) => unauthMessages.push(JSON.parse(d.toString())));
+    authedParentWs.on('message', (d) => parentMessages.push(JSON.parse(d.toString())));
+    authedDeviceWs.on('message', (d) => deviceMessages.push(JSON.parse(d.toString())));
+
+    // Authenticate parent and device
+    await Promise.all([
+      new Promise<void>((resolve) => {
+        authedParentWs.on('open', () => {
+          authedParentWs.send(JSON.stringify({ type: 'AUTH_PARENT', token: parentToken, childId }));
+          const check = setInterval(() => {
+            if (parentMessages.some((m) => m.type === 'AUTH_SUCCESS')) {
+              clearInterval(check);
+              resolve();
+            }
+          }, 50);
+        });
+      }),
+      new Promise<void>((resolve) => {
+        authedDeviceWs.on('open', () => {
+          authedDeviceWs.send(JSON.stringify({ type: 'AUTH_DEVICE', deviceId, deviceToken }));
+          const check = setInterval(() => {
+            if (deviceMessages.some((m) => m.type === 'AUTH_SUCCESS')) {
+              clearInterval(check);
+              resolve();
+            }
+          }, 50);
+        });
+      }),
+      new Promise<void>((resolve) => {
+        unauthWs.on('open', () => resolve());
+      }),
+    ]);
+
+    // Clear initial auth handshake messages
+    parentMessages.length = 0;
+    deviceMessages.length = 0;
+    unauthMessages.length = 0;
+
+    // Broadcast protected events
+    wsManager.broadcast({
+      type: 'POLICY_UPDATED',
+      payload: { version: 99, rules: [] },
+      childId,
+    });
+
+    wsManager.broadcast({
+      type: 'ACCESS_REQUEST_CREATED',
+      payload: { domain: 'secret-request.com' },
+      parentId: parentUserId,
+      childId,
+    });
+
+    wsManager.broadcast({
+      type: 'DEVICE_HEALTH_CHANGED',
+      payload: { healthState: 'PROTECTED' },
+      parentId: parentUserId,
+      childId,
+    });
+
+    // Allow broadcast delivery
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Verify authenticated parent and device received broadcasts
+    assert.ok(parentMessages.length >= 2, 'Parent socket should receive notifications and health changes');
+    assert.ok(deviceMessages.some((m) => m.type === 'POLICY_UPDATED'), 'Device socket should receive policy updates');
+
+    // CRITICAL SECURITY ASSERTION: Unauthenticated connection MUST receive 0 protected broadcasts
+    assert.strictEqual(
+      unauthMessages.length,
+      0,
+      'Unauthenticated socket must not receive any protected broadcast'
+    );
+
+    unauthWs.close();
+    authedParentWs.close();
+    authedDeviceWs.close();
+  });
+
+  it('15. should reject invalid device credentials via AUTH_DEVICE and return generic AUTH_ERROR', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+
+    await new Promise<void>((resolve, reject) => {
+      ws.on('open', () => {
+        ws.send(JSON.stringify({
+          type: 'AUTH_DEVICE',
+          deviceId: 'non-existent-device-id',
+          deviceToken: 'fake-token-12345',
+        }));
+      });
+
+      ws.on('message', (data) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          assert.strictEqual(msg.type, 'AUTH_ERROR');
+          assert.strictEqual(msg.message, 'Authentication failed');
+          ws.close();
+          resolve();
+        } catch (e) {
+          ws.close();
+          reject(e);
+        }
+      });
+
+      ws.on('error', reject);
+    });
+  });
+
+  it('16. should reject invalid parent token via AUTH_PARENT and return generic AUTH_ERROR', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+
+    await new Promise<void>((resolve, reject) => {
+      ws.on('open', () => {
+        ws.send(JSON.stringify({
+          type: 'AUTH_PARENT',
+          token: 'invalid.forged.jwt.token',
+        }));
+      });
+
+      ws.on('message', (data) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          assert.strictEqual(msg.type, 'AUTH_ERROR');
+          assert.strictEqual(msg.message, 'Authentication failed');
+          ws.close();
+          resolve();
+        } catch (e) {
+          ws.close();
+          reject(e);
+        }
+      });
+
+      ws.on('error', reject);
+    });
+  });
+
+  it('17. should verify zero live client WebSocket credential-query usage in source files', async () => {
+    const appTsxPath = path.resolve(__dirname, '../../../parent-web/src/App.tsx');
+    const notifCenterPath = path.resolve(__dirname, '../../../parent-web/src/components/NotificationCenter.tsx');
+    const syncClientPath = path.resolve(__dirname, '../../../agent-windows/src/sync-client.ts');
+
+    const appTsx = fs.readFileSync(appTsxPath, 'utf8');
+    const notifCenter = fs.readFileSync(notifCenterPath, 'utf8');
+    const syncClient = fs.readFileSync(syncClientPath, 'utf8');
+
+    // Windows agent checks
+    assert.strictEqual(syncClient.includes('/ws?'), false, 'agent-windows must not use /ws?');
+    assert.strictEqual(syncClient.includes('deviceToken='), false, 'agent-windows must not put deviceToken in URL');
+    assert.strictEqual(syncClient.includes('deviceId='), false, 'agent-windows must not put deviceId in URL');
+
+    // Parent web checks
+    assert.strictEqual(appTsx.includes('/ws?'), false, 'App.tsx must not use /ws?');
+    assert.strictEqual(appTsx.includes('/ws?token='), false, 'App.tsx must not put token in WS URL');
+    assert.strictEqual(notifCenter.includes('/ws?'), false, 'NotificationCenter.tsx must not use /ws?');
+    assert.strictEqual(notifCenter.includes('?token='), false, 'NotificationCenter.tsx must not put token in WS URL');
+  });
+
+  it('18. should verify existing REST device authentication endpoints remain fully intact', async () => {
+    // 1. GET device policy with valid headers
+    const policyRes = await api('GET', `/api/policies/device/${encodeURIComponent(deviceId)}`, {
+      'x-device-id': deviceId,
+      'x-device-token': deviceToken,
+    });
+    assert.strictEqual(policyRes.status, 200);
+    assert.ok(policyRes.data.policy);
+
+    // 2. POST device heartbeat
+    const hbRes = await api('POST', '/api/devices/heartbeat', undefined, {
+      deviceId,
+      deviceToken,
+      activePolicyVersion: policyRes.data.policy.version,
+      enforcementActive: true,
+      platform: 'windows',
+      agentVersion: '1.0.0',
+    });
+    assert.strictEqual(hbRes.status, 200);
+    assert.strictEqual(hbRes.data.status, 'ok');
   });
 });

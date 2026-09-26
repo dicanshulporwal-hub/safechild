@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as http from 'http';
 import * as dgram from 'dgram';
+import { WebSocketServer } from 'ws';
 import { Policy, PolicyRule } from '@safebrowse/shared';
 import { WindowsNetworkManager, MockAdapterState } from '../src/network-manager';
 import { PolicySyncClient, DeviceConfig } from '../src/sync-client';
@@ -4422,5 +4423,298 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
       ConfigManager.prototype.getCacheDir = origGetCacheDir;
       try { fs.rmSync(cacheDir, { recursive: true, force: true }); } catch {}
     }
+  });
+
+  // ----------------------------------------------------
+  // Test 116: Windows WebSocket URL contains exactly /ws and no credentials in query string
+  // ----------------------------------------------------
+  it('116. Windows WebSocket URL contains exactly /ws and no credentials in query string', () => {
+    const config: DeviceConfig = {
+      deviceId: 'dev-sensitive-id-999',
+      deviceToken: 'dtk_ultra_secret_token_abc123',
+      childId: 'child-116',
+      parentId: 'parent-116',
+      deviceName: 'Audit Laptop',
+      backendUrl: 'https://safebrowse.porwal.online',
+    };
+
+    const tempDir = path.join(os.tmpdir(), `sb-ws-audit-${Date.now()}`);
+    const client = new PolicySyncClient(config, tempDir, () => true);
+
+    const wsUrl = client.getWebSocketUrl();
+    assert.strictEqual(wsUrl, 'wss://safebrowse.porwal.online/ws');
+    assert.strictEqual(wsUrl.includes('?'), false, 'WebSocket URL must contain zero query parameters');
+    assert.strictEqual(wsUrl.includes('deviceToken'), false, 'WebSocket URL must not leak deviceToken');
+    assert.strictEqual(wsUrl.includes('deviceId'), false, 'WebSocket URL must not leak deviceId');
+    assert.strictEqual(wsUrl.includes('dtk_ultra_secret_token_abc123'), false);
+
+    // Also verify with trailing slash backendUrl and http
+    const httpConfig: DeviceConfig = {
+      ...config,
+      backendUrl: 'http://127.0.0.1:4000/',
+    };
+    const httpClient = new PolicySyncClient(httpConfig, tempDir, () => true);
+    assert.strictEqual(httpClient.getWebSocketUrl(), 'ws://127.0.0.1:4000/ws');
+    assert.strictEqual(httpClient.getWebSocketUrl().includes('?'), false);
+
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+  });
+
+  // ----------------------------------------------------
+  // Test 117: socket OPEN alone does NOT set POLICY_LIVE (retains POLICY_CACHED / UNAVAILABLE until AUTH_SUCCESS)
+  // ----------------------------------------------------
+  it('117. socket OPEN alone does NOT set POLICY_LIVE', async () => {
+    const server = http.createServer();
+    const wss = new WebSocketServer({ server, path: '/ws' });
+
+    let receivedUrl = '';
+    let receivedAuthPayload: any = null;
+
+    wss.on('connection', (ws, req) => {
+      receivedUrl = req.url || '';
+      ws.on('message', (data) => {
+        try {
+          receivedAuthPayload = JSON.parse(data.toString());
+        } catch {}
+      });
+      // Do NOT send AUTH_SUCCESS immediately
+    });
+
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const port = (server.address() as any).port;
+
+    const tempDir = path.join(os.tmpdir(), `sb-ws-open-test-${Date.now()}`);
+    fs.mkdirSync(tempDir, { recursive: true });
+    // Pre-populate cached policy
+    fs.writeFileSync(
+      path.join(tempDir, 'policy-dev-ws-117.json'),
+      JSON.stringify(makeMockPolicy({ version: 3 })),
+      'utf8'
+    );
+
+    const config: DeviceConfig = {
+      deviceId: 'dev-ws-117',
+      deviceToken: 'dtk_secret_117',
+      childId: 'child-117',
+      parentId: 'parent-117',
+      deviceName: 'Test Laptop',
+      backendUrl: `http://127.0.0.1:${port}`,
+    };
+
+    const client = new PolicySyncClient(config, tempDir, () => true);
+    assert.strictEqual(client.getPolicyStatus(), 'POLICY_CACHED');
+    assert.strictEqual(client.isWebSocketAuthenticated(), false);
+
+    client.connectWebSocket();
+
+    // Wait for transport open
+    await new Promise((r) => setTimeout(r, 200));
+
+    // req.url must be strictly '/ws' with zero query params
+    assert.strictEqual(receivedUrl, '/ws');
+    assert.strictEqual(receivedUrl.includes('?'), false);
+
+    // Socket OPEN alone must NOT set POLICY_LIVE
+    assert.strictEqual(client.getPolicyStatus(), 'POLICY_CACHED');
+    assert.strictEqual(client.isWebSocketAuthenticated(), false);
+
+    // Verify AUTH_DEVICE payload was transmitted over encrypted message body
+    assert.ok(receivedAuthPayload);
+    assert.strictEqual(receivedAuthPayload.type, 'AUTH_DEVICE');
+    assert.strictEqual(receivedAuthPayload.deviceId, 'dev-ws-117');
+    assert.strictEqual(receivedAuthPayload.deviceToken, 'dtk_secret_117');
+
+    client.stop();
+    await new Promise<void>((r) => wss.close(() => server.close(() => r())));
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+  });
+
+  // ----------------------------------------------------
+  // Test 118: device authentication succeeds via AUTH_DEVICE message and transitions to POLICY_LIVE upon AUTH_SUCCESS
+  // ----------------------------------------------------
+  it('118. device authentication succeeds via AUTH_DEVICE and transitions to POLICY_LIVE upon AUTH_SUCCESS', async () => {
+    const server = http.createServer();
+    const wss = new WebSocketServer({ server, path: '/ws' });
+
+    wss.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === 'AUTH_DEVICE' && msg.deviceId === 'dev-ws-118' && msg.deviceToken === 'dtk_secret_118') {
+          ws.send(JSON.stringify({ type: 'AUTH_SUCCESS', deviceId: 'dev-ws-118' }));
+        }
+      });
+    });
+
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const port = (server.address() as any).port;
+
+    const tempDir = path.join(os.tmpdir(), `sb-ws-success-${Date.now()}`);
+    fs.mkdirSync(tempDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tempDir, 'policy-dev-ws-118.json'),
+      JSON.stringify(makeMockPolicy({ version: 4 })),
+      'utf8'
+    );
+
+    const config: DeviceConfig = {
+      deviceId: 'dev-ws-118',
+      deviceToken: 'dtk_secret_118',
+      childId: 'child-118',
+      parentId: 'parent-118',
+      deviceName: 'Success Laptop',
+      backendUrl: `http://127.0.0.1:${port}`,
+    };
+
+    const client = new PolicySyncClient(config, tempDir, () => true);
+    assert.strictEqual(client.getPolicyStatus(), 'POLICY_CACHED');
+
+    client.connectWebSocket();
+
+    // Wait for message roundtrip
+    await new Promise((r) => setTimeout(r, 200));
+
+    assert.strictEqual(client.isWebSocketAuthenticated(), true);
+    assert.strictEqual(client.getPolicyStatus(), 'POLICY_LIVE');
+
+    client.stop();
+    await new Promise<void>((r) => wss.close(() => server.close(() => r())));
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+  });
+
+  // ----------------------------------------------------
+  // Test 119: AUTH_ERROR does NOT set POLICY_LIVE, retains valid cached policy as POLICY_CACHED, and never logs deviceToken
+  // ----------------------------------------------------
+  it('119. AUTH_ERROR does NOT set POLICY_LIVE, retains valid cached policy as POLICY_CACHED, and never logs deviceToken', async () => {
+    const server = http.createServer();
+    const wss = new WebSocketServer({ server, path: '/ws' });
+
+    wss.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === 'AUTH_DEVICE') {
+          ws.send(JSON.stringify({ type: 'AUTH_ERROR', message: 'Authentication failed' }));
+        }
+      });
+    });
+
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const port = (server.address() as any).port;
+
+    const tempDir = path.join(os.tmpdir(), `sb-ws-error-${Date.now()}`);
+    fs.mkdirSync(tempDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tempDir, 'policy-dev-ws-119.json'),
+      JSON.stringify(makeMockPolicy({ version: 5 })),
+      'utf8'
+    );
+
+    const superSecretToken = 'dtk_critical_secret_token_xyz999';
+    const config: DeviceConfig = {
+      deviceId: 'dev-ws-119',
+      deviceToken: superSecretToken,
+      childId: 'child-119',
+      parentId: 'parent-119',
+      deviceName: 'Error Laptop',
+      backendUrl: `http://127.0.0.1:${port}`,
+    };
+
+    const capturedLogs: string[] = [];
+    const origWarn = console.warn;
+    const origLog = console.log;
+    const origError = console.error;
+
+    console.warn = (...args: any[]) => {
+      capturedLogs.push(args.map((a) => String(a)).join(' '));
+      origWarn.apply(console, args);
+    };
+    console.log = (...args: any[]) => {
+      capturedLogs.push(args.map((a) => String(a)).join(' '));
+      origLog.apply(console, args);
+    };
+    console.error = (...args: any[]) => {
+      capturedLogs.push(args.map((a) => String(a)).join(' '));
+      origError.apply(console, args);
+    };
+
+    const client = new PolicySyncClient(config, tempDir, () => true);
+
+    try {
+      client.connectWebSocket();
+      await new Promise((r) => setTimeout(r, 200));
+
+      assert.strictEqual(client.isWebSocketAuthenticated(), false);
+      assert.strictEqual(client.getPolicyStatus(), 'POLICY_CACHED');
+      assert.notStrictEqual(client.getPolicyStatus(), 'POLICY_LIVE');
+
+      // Verify no leak of deviceToken
+      const leaked = capturedLogs.some((l) => l.includes(superSecretToken));
+      assert.strictEqual(leaked, false, 'deviceToken must never be printed to logs');
+    } finally {
+      console.warn = origWarn;
+      console.log = origLog;
+      console.error = origError;
+      client.stop();
+      await new Promise<void>((r) => wss.close(() => server.close(() => r())));
+      try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  // ----------------------------------------------------
+  // Test 120: socket disconnection / close preserves valid cached policy as POLICY_CACHED
+  // ----------------------------------------------------
+  it('120. socket disconnection / close preserves valid cached policy as POLICY_CACHED', async () => {
+    let clientWsRef: any = null;
+    const server = http.createServer();
+    const wss = new WebSocketServer({ server, path: '/ws' });
+
+    wss.on('connection', (ws) => {
+      clientWsRef = ws;
+      ws.on('message', () => {
+        ws.send(JSON.stringify({ type: 'AUTH_SUCCESS', deviceId: 'dev-ws-120' }));
+      });
+    });
+
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const port = (server.address() as any).port;
+
+    const tempDir = path.join(os.tmpdir(), `sb-ws-close-${Date.now()}`);
+    fs.mkdirSync(tempDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tempDir, 'policy-dev-ws-120.json'),
+      JSON.stringify(makeMockPolicy({ version: 6 })),
+      'utf8'
+    );
+
+    const config: DeviceConfig = {
+      deviceId: 'dev-ws-120',
+      deviceToken: 'dtk_secret_120',
+      childId: 'child-120',
+      parentId: 'parent-120',
+      deviceName: 'Close Laptop',
+      backendUrl: `http://127.0.0.1:${port}`,
+    };
+
+    const client = new PolicySyncClient(config, tempDir, () => true);
+    client.connectWebSocket();
+
+    await new Promise((r) => setTimeout(r, 200));
+    assert.strictEqual(client.getPolicyStatus(), 'POLICY_LIVE');
+
+    // Simulate abrupt socket termination from server
+    if (clientWsRef) {
+      clientWsRef.terminate();
+    }
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Must gracefully fall back to POLICY_CACHED (fail-safe enforcement maintained)
+    assert.strictEqual(client.getPolicyStatus(), 'POLICY_CACHED');
+    assert.strictEqual(client.isWebSocketAuthenticated(), false);
+    assert.ok(client.getActivePolicy());
+    assert.strictEqual(client.getActivePolicy()?.version, 6);
+
+    client.stop();
+    await new Promise<void>((r) => wss.close(() => server.close(() => r())));
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
   });
 });

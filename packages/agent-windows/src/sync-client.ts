@@ -22,6 +22,7 @@ export class PolicySyncClient {
   private policyStatus: PolicyStatus = 'POLICY_UNAVAILABLE';
   private cacheFilePath: string;
   private ws: WebSocket | null = null;
+  private isWsAuthenticated: boolean = false;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private wsReconnectTimer: NodeJS.Timeout | null = null;
   private enforcementActiveProvider?: () => boolean;
@@ -38,6 +39,15 @@ export class PolicySyncClient {
     }
     this.cacheFilePath = path.join(dir, `policy-${config.deviceId}.json`);
     this.loadCachedPolicy();
+  }
+
+  public getWebSocketUrl(): string {
+    const cleanBackendUrl = this.config.backendUrl.replace(/\/+$/, '');
+    return `${cleanBackendUrl.replace(/^http/, 'ws')}/ws`;
+  }
+
+  public isWebSocketAuthenticated(): boolean {
+    return this.isWsAuthenticated;
   }
 
   public setEnforcementActiveProvider(provider: () => boolean): void {
@@ -197,15 +207,13 @@ export class PolicySyncClient {
   }
 
   public connectWebSocket() {
-    const wsUrl = `${this.config.backendUrl.replace(/^http/, 'ws')}/ws?deviceId=${encodeURIComponent(this.config.deviceId)}&deviceToken=${encodeURIComponent(this.config.deviceToken)}`;
+    this.isWsAuthenticated = false;
+    const wsUrl = this.getWebSocketUrl();
     try {
       this.ws = new WebSocket(wsUrl);
 
       this.ws.on('open', () => {
-        console.log('[Agent] Real-time policy sync connected via authenticated WebSocket.');
-        if (this.currentPolicy) {
-          this.setPolicyStatus('POLICY_LIVE');
-        }
+        console.log('[Agent] WebSocket transport connection established (unauthenticated). Authenticating...');
         this.ws?.send(
           JSON.stringify({
             type: 'AUTH_DEVICE',
@@ -218,7 +226,20 @@ export class PolicySyncClient {
       this.ws.on('message', (data: string) => {
         try {
           const msg = JSON.parse(data.toString());
-          if (msg.type === 'POLICY_UPDATED' && msg.childId === this.config.childId) {
+          if (msg.type === 'AUTH_SUCCESS') {
+            this.isWsAuthenticated = true;
+            console.log('[Agent] Real-time policy sync connected via authenticated WebSocket.');
+            if (this.currentPolicy) {
+              this.setPolicyStatus('POLICY_LIVE');
+            }
+          } else if (msg.type === 'AUTH_ERROR') {
+            this.isWsAuthenticated = false;
+            console.warn('[Agent] Real-time policy sync authentication failed (AUTH_ERROR).');
+            if (this.currentPolicy) {
+              this.setPolicyStatus('POLICY_CACHED');
+            }
+            this.ws?.close();
+          } else if (msg.type === 'POLICY_UPDATED' && msg.childId === this.config.childId) {
             console.log(`[Agent] Received instant push for policy v${msg.payload.version}`);
             this.saveCachedPolicy(msg.payload);
           } else if (msg.type === 'ACCESS_REQUEST_RESOLVED' && msg.childId === this.config.childId) {
@@ -231,6 +252,7 @@ export class PolicySyncClient {
       });
 
       this.ws.on('close', () => {
+        this.isWsAuthenticated = false;
         if (this.currentPolicy) {
           this.setPolicyStatus('POLICY_CACHED');
         }
@@ -239,11 +261,13 @@ export class PolicySyncClient {
       });
 
       this.ws.on('error', () => {
+        this.isWsAuthenticated = false;
         if (this.currentPolicy) {
           this.setPolicyStatus('POLICY_CACHED');
         }
       });
     } catch (e) {
+      this.isWsAuthenticated = false;
       if (this.wsReconnectTimer) clearTimeout(this.wsReconnectTimer);
       this.wsReconnectTimer = setTimeout(() => this.connectWebSocket(), 5000);
     }
@@ -259,6 +283,7 @@ export class PolicySyncClient {
   }
 
   public stop() {
+    this.isWsAuthenticated = false;
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;

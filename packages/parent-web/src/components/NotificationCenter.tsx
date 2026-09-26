@@ -99,13 +99,12 @@ export const NotificationCenter: React.FC = () => {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const host = window.location.host;
       const token = api.getToken();
-      const wsUrl = `${protocol}//${host}/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+      const wsUrl = `${protocol}//${host}/ws`;
 
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        setWsConnected(true);
         if (token) {
           ws.send(JSON.stringify({ type: 'AUTH_PARENT', token }));
         }
@@ -138,6 +137,15 @@ export const NotificationCenter: React.FC = () => {
 
   const handleIncomingWsMessage = (msg: any) => {
     if (!msg || !msg.type) return;
+
+    if (msg.type === 'AUTH_SUCCESS') {
+      setWsConnected(true);
+      return;
+    }
+    if (msg.type === 'AUTH_ERROR') {
+      setWsConnected(false);
+      return;
+    }
 
     if (msg.type === 'ACCESS_REQUEST_CREATED') {
       const req = msg.payload;

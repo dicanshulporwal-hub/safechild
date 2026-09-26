@@ -84,7 +84,7 @@ function AuthenticatedApp() {
     if (!token) return;
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`;
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
     let ws: WebSocket | null = null;
 
     try {
@@ -103,7 +103,11 @@ function AuthenticatedApp() {
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
-          if (msg.type === 'ACCESS_REQUEST_CREATED') {
+          if (msg.type === 'AUTH_SUCCESS') {
+            // Real-time channel authenticated
+          } else if (msg.type === 'AUTH_ERROR') {
+            console.warn('[ParentPortal] WebSocket authentication failed');
+          } else if (msg.type === 'ACCESS_REQUEST_CREATED') {
             setStats((s) => ({ ...s, pendingRequestsCount: s.pendingRequestsCount + 1 }));
             showToast(`New Ask Parent Request for ${msg.payload?.domain}`, 'warning');
           } else if (msg.type === 'ACCESS_REQUEST_RESOLVED') {

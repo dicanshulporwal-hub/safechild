@@ -31,9 +31,11 @@ interface ClientConnection {
   deviceId?: string;
   type: 'parent' | 'device';
   authenticated: boolean;
+  authTimeoutTimer?: NodeJS.Timeout;
 }
 
 export class WebSocketManager {
+  private static readonly AUTH_TIMEOUT_MS = 5000;
   private wss: WebSocketServer | null = null;
   private connections: Set<ClientConnection> = new Set();
 
@@ -52,27 +54,47 @@ export class WebSocketManager {
         authenticated: false,
       };
 
-      // 1. Check if token provided in URL query string
+      const markAuthenticated = () => {
+        clientInfo.authenticated = true;
+        if (clientInfo.authTimeoutTimer) {
+          clearTimeout(clientInfo.authTimeoutTimer);
+          clientInfo.authTimeoutTimer = undefined;
+        }
+      };
+
+      // Set short authentication timeout to disconnect unauthenticated sockets
+      clientInfo.authTimeoutTimer = setTimeout(() => {
+        if (!clientInfo.authenticated) {
+          try {
+            ws.send(JSON.stringify({ type: 'AUTH_ERROR', message: 'Authentication timeout' }));
+            ws.close(4001, 'Authentication timeout');
+          } catch (e) {}
+        }
+      }, WebSocketManager.AUTH_TIMEOUT_MS);
+
+      // 1. Legacy query-string authentication compatibility (if credentials supplied in URL)
       if (token) {
         try {
           const decoded = await authService.verifyToken(token);
           clientInfo.parentId = decoded.userId;
-          clientInfo.authenticated = true;
           clientInfo.type = 'parent';
+          markAuthenticated();
         } catch (e) {
           // invalid token
         }
       } else if (deviceToken && deviceId) {
-        const device = await prisma.device.findUnique({
-          where: { id: deviceId },
-        });
-        if (device && device.deviceToken === deviceToken && !device.isRevoked) {
-          clientInfo.deviceId = device.id;
-          clientInfo.childId = device.childId;
-          clientInfo.parentId = device.parentId;
-          clientInfo.authenticated = true;
-          clientInfo.type = 'device';
-        }
+        try {
+          const device = await prisma.device.findUnique({
+            where: { id: deviceId },
+          });
+          if (device && device.deviceToken === deviceToken && !device.isRevoked) {
+            clientInfo.deviceId = device.id;
+            clientInfo.childId = device.childId;
+            clientInfo.parentId = device.parentId;
+            clientInfo.type = 'device';
+            markAuthenticated();
+          }
+        } catch (e) {}
       }
 
       this.connections.add(clientInfo);
@@ -84,42 +106,57 @@ export class WebSocketManager {
 
           if (msg.type === 'AUTH_PARENT' || msg.type === 'REGISTER') {
             const authToken = msg.token || msg.jwt;
-            if (authToken) {
+            if (authToken && typeof authToken === 'string') {
               try {
                 const decoded = await authService.verifyToken(authToken);
                 clientInfo.parentId = decoded.userId;
                 clientInfo.childId = msg.childId;
                 clientInfo.type = 'parent';
-                clientInfo.authenticated = true;
+                markAuthenticated();
                 ws.send(JSON.stringify({ type: 'AUTH_SUCCESS', parentId: decoded.userId }));
               } catch (e) {
-                ws.send(JSON.stringify({ type: 'AUTH_ERROR', message: 'Invalid JWT token' }));
+                ws.send(JSON.stringify({ type: 'AUTH_ERROR', message: 'Authentication failed' }));
               }
-            } else if (msg.parentId && !clientInfo.authenticated) {
-              clientInfo.childId = msg.childId;
+            } else {
+              ws.send(JSON.stringify({ type: 'AUTH_ERROR', message: 'Authentication failed' }));
             }
           } else if (msg.type === 'AUTH_DEVICE') {
             const { deviceId: dId, deviceToken: dTok } = msg;
-            const device = await prisma.device.findUnique({
-              where: { id: dId },
-            });
-            if (device && device.deviceToken === dTok && !device.isRevoked) {
-              clientInfo.deviceId = device.id;
-              clientInfo.childId = device.childId;
-              clientInfo.parentId = device.parentId;
-              clientInfo.type = 'device';
-              clientInfo.authenticated = true;
-              ws.send(JSON.stringify({ type: 'AUTH_SUCCESS', deviceId: device.id }));
-            } else {
-              ws.send(JSON.stringify({ type: 'AUTH_ERROR', message: 'Invalid device credentials' }));
+            if (!dId || !dTok || typeof dId !== 'string' || typeof dTok !== 'string') {
+              ws.send(JSON.stringify({ type: 'AUTH_ERROR', message: 'Authentication failed' }));
+              return;
+            }
+            try {
+              const device = await prisma.device.findUnique({
+                where: { id: dId },
+              });
+              if (device && device.deviceToken === dTok && !device.isRevoked) {
+                clientInfo.deviceId = device.id;
+                clientInfo.childId = device.childId;
+                clientInfo.parentId = device.parentId;
+                clientInfo.type = 'device';
+                markAuthenticated();
+                ws.send(JSON.stringify({ type: 'AUTH_SUCCESS', deviceId: device.id }));
+              } else {
+                ws.send(JSON.stringify({ type: 'AUTH_ERROR', message: 'Authentication failed' }));
+              }
+            } catch (e) {
+              ws.send(JSON.stringify({ type: 'AUTH_ERROR', message: 'Authentication failed' }));
             }
           }
         } catch (e) {}
       });
 
-      ws.on('close', () => {
+      const cleanup = () => {
+        if (clientInfo.authTimeoutTimer) {
+          clearTimeout(clientInfo.authTimeoutTimer);
+          clientInfo.authTimeoutTimer = undefined;
+        }
         this.connections.delete(clientInfo);
-      });
+      };
+
+      ws.on('close', cleanup);
+      ws.on('error', cleanup);
     });
   }
 
@@ -129,18 +166,44 @@ export class WebSocketManager {
     for (const conn of this.connections) {
       if (conn.ws.readyState !== WebSocket.OPEN) continue;
 
-      if (message.parentId && conn.parentId && conn.parentId !== message.parentId) {
-        continue;
-      }
-      if (message.childId && conn.childId && conn.childId !== message.childId) {
-        continue;
-      }
-      if (message.deviceId && conn.deviceId && conn.deviceId !== message.deviceId) {
+      // An unauthenticated connection MUST NOT receive ANY protected payload!
+      if (!conn.authenticated) {
         continue;
       }
 
-      conn.ws.send(payload);
+      if (message.parentId && conn.parentId && conn.parentId !== message.parentId) {
+        continue;
+      }
+      if (message.childId) {
+        if (conn.type === 'device' && conn.childId !== message.childId) {
+          continue;
+        }
+        if (conn.type === 'parent' && conn.childId && conn.childId !== message.childId) {
+          continue;
+        }
+      }
+      if (message.deviceId) {
+        if (conn.type === 'device' && conn.deviceId !== message.deviceId) {
+          continue;
+        }
+      }
+
+      try {
+        conn.ws.send(payload);
+      } catch (e) {}
     }
+  }
+
+  public getActiveConnectionCount(): number {
+    return this.connections.size;
+  }
+
+  public getAuthenticatedConnectionCount(): number {
+    let count = 0;
+    for (const conn of this.connections) {
+      if (conn.authenticated) count++;
+    }
+    return count;
   }
 }
 
