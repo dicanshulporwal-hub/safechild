@@ -7,7 +7,7 @@ on:
         description: Pilot Backend URL
         required: false
         type: string
-        default: http://100.88.17.16:11002
+        default: https://safebrowse.porwal.online
 
   push:
     branches:
@@ -184,7 +184,7 @@ jobs:
           $hostHash = (Get-FileHash -Path $serviceHostPath -Algorithm SHA256).Hash.ToLower()
           $msiHash = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash.ToLower()
 
-          $manifestBackend = "${{ inputs.pilotBackendUrl || github.event.inputs.pilotBackendUrl || 'http://100.88.17.16:11002' }}"
+          $manifestBackend = "${{ inputs.pilotBackendUrl || github.event.inputs.pilotBackendUrl || 'https://safebrowse.porwal.online' }}"
           $manifestLines = @(
             "# SafeBrowse Windows Pilot Build Checksum Manifest"
             "Timestamp: $((Get-Date).ToUniversalTime().ToString('o'))"

@@ -6,10 +6,8 @@ export const downloadRouter = Router();
 
 const repoRootDir = path.resolve(__dirname, '../../../..');
 
-const DEFAULT_WINDOWS_RELEASE_URL =
-  'https://github.com/dicanshulporwal-hub/safechild/releases/download/v1.0.0-pilot/SafeBrowseChild-Pilot.exe';
-const DEFAULT_ANDROID_RELEASE_URL =
-  'https://github.com/dicanshulporwal-hub/safechild/releases/download/v1.0.0-pilot/safebrowse-child-pilot.apk';
+export const DEFAULT_WINDOWS_RELEASE_URL =
+  'https://github.com/dicanshulporwal-hub/safechild/releases/download/v1.0.0-pilot/SafeBrowseChild-Pilot.msi';
 
 function findExistingFile(candidatePaths: string[]): string | null {
   for (const candidate of candidatePaths) {
@@ -25,17 +23,15 @@ function findExistingFile(candidatePaths: string[]): string | null {
   return null;
 }
 
-// GET /api/downloads/windows -> Download Windows Child Protection Agent
+// GET /api/downloads/windows -> Download Windows Child Protection MSI Installer
 downloadRouter.get('/windows', (req: Request, res: Response) => {
+  // Candidate paths prioritize the production WiX MSI installer package
   const candidatePaths = [
-    path.join(repoRootDir, 'packages/parent-web/public/downloads/SafeBrowseChild-Pilot.exe'),
-    path.join(repoRootDir, 'release/windows/SafeBrowseChild-Pilot.exe'),
+    '/opt/safebrowse/downloads/SafeBrowseChild-Pilot.msi',
+    '/opt/safebrowse/frontend/dist/downloads/SafeBrowseChild-Pilot.msi',
     path.join(repoRootDir, 'release/windows/SafeBrowseChild-Pilot.msi'),
     path.join(repoRootDir, 'packages/parent-web/public/downloads/SafeBrowseChild-Pilot.msi'),
-    '/opt/safebrowse/downloads/SafeBrowseChild-Pilot.exe',
-    '/opt/safebrowse/downloads/SafeBrowseChild-Pilot.msi',
-    '/opt/safebrowse/frontend/dist/downloads/SafeBrowseChild-Pilot.exe',
-    '/opt/safebrowse/frontend/dist/downloads/SafeBrowseChild-Pilot.msi',
+    path.join(repoRootDir, 'packages/parent-web/dist/downloads/SafeBrowseChild-Pilot.msi'),
   ];
 
   const found = findExistingFile(candidatePaths);
@@ -44,45 +40,29 @@ downloadRouter.get('/windows', (req: Request, res: Response) => {
     return res.download(found, filename);
   }
 
+  // Fall back to GitHub Release MSI asset URL or environment override
   const externalUrl = process.env.WINDOWS_DOWNLOAD_URL || DEFAULT_WINDOWS_RELEASE_URL;
   return res.redirect(externalUrl);
 });
 
-// GET /api/downloads/android -> Download Android Child Protection APK
+// GET /api/downloads/android -> Android child app is not yet available for public beta
 downloadRouter.get('/android', (req: Request, res: Response) => {
-  const candidatePaths = [
-    path.join(repoRootDir, 'packages/parent-web/public/downloads/safebrowse-child-pilot.apk'),
-    path.join(repoRootDir, 'release/android/safebrowse-child-pilot.apk'),
-    path.join(repoRootDir, 'packages/agent-android/app/build/outputs/apk/debug/app-debug.apk'),
-    '/opt/safebrowse/downloads/safebrowse-child-pilot.apk',
-    '/opt/safebrowse/frontend/dist/downloads/safebrowse-child-pilot.apk',
-  ];
-
-  const found = findExistingFile(candidatePaths);
-  if (found) {
-    res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-    return res.download(found, 'safebrowse-child-pilot.apk');
-  }
-
-  const externalUrl = process.env.ANDROID_DOWNLOAD_URL || DEFAULT_ANDROID_RELEASE_URL;
-  return res.redirect(externalUrl);
+  res.status(404).json({
+    error: 'Android child app is not yet available for public beta.',
+    status: 'unavailable',
+    message: 'The SafeBrowse child application is currently available for Windows 10/11 (64-bit). Android support is in development.',
+  });
 });
 
-// GET /api/downloads/info -> Metadata about available client downloads
+// GET /api/downloads/info -> Metadata about available client downloads (Windows only)
 downloadRouter.get('/info', (req: Request, res: Response) => {
   res.json({
     windows: {
       url: '/api/downloads/windows',
       directUrl: DEFAULT_WINDOWS_RELEASE_URL,
-      filename: 'SafeBrowseChild-Pilot.exe',
+      filename: 'SafeBrowseChild-Pilot.msi',
       platform: 'Windows 10 / 11 (64-bit)',
-      version: '1.0.0',
-    },
-    android: {
-      url: '/api/downloads/android',
-      directUrl: DEFAULT_ANDROID_RELEASE_URL,
-      filename: 'safebrowse-child-pilot.apk',
-      platform: 'Android 8.0+',
+      type: 'installer',
       version: '1.0.0',
     },
   });

@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import QRCode from 'qrcode';
 import { api } from '../api/client';
-import { Smartphone, Laptop, Copy, Check, QrCode, X, Download } from 'lucide-react';
+import { Laptop, Copy, Check, QrCode, X, Download } from 'lucide-react';
 
 interface PairDeviceModalProps {
   childId: string;
@@ -98,35 +98,26 @@ export const PairDeviceModal: React.FC<PairDeviceModalProps> = ({
             {/* Step 1: Download App */}
             <div className="p-4 rounded-2xl bg-slate-950/60 border border-slate-800">
               <div className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5 mb-2">
-                <span className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center text-[11px] font-black">
+                <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 flex items-center justify-center text-[11px] font-black">
                   1
                 </span>
-                <span>Download & Install App on Child's Device</span>
+                <span>Download & Install SafeBrowse on Child's Device</span>
               </div>
               <p className="text-[11px] text-slate-400 mb-3">
-                Download the SafeBrowse protection agent on the laptop or phone you want to protect:
+                Download and install SafeBrowse Child Protection on the child's Windows device:
               </p>
-              <div className="grid grid-cols-2 gap-2.5">
+              <div className="flex">
                 <a
                   href="/api/downloads/windows"
-                  download="SafeBrowseChild-Pilot.exe"
-                  className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-indigo-950/40 hover:bg-indigo-900/40 border border-indigo-500/30 text-indigo-300 text-xs font-bold transition group cursor-pointer"
-                  title="Download Windows Installer (EXE)"
+                  download="SafeBrowseChild-Pilot.msi"
+                  className="w-full flex items-center justify-between py-2.5 px-4 rounded-xl bg-indigo-950/40 hover:bg-indigo-900/40 border border-indigo-500/30 text-indigo-300 text-xs font-bold transition group cursor-pointer"
+                  title="Download Windows Installer (MSI)"
                 >
-                  <Laptop className="w-4 h-4 text-indigo-400 group-hover:scale-110 transition-transform" />
-                  <span>Windows (.exe)</span>
-                  <Download className="w-3 h-3 text-indigo-400 ml-auto opacity-70 group-hover:opacity-100" />
-                </a>
-
-                <a
-                  href="/api/downloads/android"
-                  download="safebrowse-child-pilot.apk"
-                  className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-emerald-950/40 hover:bg-emerald-900/40 border border-emerald-500/30 text-emerald-300 text-xs font-bold transition group cursor-pointer"
-                  title="Download Android APK"
-                >
-                  <Smartphone className="w-4 h-4 text-emerald-400 group-hover:scale-110 transition-transform" />
-                  <span>Android (.apk)</span>
-                  <Download className="w-3 h-3 text-emerald-400 ml-auto opacity-70 group-hover:opacity-100" />
+                  <div className="flex items-center gap-2">
+                    <Laptop className="w-4 h-4 text-indigo-400 group-hover:scale-110 transition-transform" />
+                    <span>Download Windows Installer (.msi)</span>
+                  </div>
+                  <Download className="w-3.5 h-3.5 text-indigo-400 opacity-70 group-hover:opacity-100" />
                 </a>
               </div>
             </div>
@@ -137,7 +128,7 @@ export const PairDeviceModal: React.FC<PairDeviceModalProps> = ({
                 <span className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center text-[11px] font-black">
                   2
                 </span>
-                <span>Enter Pairing Code on Child's Device</span>
+                <span>Enter Pairing Code on Child Device</span>
               </div>
               <div className="flex flex-col sm:flex-row items-center gap-6 bg-slate-950/80 p-5 rounded-2xl border border-slate-800/80">
                 <div className="bg-white p-2 rounded-2xl shadow-inner flex items-center justify-center shrink-0">
@@ -180,26 +171,17 @@ export const PairDeviceModal: React.FC<PairDeviceModalProps> = ({
                 <span>Instant Test Pair (Simulate Device)</span>
               </div>
               <p className="text-xs text-slate-400">
-                Select a device type below to simulate instant pairing for this session:
+                Simulate instant Windows laptop pairing for this session:
               </p>
 
-              <div className="grid grid-cols-2 gap-3 pt-1">
-                <button
-                  disabled={quickPairing}
-                  onClick={() => handleSimulateQuickPair('android')}
-                  className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-bold text-xs bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 transition-all cursor-pointer"
-                >
-                  <Smartphone className="w-4 h-4 text-emerald-400" />
-                  <span>Pair Android Phone</span>
-                </button>
-
+              <div>
                 <button
                   disabled={quickPairing}
                   onClick={() => handleSimulateQuickPair('windows')}
-                  className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-bold text-xs bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border border-indigo-500/30 transition-all cursor-pointer"
+                  className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl font-bold text-xs bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border border-indigo-500/30 transition-all cursor-pointer"
                 >
                   <Laptop className="w-4 h-4 text-indigo-400" />
-                  <span>Pair Windows Laptop</span>
+                  <span>Simulate Windows Laptop Pair</span>
                 </button>
               </div>
             </div>

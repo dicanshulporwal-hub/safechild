@@ -28,7 +28,7 @@ set DEVICE_NAME=%~2
 if "%DEVICE_NAME%"=="" set DEVICE_NAME=Rahul's Windows Laptop
 
 echo.
-echo Connecting to SafeBrowse Pilot Backend (http://100.88.17.16:11002)...
-"%~dp0SafeBrowseChild-Pilot.exe" --pair %PAIR_CODE% --name "%DEVICE_NAME%" --backend-url http://100.88.17.16:11002
+echo Connecting to SafeBrowse Pilot Backend (https://safebrowse.porwal.online)...
+"%~dp0SafeBrowseChild-Pilot.exe" --pair %PAIR_CODE% --name "%DEVICE_NAME%" --backend-url https://safebrowse.porwal.online
 echo.
 pause

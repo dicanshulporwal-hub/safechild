@@ -18,7 +18,7 @@ export interface DeviceConfig {
 }
 
 export class ConfigManager {
-  public static readonly DEFAULT_PILOT_URL = 'http://100.88.17.16:11002';
+  public static readonly DEFAULT_PILOT_URL = 'https://safebrowse.porwal.online';
   private customBaseDir: string | null = null;
   private customLegacyPath: string | null = null;
   private platformOverride: string | null = null;
