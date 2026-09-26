@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import QRCode from 'qrcode';
 import { api } from '../api/client';
-import { Laptop, Copy, Check, QrCode, X, Download } from 'lucide-react';
+import { Laptop, Copy, Check, X, Download } from 'lucide-react';
 
 interface PairDeviceModalProps {
   childId: string;
@@ -19,7 +19,6 @@ export const PairDeviceModal: React.FC<PairDeviceModalProps> = ({
   const [pairingCode, setPairingCode] = useState<string>('');
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [quickPairing, setQuickPairing] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
@@ -57,20 +56,6 @@ export const PairDeviceModal: React.FC<PairDeviceModalProps> = ({
     navigator.clipboard.writeText(pairingCode);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
-  };
-
-  const handleSimulateQuickPair = async (platform: 'android' | 'windows') => {
-    try {
-      setQuickPairing(true);
-      const name = `${childName}'s ${platform === 'android' ? 'Samsung Galaxy' : 'Dell XPS Laptop'}`;
-      await api.claimPairingCode(pairingCode, name, platform);
-      onDevicePaired();
-      onClose();
-    } catch (e: any) {
-      alert(e.message || 'Pairing error');
-    } finally {
-      setQuickPairing(false);
-    }
   };
 
   return (
@@ -161,28 +146,6 @@ export const PairDeviceModal: React.FC<PairDeviceModalProps> = ({
                     )}
                   </button>
                 </div>
-              </div>
-            </div>
-
-            {/* Quick Testing Actions */}
-            <div className="border-t border-slate-800 pt-4 space-y-3">
-              <div className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
-                <QrCode className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Instant Test Pair (Simulate Device)</span>
-              </div>
-              <p className="text-xs text-slate-400">
-                Simulate instant Windows laptop pairing for this session:
-              </p>
-
-              <div>
-                <button
-                  disabled={quickPairing}
-                  onClick={() => handleSimulateQuickPair('windows')}
-                  className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl font-bold text-xs bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border border-indigo-500/30 transition-all cursor-pointer"
-                >
-                  <Laptop className="w-4 h-4 text-indigo-400" />
-                  <span>Simulate Windows Laptop Pair</span>
-                </button>
               </div>
             </div>
           </div>
