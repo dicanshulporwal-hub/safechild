@@ -1,0 +1,126 @@
+name: Build SafeBrowse Pilot Apps
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dicanshulporwal-hub-patch-1
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: feature/stage11-step4-device-enforcement
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      # -------------------------------------------------
+      # Android
+      # -------------------------------------------------
+
+      - name: Configure Android pilot backend
+        shell: powershell
+        run: |
+          $file = "packages/agent-android/app/src/main/java/com/safebrowse/child/ui/PairingActivity.kt"
+          (Get-Content $file -Raw).Replace(
+            'http://10.0.2.2:4000',
+            'https://safebrowse.porwal.online'
+          ) | Set-Content $file
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.6'
+
+      - name: Build Android APK
+        working-directory: packages/agent-android
+        run: gradle assembleDebug
+      - name: Prepare Android artifact
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force pilot-output\android
+          Copy-Item `
+            packages\agent-android\app\build\outputs\apk\debug\app-debug.apk `
+            pilot-output\android\SafeBrowse-Android-Pilot.apk
+
+      # -------------------------------------------------
+      # Windows
+      # -------------------------------------------------
+
+      - name: Build shared packages
+        run: |
+          npm run build:shared
+          npm run build:protocol
+          npm run build:windows
+
+      - name: Bundle Windows Agent
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force pilot-output\windows
+
+          npx esbuild packages/agent-windows/src/agent-cli.ts `
+            --bundle `
+            --platform=node `
+            --target=node20 `
+            --outfile=pilot-output/windows/bundle.js
+
+          @{
+            main="pilot-output/windows/bundle.js"
+            output="pilot-output/windows/sea-prep.blob"
+          } | ConvertTo-Json | Set-Content pilot-output/windows/sea-config.json
+
+          node --experimental-sea-config pilot-output/windows/sea-config.json
+
+          Copy-Item (Get-Command node).Source `
+            pilot-output/windows/SafeBrowseChild-Pilot.exe
+
+          npx --yes postject `
+            pilot-output/windows/SafeBrowseChild-Pilot.exe `
+            NODE_SEA_BLOB `
+            pilot-output/windows/sea-prep.blob `
+            --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
+
+      - name: Create Windows launcher
+        shell: powershell
+        run: |
+          @'
+          @echo off
+          set SAFEBROWSE_URL=https://safebrowse.porwal.online
+          SafeBrowseChild-Pilot.exe %*
+          pause
+          '@ | Set-Content pilot-output/windows/Start-SafeBrowse.cmd
+
+      - name: Remove temporary Windows files
+        shell: powershell
+        run: |
+          Remove-Item pilot-output/windows/bundle.js -ErrorAction SilentlyContinue
+          Remove-Item pilot-output/windows/sea-config.json -ErrorAction SilentlyContinue
+          Remove-Item pilot-output/windows/sea-prep.blob -ErrorAction SilentlyContinue
+
+      - name: Upload Android Pilot
+        uses: actions/upload-artifact@v4
+        with:
+          name: SafeBrowse-Android-Pilot
+          path: pilot-output/android/
+
+      - name: Upload Windows Pilot
+        uses: actions/upload-artifact@v4
+        with:
+          name: SafeBrowse-Windows-Pilot
+          path: pilot-output/windows/
