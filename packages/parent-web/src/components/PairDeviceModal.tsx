@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import QRCode from 'qrcode';
 import { api } from '../api/client';
-import { Smartphone, Laptop, Copy, Check, QrCode, X } from 'lucide-react';
+import { Smartphone, Laptop, Copy, Check, QrCode, X, Download } from 'lucide-react';
 
 interface PairDeviceModalProps {
   childId: string;
@@ -94,38 +94,82 @@ export const PairDeviceModal: React.FC<PairDeviceModalProps> = ({
             Generating secure pairing token...
           </div>
         ) : (
-          <div className="space-y-6">
-            {/* QR Code & PIN Code Display */}
-            <div className="flex flex-col sm:flex-row items-center gap-6 bg-slate-950/80 p-5 rounded-2xl border border-slate-800/80">
-              <div className="bg-white p-2 rounded-2xl shadow-inner flex items-center justify-center shrink-0">
-                <canvas ref={canvasRef} className="w-36 h-36 rounded-lg" />
+          <div className="space-y-5">
+            {/* Step 1: Download App */}
+            <div className="p-4 rounded-2xl bg-slate-950/60 border border-slate-800">
+              <div className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5 mb-2">
+                <span className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center text-[11px] font-black">
+                  1
+                </span>
+                <span>Download & Install App on Child's Device</span>
               </div>
-
-              <div className="flex-1 text-center sm:text-left">
-                <div className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400">
-                  Or enter 6-digit code
-                </div>
-                <div className="text-3xl font-black text-white tracking-wider my-1 font-mono text-emerald-400">
-                  {pairingCode}
-                </div>
-                <p className="text-[11px] text-slate-400 mb-3">Code expires in 10 minutes</p>
-
-                <button
-                  onClick={copyToClipboard}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold text-slate-200 shadow-sm transition-all cursor-pointer"
+              <p className="text-[11px] text-slate-400 mb-3">
+                Download the SafeBrowse protection agent on the laptop or phone you want to protect:
+              </p>
+              <div className="grid grid-cols-2 gap-2.5">
+                <a
+                  href="/api/downloads/windows"
+                  download="SafeBrowseChild-Pilot.exe"
+                  className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-indigo-950/40 hover:bg-indigo-900/40 border border-indigo-500/30 text-indigo-300 text-xs font-bold transition group cursor-pointer"
+                  title="Download Windows Installer (EXE)"
                 >
-                  {copied ? (
-                    <>
-                      <Check className="w-3.5 h-3.5 text-emerald-400" />
-                      <span className="text-emerald-300">Copied!</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-3.5 h-3.5" />
-                      <span>Copy Code</span>
-                    </>
-                  )}
-                </button>
+                  <Laptop className="w-4 h-4 text-indigo-400 group-hover:scale-110 transition-transform" />
+                  <span>Windows (.exe)</span>
+                  <Download className="w-3 h-3 text-indigo-400 ml-auto opacity-70 group-hover:opacity-100" />
+                </a>
+
+                <a
+                  href="/api/downloads/android"
+                  download="safebrowse-child-pilot.apk"
+                  className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-emerald-950/40 hover:bg-emerald-900/40 border border-emerald-500/30 text-emerald-300 text-xs font-bold transition group cursor-pointer"
+                  title="Download Android APK"
+                >
+                  <Smartphone className="w-4 h-4 text-emerald-400 group-hover:scale-110 transition-transform" />
+                  <span>Android (.apk)</span>
+                  <Download className="w-3 h-3 text-emerald-400 ml-auto opacity-70 group-hover:opacity-100" />
+                </a>
+              </div>
+            </div>
+
+            {/* Step 2: QR Code & PIN Code Display */}
+            <div>
+              <div className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5 mb-2">
+                <span className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center text-[11px] font-black">
+                  2
+                </span>
+                <span>Enter Pairing Code on Child's Device</span>
+              </div>
+              <div className="flex flex-col sm:flex-row items-center gap-6 bg-slate-950/80 p-5 rounded-2xl border border-slate-800/80">
+                <div className="bg-white p-2 rounded-2xl shadow-inner flex items-center justify-center shrink-0">
+                  <canvas ref={canvasRef} className="w-36 h-36 rounded-lg" />
+                </div>
+
+                <div className="flex-1 text-center sm:text-left">
+                  <div className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400">
+                    Or enter 6-digit code
+                  </div>
+                  <div className="text-3xl font-black text-white tracking-wider my-1 font-mono text-emerald-400">
+                    {pairingCode}
+                  </div>
+                  <p className="text-[11px] text-slate-400 mb-3">Code expires in 10 minutes</p>
+
+                  <button
+                    onClick={copyToClipboard}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold text-slate-200 shadow-sm transition-all cursor-pointer"
+                  >
+                    {copied ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="text-emerald-300">Copied!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copy Code</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
             </div>
 

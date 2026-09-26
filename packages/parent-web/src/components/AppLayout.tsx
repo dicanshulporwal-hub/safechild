@@ -14,6 +14,9 @@ import {
   Radio,
   Clock,
   Settings,
+  Download,
+  Laptop,
+  Smartphone,
 } from 'lucide-react';
 import { NotificationCenter } from './NotificationCenter';
 import { useToast } from './Toast';
@@ -273,6 +276,39 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
               )}
             </NavLink>
           ))}
+
+          {/* Quick Child App Downloads */}
+          <div className="pt-4 mt-4 border-t border-slate-800/80 px-1">
+            <div className="p-3 rounded-2xl bg-slate-900/60 border border-slate-800 space-y-2">
+              <div className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                <Download className="w-3 h-3 text-emerald-400" />
+                <span>Child Protection Apps</span>
+              </div>
+              <p className="text-[10px] text-slate-400 leading-tight">
+                Install on child's devices to enforce protection.
+              </p>
+              <div className="grid grid-cols-2 gap-1.5 pt-1">
+                <a
+                  href="/api/downloads/windows"
+                  download="SafeBrowseChild-Pilot.exe"
+                  className="flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg bg-indigo-950/40 hover:bg-indigo-900/40 border border-indigo-500/30 text-indigo-300 text-[10px] font-bold transition cursor-pointer"
+                  title="Download SafeBrowse Windows Agent"
+                >
+                  <Laptop className="w-3 h-3 text-indigo-400" />
+                  <span>Windows</span>
+                </a>
+                <a
+                  href="/api/downloads/android"
+                  download="safebrowse-child-pilot.apk"
+                  className="flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg bg-emerald-950/40 hover:bg-emerald-900/40 border border-emerald-500/30 text-emerald-300 text-[10px] font-bold transition cursor-pointer"
+                  title="Download SafeBrowse Android APK"
+                >
+                  <Smartphone className="w-3 h-3 text-emerald-400" />
+                  <span>Android</span>
+                </a>
+              </div>
+            </div>
+          </div>
         </aside>
 
         {/* Routed Content Area */}

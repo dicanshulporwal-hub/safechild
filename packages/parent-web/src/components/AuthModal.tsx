@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { api } from '../api/client';
-import { ShieldCheck, LogIn, UserPlus, Lock, Mail, User, KeyRound, ArrowLeft, CheckCircle2, Shield, Sparkles, ArrowRight } from 'lucide-react';
+import { ShieldCheck, LogIn, UserPlus, Lock, Mail, User, KeyRound, ArrowLeft, CheckCircle2, Shield, Sparkles, ArrowRight, Download, Laptop, Smartphone } from 'lucide-react';
 
 interface AuthModalProps {
   onSuccess: () => void;
@@ -419,6 +419,59 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess }) => {
               )}
             </div>
           )}
+
+          {/* Download Child Protection Apps */}
+          <div className="mt-6 pt-5 border-t border-slate-800/80">
+            <div className="text-center mb-3">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center justify-center gap-1.5">
+                <Download className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Download Child Protection Apps</span>
+              </span>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Install on child's device, then connect with your parent account
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              {/* Windows App Download */}
+              <a
+                href="/api/downloads/windows"
+                download="SafeBrowseChild-Pilot.exe"
+                className="flex flex-col items-center justify-center p-3 rounded-2xl bg-gradient-to-b from-indigo-950/40 to-slate-900 border border-indigo-500/30 hover:border-indigo-400 hover:shadow-lg hover:shadow-indigo-500/10 transition-all group cursor-pointer text-center"
+                title="Download SafeBrowse Child Protection Agent for Windows 10/11"
+              >
+                <div className="w-8 h-8 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 mb-1.5 group-hover:scale-110 transition-transform">
+                  <Laptop className="w-4 h-4" />
+                </div>
+                <span className="text-xs font-bold text-white group-hover:text-indigo-300 transition">
+                  Windows App
+                </span>
+                <span className="text-[10px] text-slate-400 mt-0.5">Windows 10 / 11</span>
+                <span className="mt-2 text-[10px] font-bold text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded-full border border-indigo-500/20 group-hover:bg-indigo-500 group-hover:text-slate-950 transition flex items-center gap-1">
+                  <Download className="w-2.5 h-2.5" /> .EXE (64-bit)
+                </span>
+              </a>
+
+              {/* Android App Download */}
+              <a
+                href="/api/downloads/android"
+                download="safebrowse-child-pilot.apk"
+                className="flex flex-col items-center justify-center p-3 rounded-2xl bg-gradient-to-b from-emerald-950/40 to-slate-900 border border-emerald-500/30 hover:border-emerald-400 hover:shadow-lg hover:shadow-emerald-500/10 transition-all group cursor-pointer text-center"
+                title="Download SafeBrowse Child Protection App for Android"
+              >
+                <div className="w-8 h-8 rounded-xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 mb-1.5 group-hover:scale-110 transition-transform">
+                  <Smartphone className="w-4 h-4" />
+                </div>
+                <span className="text-xs font-bold text-white group-hover:text-emerald-300 transition">
+                  Android App
+                </span>
+                <span className="text-[10px] text-slate-400 mt-0.5">Android 8.0+</span>
+                <span className="mt-2 text-[10px] font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20 group-hover:bg-emerald-500 group-hover:text-slate-950 transition flex items-center gap-1">
+                  <Download className="w-2.5 h-2.5" /> .APK (Direct)
+                </span>
+              </a>
+            </div>
+          </div>
         </div>
 
         {/* Footnote */}

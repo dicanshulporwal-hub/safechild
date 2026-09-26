@@ -16,6 +16,7 @@ import { feedbackRouter } from './routes/feedback.routes';
 import { supportRouter } from './routes/support.routes';
 import { usageRouter } from './routes/usage.routes';
 import { notificationRouter } from './routes/notification.routes';
+import { downloadRouter } from './routes/download.routes';
 import { authMiddleware } from './middleware/auth';
 import { requireVerifiedEmail } from './middleware/requireVerifiedEmail';
 import { corsMiddleware } from './middleware/cors';
@@ -33,6 +34,7 @@ app.use(express.json());
 // Auth & Account Management (Unverified users can manage auth, verification, and sessions)
 app.use('/api/auth', authRouter);
 app.use('/api/me', profileRouter);
+app.use('/api/downloads', downloadRouter);
 
 // Product Operations & Device Endpoints (Routers route parent ops through requireVerifiedEmail and device ops through deviceAuthMiddleware)
 app.use('/api/children', authMiddleware, requireVerifiedEmail, childRouter);
