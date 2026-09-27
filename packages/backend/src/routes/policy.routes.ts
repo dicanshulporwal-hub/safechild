@@ -56,7 +56,8 @@ policyRouter.get(
   deviceAuthMiddleware,
   async (req: AuthenticatedDeviceRequest, res: Response) => {
     try {
-      const result = await policyService.getPolicyForDevice(req.deviceId!);
+      const childId = req.query.childId as string | undefined;
+      const result = await policyService.getPolicyForDevice(req.deviceId!, childId);
       res.json(result);
     } catch (e: any) {
       res.status(404).json({ error: e.message });

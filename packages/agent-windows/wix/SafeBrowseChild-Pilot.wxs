@@ -83,6 +83,34 @@
       </Directory>
     </StandardDirectory>
 
+    <!-- Start Menu & Desktop Shortcuts for SafeBrowse Family Protection GUI -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="SafeBrowse">
+        <Component Id="ApplicationShortcut" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+          <Shortcut Id="StartMenuShortcut"
+                    Name="SafeBrowse Family Protection"
+                    Description="SafeBrowse Parental Control &amp; Shared Laptop Setup"
+                    Target="[INSTALLFOLDER]SafeBrowseChild-Pilot.exe"
+                    Arguments="gui"
+                    WorkingDirectory="INSTALLFOLDER" />
+          <RemoveFolder Id="CleanUpShortCut" Directory="ApplicationProgramsFolder" On="uninstall"/>
+          <RegistryValue Root="HKCU" Key="Software\SafeBrowse\SafeBrowseFamilyProtection" Name="installed" Type="integer" Value="1" KeyPath="yes"/>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcutComponent" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
+        <Shortcut Id="DesktopShortcut"
+                  Name="SafeBrowse Family Protection"
+                  Description="SafeBrowse Parental Control &amp; Shared Laptop Setup"
+                  Target="[INSTALLFOLDER]SafeBrowseChild-Pilot.exe"
+                  Arguments="gui"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\SafeBrowse\DesktopShortcut" Name="installed" Type="integer" Value="1" KeyPath="yes"/>
+      </Component>
+    </StandardDirectory>
+
     <!-- 3. Fail-Safe Uninstall Custom Action: Restores original DNS before stopping service and removing files -->
     <CustomAction
         Id="RestoreDnsOnUninstall"
@@ -110,6 +138,8 @@
     <Feature Id="MainFeature" Title="SafeBrowse Child Agent" Level="1">
       <ComponentRef Id="MainExecutable" />
       <ComponentRef Id="ServiceHostExecutable" />
+      <ComponentRef Id="ApplicationShortcut" />
+      <ComponentRef Id="DesktopShortcutComponent" />
       <ComponentRef Id="PairingScript" />
       <ComponentRef Id="RestoreScript" />
       <ComponentRef Id="DnsScripts" />

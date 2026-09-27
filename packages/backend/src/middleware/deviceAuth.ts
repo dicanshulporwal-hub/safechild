@@ -73,17 +73,22 @@ export async function deviceAuthMiddleware(
       return res.status(401).json({ error: 'Device authentication failed: Invalid device token.' });
     }
 
-    // If request specifies a childId in body or query, enforce strict child/device tenancy association
+    // If request specifies a childId in body or query, enforce family tenancy association
     const targetChildId = (req.body && req.body.childId) || (req.query && req.query.childId);
     if (targetChildId && targetChildId !== device.childId) {
-      return res.status(403).json({
-        error: 'Forbidden: Device is not associated with the requested child profile.',
+      const targetChild = await prisma.child.findUnique({
+        where: { id: targetChildId as string },
       });
+      if (!targetChild || (targetChild.familyId !== device.familyId && targetChild.parentId !== device.parentId)) {
+        return res.status(403).json({
+          error: 'Forbidden: Device is not associated with the requested child profile.',
+        });
+      }
     }
 
     req.device = device as any;
     req.deviceId = device.id;
-    req.childId = device.childId;
+    req.childId = (targetChildId as string) || device.childId;
 
     next();
   } catch (err: any) {

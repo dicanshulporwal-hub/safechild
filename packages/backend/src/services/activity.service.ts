@@ -28,12 +28,14 @@ export class ActivityService {
     const id = `act-${nanoid(8)}`;
     const now = new Date();
 
+    const canLinkDevice = device && device.childId === childId;
+
     const created = await prisma.activityEvent.create({
       data: {
         id,
         familyId: child.familyId,
         childId,
-        deviceId,
+        deviceId: canLinkDevice ? deviceId : null,
         domain,
         action,
         category: 'GENERAL',

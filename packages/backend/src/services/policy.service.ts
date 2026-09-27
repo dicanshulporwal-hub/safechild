@@ -101,7 +101,7 @@ export class PolicyService {
     };
   }
 
-  public async getPolicyForDevice(deviceId: string): Promise<{ policy: Policy; child: any }> {
+  public async getPolicyForDevice(deviceId: string, targetChildId?: string): Promise<{ policy: Policy; child: any }> {
     const device = await prisma.device.findUnique({
       where: { id: deviceId },
     });
@@ -109,9 +109,19 @@ export class PolicyService {
       throw new Error('Device not found.');
     }
 
-    const policy = await this.getPolicyForChild(device.childId);
+    let activeChildId = device.childId;
+    if (targetChildId) {
+      const targetChild = await prisma.child.findUnique({
+        where: { id: targetChildId },
+      });
+      if (targetChild && (targetChild.familyId === device.familyId || targetChild.parentId === device.parentId)) {
+        activeChildId = targetChildId;
+      }
+    }
+
+    const policy = await this.getPolicyForChild(activeChildId);
     const child = await prisma.child.findUnique({
-      where: { id: device.childId },
+      where: { id: activeChildId },
     });
 
     return { policy, child };

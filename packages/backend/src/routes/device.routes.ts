@@ -95,6 +95,28 @@ deviceRouter.post('/heartbeat', deviceAuthMiddleware, async (req: AuthenticatedD
   }
 });
 
+// Get available child profiles for a paired device's family (Device auth required)
+deviceRouter.get('/family-profiles', deviceAuthMiddleware, async (req: AuthenticatedDeviceRequest, res: Response) => {
+  try {
+    const profiles = await deviceService.getFamilyProfilesForDevice(req.deviceId!);
+    res.json(profiles);
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+deviceRouter.get('/:id/profiles', deviceAuthMiddleware, async (req: AuthenticatedDeviceRequest, res: Response) => {
+  try {
+    if (req.params.id !== req.deviceId) {
+      return res.status(403).json({ error: 'Forbidden: Device ID mismatch.' });
+    }
+    const profiles = await deviceService.getFamilyProfilesForDevice(req.deviceId!);
+    res.json(profiles);
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 // Revoke lost/compromised device credentials
 deviceRouter.post('/:id/revoke', authMiddleware, requireVerifiedEmail, async (req: AuthenticatedRequest, res: Response) => {
   try {

@@ -210,6 +210,7 @@ namespace SafeBrowse
             CanStop = true;
             CanShutdown = true;
             CanPauseAndContinue = false;
+            CanHandleSessionChangeEvent = true;
             AutoLog = true;
 
             string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
@@ -467,6 +468,147 @@ namespace SafeBrowse
             Log("[WARN] Boot pre-flight finished retries without confirming clean state. Continuing safely toward child startup.");
             return false;
         }
+
+        #region Windows Console Session & Fast User Switching Interop
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WTSGetActiveConsoleSessionId();
+
+        [DllImport("wtsapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool WTSQueryUserToken(uint sessionId, out IntPtr phToken);
+
+        private enum TOKEN_INFORMATION_CLASS
+        {
+            TokenUser = 1
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SID_AND_ATTRIBUTES
+        {
+            public IntPtr Sid;
+            public uint Attributes;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TOKEN_USER
+        {
+            public SID_AND_ATTRIBUTES User;
+        }
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetTokenInformation(
+            IntPtr TokenHandle,
+            TOKEN_INFORMATION_CLASS TokenInformationClass,
+            IntPtr TokenInformation,
+            uint TokenInformationLength,
+            out uint ReturnLength);
+
+        [DllImport("dnsapi.dll", EntryPoint = "DnsFlushResolverCache")]
+        private static extern int DnsFlushResolverCache();
+
+        protected override void OnSessionChange(SessionChangeDescription changeDescription)
+        {
+            try
+            {
+                Log(string.Format("[SESSION] Windows session change detected: {0} (Session ID {1})", changeDescription.Reason, changeDescription.SessionId));
+                base.OnSessionChange(changeDescription);
+                UpdateActiveConsoleSession(changeDescription.Reason.ToString(), changeDescription.SessionId);
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("[WARN] Exception during OnSessionChange handling: {0}", ex.Message));
+            }
+        }
+
+        public void UpdateActiveConsoleSession(string reason, int sessionId)
+        {
+            try
+            {
+                uint activeConsoleSession = WTSGetActiveConsoleSessionId();
+                uint targetSession = (uint)(sessionId > 0 ? sessionId : (int)activeConsoleSession);
+
+                string sidStr = null;
+                string username = null;
+
+                IntPtr hToken = IntPtr.Zero;
+                if (targetSession != 0xFFFFFFFF && WTSQueryUserToken(targetSession, out hToken))
+                {
+                    try
+                    {
+                        uint tokenInfoLength = 0;
+                        GetTokenInformation(hToken, TOKEN_INFORMATION_CLASS.TokenUser, IntPtr.Zero, 0, out tokenInfoLength);
+                        if (tokenInfoLength > 0)
+                        {
+                            IntPtr pTokenUser = Marshal.AllocHGlobal((int)tokenInfoLength);
+                            try
+                            {
+                                if (GetTokenInformation(hToken, TOKEN_INFORMATION_CLASS.TokenUser, pTokenUser, tokenInfoLength, out tokenInfoLength))
+                                {
+                                    TOKEN_USER tokenUser = (TOKEN_USER)Marshal.PtrToStructure(pTokenUser, typeof(TOKEN_USER));
+                                    try
+                                    {
+                                        System.Security.Principal.SecurityIdentifier sidObj = new System.Security.Principal.SecurityIdentifier(tokenUser.User.Sid);
+                                        sidStr = sidObj.Value;
+                                        try
+                                        {
+                                            System.Security.Principal.NTAccount account = (System.Security.Principal.NTAccount)sidObj.Translate(typeof(System.Security.Principal.NTAccount));
+                                            username = account.Value;
+                                            if (username.Contains("\\"))
+                                            {
+                                                username = username.Substring(username.LastIndexOf('\\') + 1);
+                                            }
+                                        }
+                                        catch { }
+                                    }
+                                    catch { }
+                                }
+                            }
+                            finally
+                            {
+                                Marshal.FreeHGlobal(pTokenUser);
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        if (hToken != IntPtr.Zero) CloseHandle(hToken);
+                    }
+                }
+
+                // Flush local Windows DNS resolver cache instantly on user transition
+                try
+                {
+                    DnsFlushResolverCache();
+                    Log("[OK] Flushed local Windows DNS resolver cache on user switch.");
+                }
+                catch { }
+
+                string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+                string sessionFilePath = Path.Combine(programData, "SafeBrowse", "active-session.json");
+
+                string jsonContent = string.Format(
+                    "{{\n  \"sessionId\": {0},\n  \"activeConsoleSession\": {1},\n  \"windowsSid\": {2},\n  \"windowsUsername\": {3},\n  \"reason\": \"{4}\",\n  \"timestamp\": \"{5}\"\n}}",
+                    sessionId,
+                    activeConsoleSession,
+                    sidStr != null ? "\"" + sidStr + "\"" : "null",
+                    username != null ? "\"" + username + "\"" : "null",
+                    reason,
+                    DateTime.UtcNow.ToString("o")
+                );
+
+                File.WriteAllText(sessionFilePath, jsonContent);
+                Log(string.Format("[SESSION] Active console user recorded: User '{0}' (SID: {1}, Session {2}, Reason {3})",
+                    username ?? "Unknown", sidStr ?? "N/A", sessionId, reason));
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("[WARN] Exception updating active console session state: {0}", ex.Message));
+            }
+        }
+
+        #endregion
 
         protected override void OnStop()
         {

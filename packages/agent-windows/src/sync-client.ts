@@ -28,17 +28,121 @@ export class PolicySyncClient {
   private enforcementActiveProvider?: () => boolean;
   private onPolicyStatusChangeCallback?: (newStatus: PolicyStatus, previousStatus: PolicyStatus) => void;
 
+  private childPolicies: Map<string, Policy> = new Map();
+  private activeChildId: string | null = null;
+  private cacheDir: string;
+
   constructor(config: DeviceConfig, cacheDir?: string, enforcementActiveProvider?: () => boolean) {
     this.config = config;
     this.enforcementActiveProvider = enforcementActiveProvider;
-    const dir = cacheDir || configManager.getCacheDir();
-    if (!fs.existsSync(dir)) {
+    this.cacheDir = cacheDir || configManager.getCacheDir();
+    if (!fs.existsSync(this.cacheDir)) {
       try {
-        fs.mkdirSync(dir, { recursive: true });
+        fs.mkdirSync(this.cacheDir, { recursive: true });
       } catch (e) {}
     }
-    this.cacheFilePath = path.join(dir, `policy-${config.deviceId}.json`);
+    this.cacheFilePath = path.join(this.cacheDir, `policy-${config.deviceId}.json`);
+    this.activeChildId = config.childId;
     this.loadCachedPolicy();
+  }
+
+  public getCacheFilePathForChild(childId: string): string {
+    return path.join(this.cacheDir, `policy-${this.config.deviceId}-${childId}.json`);
+  }
+
+  public setActiveChild(childId: string | null): Policy | null {
+    this.activeChildId = childId;
+    if (!childId) {
+      this.currentPolicy = null;
+      return null;
+    }
+
+    if (this.childPolicies.has(childId)) {
+      this.currentPolicy = this.childPolicies.get(childId)!;
+      if (this.isWsAuthenticated) {
+        this.setPolicyStatus('POLICY_LIVE');
+      } else {
+        this.setPolicyStatus('POLICY_CACHED');
+      }
+      return this.currentPolicy;
+    }
+
+    // Try loading child-specific cache from disk
+    const childCachePath = this.getCacheFilePathForChild(childId);
+    if (fs.existsSync(childCachePath)) {
+      try {
+        const raw = fs.readFileSync(childCachePath, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.version === 'number') {
+          this.childPolicies.set(childId, parsed);
+          this.currentPolicy = parsed;
+          this.setPolicyStatus('POLICY_CACHED');
+          return this.currentPolicy;
+        }
+      } catch {}
+    }
+
+    // If matches default childId, fallback to main policy cache
+    if (childId === this.config.childId && this.currentPolicy) {
+      this.childPolicies.set(childId, this.currentPolicy);
+      return this.currentPolicy;
+    }
+
+    // Trigger asynchronous fetch for this child's policy
+    this.fetchPolicyForChild(childId).catch(() => {});
+    return this.currentPolicy;
+  }
+
+  public getActiveChildId(): string | null {
+    return this.activeChildId;
+  }
+
+  public getCachedPolicyForChild(childId: string): Policy | null {
+    return this.childPolicies.get(childId) || null;
+  }
+
+  public async fetchPolicyForChild(childId: string, timeoutMs: number = 5000): Promise<Policy | null> {
+    if (!this.config?.deviceId || !this.config?.deviceToken) return null;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const url = `${this.config.backendUrl}/api/policies/device/${encodeURIComponent(this.config.deviceId)}?childId=${encodeURIComponent(childId)}`;
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'x-device-id': this.config.deviceId,
+          'x-device-token': this.config.deviceToken,
+        },
+        signal: controller.signal,
+      }).finally(() => clearTimeout(timeoutId));
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: any = await res.json();
+      const policy: Policy = data?.policy || data;
+
+      if (policy && typeof policy === 'object' && typeof policy.version === 'number') {
+        this.childPolicies.set(childId, policy);
+        const childCachePath = this.getCacheFilePathForChild(childId);
+        try {
+          fs.writeFileSync(childCachePath, JSON.stringify(policy, null, 2), 'utf8');
+        } catch {}
+
+        if (this.activeChildId === childId) {
+          this.currentPolicy = policy;
+          if (this.isWsAuthenticated) {
+            this.setPolicyStatus('POLICY_LIVE');
+          } else {
+            this.setPolicyStatus('POLICY_CACHED');
+          }
+        }
+        return policy;
+      }
+    } catch (e: any) {
+      console.warn(`[Agent] Failed to fetch policy for child ${childId}: ${e.message}`);
+    }
+    return this.childPolicies.get(childId) || null;
   }
 
   public getWebSocketUrl(): string {
@@ -85,6 +189,9 @@ export class PolicySyncClient {
         const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === 'object' && typeof parsed.version === 'number') {
           this.currentPolicy = parsed;
+          if (this.config.childId) {
+            this.childPolicies.set(this.config.childId, parsed);
+          }
           this.setPolicyStatus('POLICY_CACHED');
           console.log(`[Agent] Loaded cached local policy v${this.currentPolicy?.version} (${this.policyStatus})`);
           return;
@@ -98,6 +205,12 @@ export class PolicySyncClient {
 
   private saveCachedPolicy(policy: Policy) {
     this.currentPolicy = policy;
+    if (policy.childId) {
+      this.childPolicies.set(policy.childId, policy);
+      try {
+        fs.writeFileSync(this.getCacheFilePathForChild(policy.childId), JSON.stringify(policy, null, 2), 'utf-8');
+      } catch {}
+    }
     this.setPolicyStatus('POLICY_LIVE');
     try {
       fs.writeFileSync(this.cacheFilePath, JSON.stringify(policy, null, 2), 'utf-8');
@@ -239,13 +352,31 @@ export class PolicySyncClient {
               this.setPolicyStatus('POLICY_CACHED');
             }
             this.ws?.close();
-          } else if (msg.type === 'POLICY_UPDATED' && msg.childId === this.config.childId) {
-            console.log(`[Agent] Received instant push for policy v${msg.payload.version}`);
-            this.saveCachedPolicy(msg.payload);
-          } else if (msg.type === 'ACCESS_REQUEST_RESOLVED' && msg.childId === this.config.childId) {
+          } else if (msg.type === 'POLICY_UPDATED') {
+            const targetChild = msg.childId || (msg.payload && msg.payload.childId) || this.config.childId;
+            console.log(`[Agent] Received instant push for policy v${msg.payload.version} (child: ${targetChild})`);
+            if (targetChild) {
+              this.childPolicies.set(targetChild, msg.payload);
+              try {
+                fs.writeFileSync(this.getCacheFilePathForChild(targetChild), JSON.stringify(msg.payload, null, 2), 'utf-8');
+              } catch {}
+            }
+            if (!this.activeChildId || this.activeChildId === targetChild || targetChild === this.config.childId) {
+              this.saveCachedPolicy(msg.payload);
+            }
+          } else if (msg.type === 'ACCESS_REQUEST_RESOLVED') {
+            const targetChild = msg.childId || this.config.childId;
             if (msg.payload.policy) {
-              console.log(`[Agent] Access request approved! Applied policy v${msg.payload.policy.version}`);
-              this.saveCachedPolicy(msg.payload.policy);
+              console.log(`[Agent] Access request approved! Applied policy v${msg.payload.policy.version} (child: ${targetChild})`);
+              if (targetChild) {
+                this.childPolicies.set(targetChild, msg.payload.policy);
+                try {
+                  fs.writeFileSync(this.getCacheFilePathForChild(targetChild), JSON.stringify(msg.payload.policy, null, 2), 'utf-8');
+                } catch {}
+              }
+              if (!this.activeChildId || this.activeChildId === targetChild || targetChild === this.config.childId) {
+                this.saveCachedPolicy(msg.payload.policy);
+              }
             }
           }
         } catch (e) {}

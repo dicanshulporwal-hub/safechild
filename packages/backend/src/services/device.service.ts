@@ -141,6 +141,21 @@ export class DeviceService {
         childId: deviceRecord.childId,
       });
 
+      const familyProfiles = await tx.child.findMany({
+        where: {
+          OR: [
+            { familyId: deviceRecord.familyId },
+            { parentId: deviceRecord.parentId },
+          ],
+        },
+        select: {
+          id: true,
+          name: true,
+          age: true,
+        },
+        orderBy: { name: 'asc' },
+      });
+
       return {
         device: extendedDevice,
         policy: policy
@@ -150,6 +165,7 @@ export class DeviceService {
               updatedAt: policy.updatedAt.toISOString(),
             }
           : null,
+        familyProfiles,
       };
     });
   }
@@ -393,6 +409,28 @@ export class DeviceService {
         agentVersion: dev.agentVersion,
       };
     });
+  }
+
+  public async getFamilyProfilesForDevice(deviceId: string): Promise<Array<{ id: string; name: string; age: number | null }>> {
+    const device = await prisma.device.findUnique({ where: { id: deviceId } });
+    if (!device) throw new Error('Device not found.');
+
+    const children = await prisma.child.findMany({
+      where: {
+        OR: [
+          { familyId: device.familyId },
+          { parentId: device.parentId },
+        ],
+      },
+      select: {
+        id: true,
+        name: true,
+        age: true,
+      },
+      orderBy: { name: 'asc' },
+    });
+
+    return children;
   }
 
   public async removeDevice(deviceId: string, actorUserId: string): Promise<void> {

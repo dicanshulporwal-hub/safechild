@@ -4,6 +4,10 @@ import { DnsFilterProxy } from './dns-proxy';
 import { WindowsProcessLimiter } from './process-limiter';
 import { configManager, DeviceConfig, ConfigManager } from './config-manager';
 import { networkManager, logServiceMessage, CurrentEnforcementInspection } from './network-manager';
+import { accountManager } from './account-manager';
+import { sessionMonitor } from './session-monitor';
+import { activityReporter } from './activity-reporter';
+import { guiServer } from './gui-server';
 import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
@@ -282,6 +286,8 @@ async function runServiceMode(): Promise<void> {
     }
 
     try {
+      sessionMonitor.stop();
+      activityReporter.stop();
       if (processLimiter) processLimiter.stop();
       if (dnsProxy) dnsProxy.stop();
       if (blockServer) blockServer.stop();
@@ -369,6 +375,49 @@ async function runServiceMode(): Promise<void> {
   }
 
   currentEngineStatus = 'DNS_PROXY_HEALTHY';
+
+  // 3b. Wire Activity Telemetry Outbox
+  activityReporter.setConfig(config);
+  activityReporter.start();
+  dnsProxy.setOnQueryEvaluated((event) => {
+    const activePolicy = sessionMonitor.getCurrentPolicy();
+    if (activePolicy && activePolicy.isManaged && activePolicy.childId) {
+      activityReporter.recordEvent({
+        domain: event.domain,
+        action: event.action,
+        childId: activePolicy.childId,
+        reason: event.reason,
+      });
+    }
+  });
+
+  // 3c. Initialize Shared Laptop Session Monitor
+  sessionMonitor.onSessionChange((userPolicy) => {
+    if (userPolicy.isManaged && userPolicy.childId) {
+      logServiceMessage(
+        'INFO',
+        `[SafeBrowse Service] Active user '${userPolicy.accountName}' mapped to child '${userPolicy.childName}' (${userPolicy.childId}). Applying child filtering policy.`
+      );
+      syncClient?.setActiveChild(userPolicy.childId);
+      dnsProxy?.setBypassMode(false);
+      blockServer?.setActiveChildProvider(() => ({
+        childId: userPolicy.childId,
+        childName: userPolicy.childName,
+      }));
+    } else {
+      logServiceMessage(
+        'INFO',
+        `[SafeBrowse Service] Active user '${userPolicy.accountName}' is Parent / Unmanaged. Transparent bypass enabled (child filtering rules bypassed).`
+      );
+      syncClient?.setActiveChild(null);
+      dnsProxy?.setBypassMode(true);
+      blockServer?.setActiveChildProvider(() => ({
+        childId: null,
+        childName: 'Parent',
+      }));
+    }
+  });
+  sessionMonitor.start();
 
   // 4. Fail-Safe Network DNS Activation (Initial Attempt)
   currentEngineStatus = 'ENFORCING';
@@ -742,12 +791,40 @@ async function main() {
   const args = process.argv.slice(2);
 
   if (args.includes('--help') || args.includes('-h')) {
-    console.log('SafeBrowse Windows Pilot Agent');
+    console.log('SafeBrowse Family Protection Windows Agent');
     console.log('Usage:');
+    console.log('  SafeBrowseChild-Pilot.exe gui                          # Launch SafeBrowse Family Protection GUI');
     console.log('  SafeBrowseChild-Pilot.exe --pair <CODE> [--name <NAME>] [--backend-url <URL>]');
-    console.log('  SafeBrowseChild-Pilot.exe service');
-    console.log('  SafeBrowseChild-Pilot.exe --status');
-    console.log('  SafeBrowseChild-Pilot.exe --emergency-restore');
+    console.log('  SafeBrowseChild-Pilot.exe --accounts                   # Discover Windows accounts & mappings');
+    console.log('  SafeBrowseChild-Pilot.exe service                      # Run Windows background service');
+    console.log('  SafeBrowseChild-Pilot.exe --status                     # Inspect system & protection status');
+    console.log('  SafeBrowseChild-Pilot.exe --emergency-restore          # Restore network DNS & firewall');
+    process.exit(0);
+  }
+
+  if (args.includes('gui') || args.includes('--gui')) {
+    console.log('[SafeBrowse] Starting SafeBrowse Family Protection GUI...');
+    const port = await guiServer.start(8885);
+    await guiServer.launchWindow();
+    console.log(`[SafeBrowse] GUI application running at http://127.0.0.1:${port}. Press Ctrl+C to exit.`);
+    return;
+  }
+
+  if (args.includes('--accounts') || args.includes('--shared-laptop')) {
+    console.log('==================================================');
+    console.log('[SafeBrowse] Windows Account Discovery & Mappings');
+    console.log('==================================================');
+    const accounts = await accountManager.discoverAccounts();
+    console.log('\nDiscovered Windows Accounts:');
+    console.table(accounts);
+
+    const mappings = await accountManager.loadProfileMappings();
+    console.log('\nCurrent Profile Mappings:');
+    if (mappings.length === 0) {
+      console.log('  (No mappings configured. Launch GUI to configure: SafeBrowseChild-Pilot.exe gui)');
+    } else {
+      console.table(mappings);
+    }
     process.exit(0);
   }
 
@@ -773,7 +850,16 @@ async function main() {
     return;
   }
 
-  // If invoked with "service" or executed by default
+  if (args.length === 0 && (process.stdout.isTTY || process.platform === 'win32')) {
+    // Normal parent launched the executable directly (e.g. double click)
+    console.log('[SafeBrowse] Opening SafeBrowse Family Protection GUI...');
+    const port = await guiServer.start(8885);
+    await guiServer.launchWindow();
+    console.log(`[SafeBrowse] GUI application running at http://127.0.0.1:${port}. Press Ctrl+C to exit.`);
+    return;
+  }
+
+  // If invoked with "service" or executed in non-interactive background
   await runServiceMode();
 }
 

@@ -12,6 +12,12 @@ export class DnsFilterProxy {
   private getPolicy: () => Policy | null;
   private upstreamServers: UpstreamDnsServer[] = [{ host: '1.1.1.1', port: 53 }];
   private listeningPort: number = 53;
+  private bypassMode: boolean = false;
+  private onQueryEvaluated?: (event: {
+    domain: string;
+    action: 'BLOCKED' | 'ALLOWED';
+    reason?: string;
+  }) => void;
 
   constructor(
     getPolicy: () => Policy | null,
@@ -20,6 +26,28 @@ export class DnsFilterProxy {
   ) {
     this.getPolicy = getPolicy;
     this.setUpstreams([upstreamDnsHost], upstreamDnsPort);
+  }
+
+  public setBypassMode(bypass: boolean): void {
+    if (this.bypassMode !== bypass) {
+      logServiceMessage(
+        'INFO',
+        `[DnsProxy] Protection mode changed: ${
+          bypass ? 'TRANSPARENT_BYPASS (Unmanaged / Parent Account)' : 'FILTERING (Child Account)'
+        }`
+      );
+      this.bypassMode = bypass;
+    }
+  }
+
+  public getBypassMode(): boolean {
+    return this.bypassMode;
+  }
+
+  public setOnQueryEvaluated(
+    listener?: (event: { domain: string; action: 'BLOCKED' | 'ALLOWED'; reason?: string }) => void
+  ): void {
+    this.onQueryEvaluated = listener;
   }
 
   /**
@@ -271,15 +299,25 @@ export class DnsFilterProxy {
 
         const policy = this.getPolicy();
 
-        if (query && policy) {
+        if (this.bypassMode) {
+          // Transparent bypass mode for Parent / Unmanaged accounts:
+          // Directly forwards query to upstream DNS without evaluating child policy.
+        } else if (query && policy) {
           const { domain, qtype } = query;
           const result = evaluatePolicy(policy, domain);
 
           if (result.action === 'BLOCK') {
             console.log(`[Windows DNS Filter] [BLOCK] BLOCKED: ${domain} (Reason: ${result.reason}) -> Returning NXDOMAIN`);
+            if (this.onQueryEvaluated) {
+              this.onQueryEvaluated({ domain, action: 'BLOCKED', reason: result.reason });
+            }
             const blockResp = this.buildNxDomainResponse(msg);
             this.socket?.send(blockResp, rinfo.port, rinfo.address);
             return;
+          }
+
+          if (this.onQueryEvaluated) {
+            this.onQueryEvaluated({ domain, action: 'ALLOWED' });
           }
 
           // Check for SafeSearch / YouTube Restricted DNS Rewriting

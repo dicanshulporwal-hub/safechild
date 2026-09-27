@@ -22,12 +22,14 @@ export interface SocketMessage {
   childId?: string;
   parentId?: string;
   deviceId?: string;
+  familyId?: string;
 }
 
 interface ClientConnection {
   ws: WebSocket;
   parentId?: string;
   childId?: string;
+  familyId?: string;
   deviceId?: string;
   type: 'parent' | 'device';
   authenticated: boolean;
@@ -91,6 +93,7 @@ export class WebSocketManager {
             clientInfo.deviceId = device.id;
             clientInfo.childId = device.childId;
             clientInfo.parentId = device.parentId;
+            clientInfo.familyId = device.familyId;
             clientInfo.type = 'device';
             markAuthenticated();
           }
@@ -110,6 +113,7 @@ export class WebSocketManager {
               try {
                 const decoded = await authService.verifyToken(authToken);
                 clientInfo.parentId = decoded.userId;
+                clientInfo.familyId = (decoded as any).familyId;
                 clientInfo.childId = msg.childId;
                 clientInfo.type = 'parent';
                 markAuthenticated();
@@ -134,6 +138,7 @@ export class WebSocketManager {
                 clientInfo.deviceId = device.id;
                 clientInfo.childId = device.childId;
                 clientInfo.parentId = device.parentId;
+                clientInfo.familyId = device.familyId;
                 clientInfo.type = 'device';
                 markAuthenticated();
                 ws.send(JSON.stringify({ type: 'AUTH_SUCCESS', deviceId: device.id }));
@@ -162,6 +167,8 @@ export class WebSocketManager {
 
   public broadcast(message: SocketMessage) {
     const payload = JSON.stringify(message);
+    const msgFamilyId = message.familyId || (message.payload && message.payload.familyId);
+    const msgParentId = message.parentId;
 
     for (const conn of this.connections) {
       if (conn.ws.readyState !== WebSocket.OPEN) continue;
@@ -171,12 +178,24 @@ export class WebSocketManager {
         continue;
       }
 
-      if (message.parentId && conn.parentId && conn.parentId !== message.parentId) {
+      if (msgParentId && conn.parentId && conn.parentId !== msgParentId) {
         continue;
       }
+      if (msgFamilyId && conn.familyId && conn.familyId !== msgFamilyId) {
+        continue;
+      }
+
       if (message.childId) {
-        if (conn.type === 'device' && conn.childId !== message.childId) {
-          continue;
+        if (conn.type === 'device') {
+          const isSameFamily = Boolean(
+            (msgFamilyId && conn.familyId && msgFamilyId === conn.familyId) ||
+            (msgParentId && conn.parentId && msgParentId === conn.parentId)
+          );
+          if (isSameFamily) {
+            // Shared laptop device in same family receives child policy updates
+          } else if (conn.childId && conn.childId !== message.childId) {
+            continue;
+          }
         }
         if (conn.type === 'parent' && conn.childId && conn.childId !== message.childId) {
           continue;
