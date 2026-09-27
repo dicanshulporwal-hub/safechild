@@ -1,17 +1,77 @@
 import http from 'http';
 import url from 'url';
+import { spawn, exec } from 'child_process';
 
 export interface ActiveChildContext {
   childId: string | null;
   childName: string | null;
 }
 
+export function escapeHtml(str: string): string {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+export function formatFriendlyReason(rawReason: string): string {
+  if (!rawReason) {
+    return 'This site has been restricted by your family protection settings.';
+  }
+
+  const upper = rawReason.trim().toUpperCase();
+
+  if (upper.includes('BEDTIME') || upper.includes('CURFEW')) {
+    return 'Bedtime rule active. Internet access is paused until morning.';
+  }
+  if (upper === 'ADULT_CONTENT' || upper.includes('ADULT')) {
+    return 'This website has content that is not suitable for children.';
+  }
+  if (upper === 'GAMBLING') {
+    return 'Gambling websites are blocked to keep you safe.';
+  }
+  if (upper === 'MALWARE_SECURITY' || upper.includes('MALWARE') || upper.includes('SECURITY')) {
+    return 'This website was blocked because it may harm your computer.';
+  }
+  if (upper === 'GAMES' || upper.includes('GAMING') || upper.includes('GAME')) {
+    return 'Gaming time is currently restricted by your family protection settings.';
+  }
+  if (upper === 'SOCIAL_MEDIA' || upper.includes('SOCIAL')) {
+    return 'Social media websites are restricted by your family protection settings.';
+  }
+  if (upper === 'STUDY_MODE') {
+    return 'Study Mode is active. Only educational websites are permitted right now.';
+  }
+  if (upper === 'PAUSED' || upper.includes('PAUSE')) {
+    return 'Internet access is temporarily paused by your parent.';
+  }
+  if (upper.includes('PARENT') || upper.includes('BLACKLIST') || upper.includes('BLOCK') || upper === 'CUSTOM_RULE') {
+    return 'Blocked by your parent in family rules.';
+  }
+
+  // If already a human sentence, sanitize and return
+  if (!upper.includes('_') && rawReason.length > 5) {
+    return rawReason;
+  }
+
+  return 'This site has been restricted by your family protection settings.';
+}
+
 export class BlockPageServer {
   private server: http.Server | null = null;
+  private redirectServer: http.Server | null = null;
   private backendUrl: string;
   private defaultChildId: string;
   private deviceId: string;
   private activeChildProvider?: () => ActiveChildContext;
+  private port: number = 8880;
+
+  private lastTriggeredTimes: Map<string, number> = new Map();
+  public lastTriggeredExperience: { domain: string; reason: string; timestamp: number } | null = null;
+  private onBlockExperienceCallback?: (domain: string, reason: string) => void;
 
   constructor(
     backendUrl: string,
@@ -29,7 +89,49 @@ export class BlockPageServer {
     this.activeChildProvider = provider;
   }
 
+  public setOnBlockExperience(cb: (domain: string, reason: string) => void): void {
+    this.onBlockExperienceCallback = cb;
+  }
+
+  /**
+   * Triggers the child-visible SafeBrowse block experience outside of TLS/HTTPS interception.
+   * Debounces duplicate queries for the same domain within 3 seconds.
+   */
+  public triggerBlockExperience(domain: string, reason: string): void {
+    const now = Date.now();
+    const last = this.lastTriggeredTimes.get(domain) || 0;
+    if (now - last < 3000) {
+      return;
+    }
+    this.lastTriggeredTimes.set(domain, now);
+    this.lastTriggeredExperience = { domain, reason, timestamp: now };
+
+    if (this.onBlockExperienceCallback) {
+      this.onBlockExperienceCallback(domain, reason);
+    }
+
+    const safeDomain = encodeURIComponent(domain);
+    const safeReason = encodeURIComponent(reason);
+    const blockUrl = `http://127.0.0.1:${this.port}/blocked?domain=${safeDomain}&reason=${safeReason}`;
+
+    if (process.platform === 'win32') {
+      try {
+        const edgePath = 'msedge.exe';
+        const child = spawn(edgePath, [`--app=${blockUrl}`], {
+          detached: true,
+          stdio: 'ignore',
+        });
+        child.unref();
+      } catch (e) {
+        try {
+          exec(`start "" "${blockUrl}"`);
+        } catch {}
+      }
+    }
+  }
+
   public start(port: number = 8880): Promise<void> {
+    this.port = port;
     return new Promise((resolve) => {
       this.server = http.createServer((req, res) => {
         const parsed = url.parse(req.url || '', true);
@@ -74,24 +176,15 @@ export class BlockPageServer {
           return;
         }
 
-        // Render Block Landing Page
-        const blockedDomain = (parsed.query.domain as string) || 'This website';
+        // Render Block Landing Page (/ or /blocked)
+        const rawDomain = (parsed.query.domain as string) || 'This website';
         const rawReason = (parsed.query.reason as string) || '';
         const active = this.activeChildProvider ? this.activeChildProvider() : null;
         const profileDisplay = active?.childName || 'Child';
 
-        let friendlyReason = 'This website is not allowed for your profile.';
-        if (rawReason.toLowerCase().includes('bedtime') || rawReason.toLowerCase().includes('curfew')) {
-          friendlyReason = 'Bedtime rule active. Internet access is paused until morning.';
-        } else if (rawReason.toLowerCase().includes('gaming')) {
-          friendlyReason = 'Restricted Category: Gaming & Entertainment.';
-        } else if (rawReason.toLowerCase().includes('social')) {
-          friendlyReason = 'Restricted Category: Social Media.';
-        } else if (rawReason.toLowerCase().includes('parent') || rawReason.toLowerCase().includes('blacklist') || rawReason.toLowerCase().includes('block')) {
-          friendlyReason = 'Blocked by your parent in family rules.';
-        } else if (rawReason) {
-          friendlyReason = `Restricted by family rules: ${rawReason}`;
-        }
+        const safeDomain = escapeHtml(rawDomain);
+        const friendlyReason = escapeHtml(formatFriendlyReason(rawReason));
+        const safeProfile = escapeHtml(profileDisplay);
 
         const html = `<!DOCTYPE html>
 <html lang="en">
@@ -136,17 +229,13 @@ export class BlockPageServer {
       border-radius: 20px;
       color: #f87171;
     }
-    .badge {
-      display: inline-block;
-      font-size: 11px;
+    .brand-title {
+      font-size: 13px;
       font-weight: 800;
       text-transform: uppercase;
-      letter-spacing: 1.5px;
+      letter-spacing: 2px;
       color: #fca5a5;
-      background: rgba(239, 68, 68, 0.2);
-      padding: 6px 16px;
-      border-radius: 20px;
-      margin-bottom: 16px;
+      margin-bottom: 8px;
     }
     .profile-pill {
       display: inline-block;
@@ -168,17 +257,26 @@ export class BlockPageServer {
     .domain-target {
       color: #f87171;
       font-family: monospace;
+      font-size: 16px;
+      font-weight: 700;
       word-break: break-all;
+    }
+    .subtitle-msg {
+      font-size: 14px;
+      color: #94a3b8;
+      margin: 8px 0 20px 0;
+      line-height: 1.4;
     }
     .reason-box {
       background: rgba(30, 41, 59, 0.7);
       border: 1px solid #334155;
       border-radius: 16px;
       padding: 16px;
-      margin: 20px 0 28px;
+      margin: 0 0 28px;
       font-size: 14px;
       line-height: 1.5;
       color: #cbd5e1;
+      text-align: left;
     }
     .reason-title {
       font-size: 11px;
@@ -225,6 +323,13 @@ export class BlockPageServer {
       background: linear-gradient(135deg, #1d4ed8, #1e40af);
       transform: translateY(-1px);
     }
+    .footer-brand {
+      margin-top: 24px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #64748b;
+      letter-spacing: 0.5px;
+    }
     .form-group {
       display: none;
       margin-top: 20px;
@@ -266,16 +371,15 @@ export class BlockPageServer {
       </svg>
     </div>
 
-    <div class="badge">SafeBrowse Family Protection</div>
-    <div><span class="profile-pill">Profile: ${profileDisplay}</span></div>
+    <div class="brand-title">SafeBrowse</div>
+    <div><span class="profile-pill">Profile: ${safeProfile}</span></div>
 
-    <h1>Access Restricted</h1>
-    <div style="font-size: 15px; color: #94a3b8; margin-bottom: 16px;">
-      <span class="domain-target">${blockedDomain}</span>
-    </div>
+    <h1>This site is blocked</h1>
+    <div class="domain-target">${safeDomain}</div>
+    <div class="subtitle-msg">This site has been restricted by your family protection settings.</div>
 
     <div class="reason-box">
-      <div class="reason-title">Why is this blocked?</div>
+      <div class="reason-title">Reason:</div>
       <div>${friendlyReason}</div>
     </div>
 
@@ -295,16 +399,20 @@ export class BlockPageServer {
       <input type="text" id="reasonInput" placeholder="e.g. Need this for homework or study">
       <div style="display: flex; gap: 8px;">
         <button class="btn btn-secondary" style="flex: 1;" onclick="cancelAskForm()">Cancel</button>
-        <button class="btn btn-primary" style="flex: 2;" onclick="submitRequest('${blockedDomain}')">Send Request</button>
+        <button class="btn btn-primary" style="flex: 2;" onclick="submitRequest()">Send Request</button>
       </div>
     </div>
 
     <div id="successMsg" class="success-msg">
       ✓ Request sent to your parent! They will receive a notification.
     </div>
+
+    <div class="footer-brand">Protected by SafeBrowse</div>
   </div>
 
   <script>
+    const TARGET_DOMAIN = ${JSON.stringify(rawDomain)};
+
     function goBack() {
       if (window.history.length > 1) {
         window.history.back();
@@ -324,13 +432,13 @@ export class BlockPageServer {
       document.getElementById('mainActions').style.display = 'flex';
     }
 
-    async function submitRequest(domain) {
+    async function submitRequest() {
       const reason = document.getElementById('reasonInput').value.trim();
       try {
         const res = await fetch('/submit-request', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ domain: domain, reason: reason })
+          body: JSON.stringify({ domain: TARGET_DOMAIN, reason: reason })
         });
         const respData = await res.json().catch(function() { return {}; });
         if (res.ok) {
@@ -355,10 +463,31 @@ export class BlockPageServer {
         console.log(`[Agent] Local Block Landing Server running on http://127.0.0.1:${port}`);
         resolve();
       });
+
+      // Optional Port 80 HTTP Redirector for plain unencrypted HTTP requests
+      try {
+        this.redirectServer = http.createServer((req, res) => {
+          const hostHeader = req.headers.host || '';
+          const hostOnly = hostHeader.split(':')[0];
+          res.writeHead(302, {
+            Location: `http://127.0.0.1:${port}/blocked?domain=${encodeURIComponent(hostOnly)}&reason=Blocked%20by%20family%20rules`,
+          });
+          res.end();
+        });
+        this.redirectServer.on('error', () => {
+          // Port 80 busy or requires elevated privileges; graceful fallback
+        });
+        this.redirectServer.listen(80, '127.0.0.1');
+      } catch (e) {}
     });
   }
 
-  public stop() {
-    this.server?.close();
+  public stop(): void {
+    try {
+      this.server?.close();
+    } catch {}
+    try {
+      this.redirectServer?.close();
+    } catch {}
   }
 }

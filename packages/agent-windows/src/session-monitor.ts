@@ -31,6 +31,22 @@ export class WindowsSessionMonitor {
     this.customDnsFlushFn = flushFn;
   }
 
+  public setFlushDnsHandlerForTesting(flushFn: (() => Promise<void> | void) | null): void {
+    if (flushFn) {
+      this.customDnsFlushFn = async () => { await flushFn(); };
+    } else {
+      this.customDnsFlushFn = null;
+    }
+  }
+
+  public setMockConsoleUser(username: string, sid: string): void {
+    this.accountMgr.setMockConsoleSidForTesting(sid);
+  }
+
+  public async pollActiveSession(): Promise<ResolvedUserPolicy> {
+    return this.checkSessionNow();
+  }
+
   public onSessionChange(callback: SessionChangeCallback): void {
     this.callbacks.push(callback);
   }
@@ -107,10 +123,10 @@ export class WindowsSessionMonitor {
             `[SessionMonitor] Unmanaged / Parent Account Active: ${resolved.accountName}. SafeBrowse child restrictions BYPASSED (transparent mode).`
           );
         }
-
-        // Flush DNS resolver cache on user switch
-        await this.flushDnsCache();
       }
+
+      // Flush DNS resolver cache on user registration and transition
+      await this.flushDnsCache();
 
       for (const cb of this.callbacks) {
         try {

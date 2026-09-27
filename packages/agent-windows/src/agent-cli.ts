@@ -379,6 +379,9 @@ async function runServiceMode(): Promise<void> {
   // 3b. Wire Activity Telemetry Outbox
   activityReporter.setConfig(config);
   activityReporter.start();
+  dnsProxy.setOnBlockExperienceTriggered((domain, reason) => {
+    blockServer?.triggerBlockExperience(domain, reason);
+  });
   dnsProxy.setOnQueryEvaluated((event) => {
     const activePolicy = sessionMonitor.getCurrentPolicy();
     if (activePolicy && activePolicy.isManaged && activePolicy.childId) {

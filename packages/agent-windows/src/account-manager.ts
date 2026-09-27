@@ -391,6 +391,85 @@ export class WindowsAccountManager {
       sid: resolvedSid,
     };
   }
+
+  private mockProcessSids: Map<number, { sid: string; username: string }> = new Map();
+
+  public setMockProcessSidsForTesting(pids: Map<number, { sid: string; username: string }>): void {
+    this.mockProcessSids = pids;
+  }
+
+  /**
+   * Identifies the exact Windows user SID that owns a specific process PID.
+   * On Windows, queries process token via Win32 / PowerShell.
+   *
+   * ARCHITECTURAL LIMITATION NOTE:
+   * While process tokens unambiguously attribute application processes (e.g. chrome.exe, roblox.exe)
+   * to their respective Windows user SIDs, standard Windows DNS queries sent to loopback 127.0.0.1:53
+   * originate from svchost.exe (Dnscache / Network Service) across all user sessions.
+   * Therefore, machine-wide loopback DNS alone cannot attribute individual DNS packets
+   * during simultaneous concurrent sessions without a Windows Filtering Platform (WFP)
+   * ALE Kernel Callout Driver.
+   */
+  public async resolveProcessSid(pid: number): Promise<{ sid: string | null; username: string | null }> {
+    if (this.mockProcessSids.has(pid)) {
+      return this.mockProcessSids.get(pid)!;
+    }
+
+    if (process.platform === 'win32') {
+      try {
+        const psPath = configManager.getPowerShellPath();
+        const psCmd = [
+          "$ErrorActionPreference = 'SilentlyContinue'",
+          `$p = Get-Process -Id ${pid} -IncludeUserName -ErrorAction SilentlyContinue`,
+          'if ($p -and $p.UserName) {',
+          '  $nt = New-Object System.Security.Principal.NTAccount($p.UserName)',
+          '  $sid = $nt.Translate([System.Security.Principal.SecurityIdentifier]).Value',
+          '  @{ UserName = $p.UserName; SID = $sid } | ConvertTo-Json -Compress',
+          '}',
+        ].join('; ');
+
+        const { stdout } = await execFileAsync(psPath, [
+          '-NoLogo',
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-Command',
+          psCmd,
+        ]);
+
+        const trimmed = (stdout || '').trim();
+        if (trimmed) {
+          const parsed = JSON.parse(trimmed);
+          return {
+            sid: parsed.SID || null,
+            username: parsed.UserName || null,
+          };
+        }
+      } catch {}
+    }
+
+    return { sid: null, username: null };
+  }
+
+  /**
+   * Resolves the effective SafeBrowse policy for a specific process PID by inspecting its token SID.
+   */
+  public async evaluateProcessPolicy(pid: number): Promise<ResolvedUserPolicy> {
+    const processUser = await this.resolveProcessSid(pid);
+    if (!processUser.sid) {
+      // Default to unmanaged if process SID cannot be determined
+      return {
+        isManaged: false,
+        childId: null,
+        childName: null,
+        accountName: processUser.username || `PID-${pid}`,
+        sid: '',
+      };
+    }
+
+    return this.resolveUserPolicy(processUser.sid, processUser.username);
+  }
 }
 
 export const accountManager = new WindowsAccountManager();

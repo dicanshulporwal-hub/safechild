@@ -50,6 +50,14 @@ export class DnsFilterProxy {
     this.onQueryEvaluated = listener;
   }
 
+  private onBlockExperienceTriggered?: (domain: string, reason: string) => void;
+
+  public setOnBlockExperienceTriggered(
+    listener?: (domain: string, reason: string) => void
+  ): void {
+    this.onBlockExperienceTriggered = listener;
+  }
+
   /**
    * Updates upstream DNS servers dynamically, strictly filtering out loopback addresses
    * (127.0.0.1, ::1, localhost) to avoid recursive forwarding loops.
@@ -307,9 +315,12 @@ export class DnsFilterProxy {
           const result = evaluatePolicy(policy, domain);
 
           if (result.action === 'BLOCK') {
-            console.log(`[Windows DNS Filter] [BLOCK] BLOCKED: ${domain} (Reason: ${result.reason}) -> Returning NXDOMAIN`);
+            console.log(`[Windows DNS Filter] [BLOCK] BLOCKED: ${domain} (Reason: ${result.reason}) -> Triggering Block Experience & Returning NXDOMAIN`);
             if (this.onQueryEvaluated) {
               this.onQueryEvaluated({ domain, action: 'BLOCKED', reason: result.reason });
+            }
+            if (this.onBlockExperienceTriggered) {
+              this.onBlockExperienceTriggered(domain, result.reason || 'Blocked by family rules');
             }
             const blockResp = this.buildNxDomainResponse(msg);
             this.socket?.send(blockResp, rinfo.port, rinfo.address);
