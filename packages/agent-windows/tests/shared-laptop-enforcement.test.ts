@@ -4,6 +4,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as dgram from 'dgram';
+
+process.env.NODE_ENV = 'test';
 import { WindowsAccountManager, WindowsProfileMapping } from '../src/account-manager';
 import { WindowsSessionMonitor } from '../src/session-monitor';
 import { DnsFilterProxy } from '../src/dns-proxy';

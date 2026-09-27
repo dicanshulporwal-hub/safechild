@@ -1,5 +1,6 @@
 import http from 'http';
 import url from 'url';
+import fs from 'fs';
 import { spawn, exec } from 'child_process';
 
 export interface ActiveChildContext {
@@ -114,14 +115,41 @@ export class BlockPageServer {
     const safeReason = encodeURIComponent(reason);
     const blockUrl = `http://127.0.0.1:${this.port}/blocked?domain=${safeDomain}&reason=${safeReason}`;
 
-    if (process.platform === 'win32') {
+    if (process.platform === 'win32' && process.env.NODE_ENV !== 'test') {
       try {
-        const edgePath = 'msedge.exe';
-        const child = spawn(edgePath, [`--app=${blockUrl}`], {
-          detached: true,
-          stdio: 'ignore',
-        });
-        child.unref();
+        const progFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+        const progFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
+        const edgeCandidates = [
+          `${progFilesX86}\\Microsoft\\Edge\\Application\\msedge.exe`,
+          `${progFiles}\\Microsoft\\Edge\\Application\\msedge.exe`,
+        ];
+        let foundEdge: string | null = null;
+        for (const candidate of edgeCandidates) {
+          if (fs.existsSync(candidate)) {
+            foundEdge = candidate;
+            break;
+          }
+        }
+
+        if (foundEdge) {
+          const child = spawn(foundEdge, [`--app=${blockUrl}`], {
+            detached: true,
+            stdio: 'ignore',
+          });
+          child.on('error', () => {
+            try {
+              exec(`start "" "${blockUrl}"`);
+            } catch {}
+          });
+          child.unref();
+        } else {
+          const child = spawn('cmd.exe', ['/c', 'start', '', blockUrl], {
+            detached: true,
+            stdio: 'ignore',
+          });
+          child.on('error', () => {});
+          child.unref();
+        }
       } catch (e) {
         try {
           exec(`start "" "${blockUrl}"`);
