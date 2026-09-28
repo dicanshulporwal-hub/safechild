@@ -22,6 +22,17 @@ data class SafeSearchConfig(
     val youtubeRestrictedMode: String? = "OFF" // "OFF", "MODERATE", "STRICT"
 )
 
+data class UsageBudget(
+    val id: String = "",
+    val childId: String = "",
+    val targetType: String = "", // "DOMAIN", "CATEGORY", "APP"
+    val target: String = "",
+    val dailyLimitSeconds: Long = 0,
+    val bonusSeconds: Long? = 0,
+    val unlimitedToday: Boolean? = false,
+    val enabled: Boolean = true
+)
+
 data class Policy(
     val id: String,
     val childId: String,
@@ -29,7 +40,8 @@ data class Policy(
     val isPaused: Boolean,
     val pauseExpiresAt: String? = null,
     val rules: List<PolicyRule> = emptyList(),
-    val safeSearch: SafeSearchConfig? = null
+    val safeSearch: SafeSearchConfig? = null,
+    val usageBudgets: List<UsageBudget>? = emptyList()
 )
 
 data class PolicyDecision(

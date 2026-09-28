@@ -1,11 +1,19 @@
 package com.safebrowse.child.vpn
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.VpnService
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import androidx.core.app.NotificationCompat
+import com.safebrowse.child.R
 import com.safebrowse.child.policy.LocalPolicyManager
 import com.safebrowse.child.ui.BlockScreenActivity
+import com.safebrowse.child.ui.PairingActivity
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.DatagramPacket
@@ -29,6 +37,12 @@ class SafeBrowseVpnService : VpnService() {
         const val TAG = "SafeBrowseVPN"
         const val UPSTREAM_DNS_HOST = "1.1.1.1"
         const val UPSTREAM_DNS_PORT = 53
+        const val NOTIFICATION_CHANNEL_ID = "safebrowse_protection_channel"
+        const val NOTIFICATION_ID = 1001
+
+        @Volatile
+        var isServiceRunning = false
+            private set
     }
 
     override fun onCreate() {
@@ -37,11 +51,52 @@ class SafeBrowseVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startForegroundNotification()
         if (!isRunning) {
             isRunning = true
+            isServiceRunning = true
             startVpnTunnel()
         }
         return START_STICKY
+    }
+
+    private fun startForegroundNotification() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                NOTIFICATION_CHANNEL_ID,
+                "SafeBrowse Protection",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Shows active SafeBrowse protection status"
+                setShowBadge(false)
+            }
+            val manager = getSystemService(NotificationManager::class.java)
+            manager?.createNotificationChannel(channel)
+        }
+
+        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+            ?: Intent(this, PairingActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            launchIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setContentTitle(getString(R.string.vpn_notification_title))
+            .setContentText(getString(R.string.vpn_notification_text))
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun startVpnTunnel() {
@@ -53,7 +108,13 @@ class SafeBrowseVpnService : VpnService() {
                 .addRoute("10.240.0.2", 32)
                 .setMtu(1500)
 
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Handover across Wi-Fi and mobile data networks seamlessly
+                builder.setUnderlyingNetworks(null)
+            }
+
             vpnInterface = builder.establish()
+            isServiceRunning = true
             Log.i(TAG, "SafeBrowse TUN virtual network established.")
 
             thread(name = "SafeBrowseVpnLoop") {
@@ -102,8 +163,6 @@ class SafeBrowseVpnService : VpnService() {
 
         // 2. Inspect UDP DNS Queries (Port 53)
         if (protocol == 17) {
-            val srcPort = ((packet[headerLength].toInt() and 0xFF) shl 8) or
-                    (packet[headerLength + 1].toInt() and 0xFF)
             val destPort = ((packet[headerLength + 2].toInt() and 0xFF) shl 8) or
                     (packet[headerLength + 3].toInt() and 0xFF)
 
@@ -401,6 +460,7 @@ class SafeBrowseVpnService : VpnService() {
     override fun onDestroy() {
         super.onDestroy()
         isRunning = false
+        isServiceRunning = false
         vpnInterface?.close()
         vpnInterface = null
         Log.i(TAG, "SafeBrowse VPN Service stopped.")

@@ -12,6 +12,7 @@ import androidx.work.WorkRequest
 import androidx.work.WorkerParameters
 import com.safebrowse.child.policy.LocalPolicyManager
 import com.safebrowse.child.policy.Policy
+import com.safebrowse.child.vpn.SafeBrowseVpnService
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -40,7 +41,7 @@ class SyncWorker(appContext: Context, workerParams: WorkerParameters) :
             put("deviceId", deviceId)
             put("deviceToken", deviceToken)
             put("activePolicyVersion", activeVersion)
-            put("enforcementActive", true)
+            put("enforcementActive", SafeBrowseVpnService.isServiceRunning)
             put("platform", "android")
             put("agentVersion", "1.0.0")
         }
@@ -49,28 +50,68 @@ class SyncWorker(appContext: Context, workerParams: WorkerParameters) :
             val body = heartbeatJson.toString().toRequestBody("application/json".toMediaType())
             val request = Request.Builder()
                 .url("$backendUrl/api/devices/heartbeat")
+                .header("x-device-id", deviceId)
+                .header("x-device-token", deviceToken)
                 .post(body)
                 .build()
 
             val response = httpClient.newCall(request).execute()
             if (response.isSuccessful) {
                 val resObj = JSONObject(response.body?.string() ?: "{}")
+                val nowStr = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+                prefs.edit().putString("last_sync", nowStr).apply()
+
                 if (resObj.optBoolean("policyChanged", false)) {
-                    // Fetch updated policy
+                    // Fetch updated policy with device credentials
                     val policyReq = Request.Builder()
                         .url("$backendUrl/api/policies/device/$deviceId")
+                        .header("x-device-id", deviceId)
+                        .header("x-device-token", deviceToken)
                         .get()
                         .build()
                     val policyRes = httpClient.newCall(policyReq).execute()
                     if (policyRes.isSuccessful) {
                         val pData = JSONObject(policyRes.body?.string() ?: "{}")
-                        val updatedPolicy = Gson().fromJson(
-                            pData.getJSONObject("policy").toString(),
-                            Policy::class.java
-                        )
-                        policyManager.savePolicy(updatedPolicy)
+                        val policyObj = pData.optJSONObject("policy")
+                        if (policyObj != null) {
+                            val updatedPolicy = Gson().fromJson(
+                                policyObj.toString(),
+                                Policy::class.java
+                            )
+                            policyManager.savePolicy(updatedPolicy)
+                        }
+                        val childObj = pData.optJSONObject("child")
+                        if (childObj != null && childObj.has("name")) {
+                            prefs.edit().putString("child_name", childObj.getString("name")).apply()
+                        }
                     }
                 }
+
+                // Report periodic screen-time usage increment to backend
+                try {
+                    val utcIso = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US).apply {
+                        timeZone = java.util.TimeZone.getTimeZone("UTC")
+                    }.format(java.util.Date())
+
+                    val usageJson = JSONObject().apply {
+                        put("target", "SCREEN_TIME")
+                        put("targetType", "APP")
+                        put("secondsIncrement", 900)
+                        put("clientWallIso", utcIso)
+                    }
+                    val usageBody = usageJson.toString().toRequestBody("application/json".toMediaType())
+                    val usageReq = Request.Builder()
+                        .url("$backendUrl/api/usage/sync")
+                        .header("x-device-id", deviceId)
+                        .header("x-device-token", deviceToken)
+                        .post(usageBody)
+                        .build()
+                    val usageRes = httpClient.newCall(usageReq).execute()
+                    usageRes.close()
+                } catch (e: Exception) {
+                    // Usage reporting failure is non-fatal for heartbeat
+                }
+
                 Result.success()
             } else {
                 Result.retry()

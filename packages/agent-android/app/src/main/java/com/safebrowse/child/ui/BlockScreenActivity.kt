@@ -99,11 +99,13 @@ class BlockScreenActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("safebrowse_device", MODE_PRIVATE)
         val childId = prefs.getString("child_id", "") ?: ""
         val deviceId = prefs.getString("device_id", "") ?: ""
+        val deviceToken = prefs.getString("device_token", "") ?: ""
         val backendUrl = com.safebrowse.child.config.AgentConfig.getBackendUrl(this@BlockScreenActivity)
 
         val json = JSONObject().apply {
             put("childId", childId)
             put("deviceId", deviceId)
+            put("deviceToken", deviceToken)
             put("domain", domain)
             put("reason", reason)
         }
@@ -114,6 +116,8 @@ class BlockScreenActivity : AppCompatActivity() {
                     val body = json.toString().toRequestBody("application/json".toMediaType())
                     val request = Request.Builder()
                         .url("$backendUrl/api/requests")
+                        .header("x-device-id", deviceId)
+                        .header("x-device-token", deviceToken)
                         .post(body)
                         .build()
                     val response = httpClient.newCall(request).execute()

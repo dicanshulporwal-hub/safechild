@@ -29,7 +29,10 @@ object AgentConfig {
      * - Production: strict HTTPS (cleartext prohibited)
      * - Debug: HTTP permitted only for approved targets (10.0.2.2, localhost/127.0.0.1/[::1], or Tailscale CGNAT 100.64.0.0/10)
      */
-    fun validateApiBaseUrl(rawUrl: String?, isDebug: Boolean = BuildConfig.DEBUG): String {
+    fun validateApiBaseUrl(
+        rawUrl: String?,
+        isDebug: Boolean = (BuildConfig.DEBUG || BuildConfig.ENVIRONMENT == "pilot")
+    ): String {
         val trimmed = rawUrl?.trim()?.trimEnd('/') ?: ""
         require(trimmed.isNotBlank()) {
             "SAFEBROWSE_API_BASE_URL must not be blank."
@@ -100,7 +103,7 @@ object AgentConfig {
         val persisted = prefs.getString("backend_url", null)
         if (!persisted.isNullOrBlank()) {
             try {
-                return validateApiBaseUrl(persisted, BuildConfig.DEBUG)
+                return validateApiBaseUrl(persisted, BuildConfig.DEBUG || BuildConfig.ENVIRONMENT == "pilot")
             } catch (e: Exception) {
                 // Persisted URL was corrupted or violated security rules; fall through to build-time default
             }
@@ -112,7 +115,7 @@ object AgentConfig {
      * Persists the validated backend URL into device preferences upon successful pairing.
      */
     fun setBackendUrl(context: Context, url: String) {
-        val validated = validateApiBaseUrl(url, BuildConfig.DEBUG)
+        val validated = validateApiBaseUrl(url, BuildConfig.DEBUG || BuildConfig.ENVIRONMENT == "pilot")
         val prefs = context.getSharedPreferences("safebrowse_device", Context.MODE_PRIVATE)
         prefs.edit().putString("backend_url", validated).apply()
     }
