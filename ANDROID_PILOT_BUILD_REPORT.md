@@ -239,7 +239,16 @@ As no physical Android phone was attached to this headless Linux build server du
 
 ---
 
-## 15. Status Certification
+## 15. Git Commit
+
+- **Commit ID:** `197017b70bbc444689806a3d82c83b0cf3f75df1`
+- **Branch:** `feature/android-pilot-apk`
+- **Worktree:** `/home/agdev/projects/safebrowse-android-pilot`
+- **Parent Commit:** `f898c4e4ab315b00324884752f4c57bfd24c3bb2`
+
+---
+
+## 16. Status Certification
 
 `IMPLEMENTED AND AUTOMATICALLY VERIFIED`:
 - Pilot APK compilation, packaging, and signing (`SafeBrowseChild-Pilot.apk`).
