@@ -65,7 +65,7 @@ android {
                 ?: (project.findProperty("safebrowseApiBaseUrl") as? String)
                 ?: System.getenv("SAFEBROWSE_PILOT_API_URL")
                 ?: System.getenv("SAFEBROWSE_API_BASE_URL")
-                ?: "http://100.88.17.16:11002"
+                ?: "https://safebrowse.porwal.online"
             buildConfigField("String", "SAFEBROWSE_API_BASE_URL", "\"$pilotUrl\"")
             buildConfigField("String", "ENVIRONMENT", "\"pilot\"")
             manifestPlaceholders["appLabel"] = "SafeBrowse Pilot"
@@ -74,8 +74,10 @@ android {
         release {
             isMinifyEnabled = false
             val prodUrl = (project.findProperty("safebrowseProdApiUrl") as? String)
+                ?: (project.findProperty("safebrowseApiBaseUrl") as? String)
                 ?: System.getenv("SAFEBROWSE_PROD_API_URL")
-                ?: "https://api.safebrowse.io"
+                ?: System.getenv("SAFEBROWSE_API_BASE_URL")
+                ?: "https://safebrowse.porwal.online"
             buildConfigField("String", "SAFEBROWSE_API_BASE_URL", "\"$prodUrl\"")
             buildConfigField("String", "ENVIRONMENT", "\"production\"")
             manifestPlaceholders["appLabel"] = "SafeBrowse"

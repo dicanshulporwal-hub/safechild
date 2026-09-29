@@ -240,49 +240,49 @@ class LocalPolicyManagerTest {
     @Test
     fun `test AgentConfig URL validation rejects blank and malformed URLs`() {
         org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
-            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("", isDebug = true)
+            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("", allowCleartext = true)
         }
         org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
-            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("   ", isDebug = true)
+            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("   ", allowCleartext = true)
         }
         org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
-            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("not a url", isDebug = true)
+            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("not a url", allowCleartext = true)
         }
         org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
-            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("ftp://10.0.2.2:11002", isDebug = true)
+            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("ftp://10.0.2.2:11002", allowCleartext = true)
         }
     }
 
     @Test
     fun `test AgentConfig rejects cleartext HTTP in production builds`() {
         org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
-            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://10.0.2.2:11002", isDebug = false)
+            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://10.0.2.2:11002", allowCleartext = false)
         }
         org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
-            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://100.64.0.1:11002", isDebug = false)
+            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://100.64.0.1:11002", allowCleartext = false)
         }
-        val validHttps = com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("https://safebrowse.example.com", isDebug = false)
-        assertEquals("https://safebrowse.example.com", validHttps)
+        val validHttps = com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("https://safebrowse.porwal.online", allowCleartext = false)
+        assertEquals("https://safebrowse.porwal.online", validHttps)
     }
 
     @Test
     fun `test AgentConfig restricts HTTP in debug to approved development and Tailscale CGNAT endpoints`() {
         // Approved endpoints
-        assertEquals("http://10.0.2.2:11002", com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://10.0.2.2:11002/", isDebug = true))
-        assertEquals("http://127.0.0.1:11002", com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://127.0.0.1:11002", isDebug = true))
-        assertEquals("http://localhost:11002", com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://localhost:11002", isDebug = true))
-        assertEquals("http://100.64.0.1:11002", com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://100.64.0.1:11002", isDebug = true))
-        assertEquals("http://100.127.255.254:11002", com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://100.127.255.254:11002", isDebug = true))
+        assertEquals("http://10.0.2.2:11002", com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://10.0.2.2:11002/", allowCleartext = true))
+        assertEquals("http://127.0.0.1:11002", com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://127.0.0.1:11002", allowCleartext = true))
+        assertEquals("http://localhost:11002", com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://localhost:11002", allowCleartext = true))
+        assertEquals("http://100.64.0.1:11002", com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://100.64.0.1:11002", allowCleartext = true))
+        assertEquals("http://100.127.255.254:11002", com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://100.127.255.254:11002", allowCleartext = true))
 
         // Disallowed HTTP hosts outside approved development scope
         org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
-            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://example.com", isDebug = true)
+            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://example.com", allowCleartext = true)
         }
         org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
-            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://100.63.255.254:11002", isDebug = true)
+            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://100.63.255.254:11002", allowCleartext = true)
         }
         org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
-            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://100.128.0.1:11002", isDebug = true)
+            com.safebrowse.child.config.AgentConfig.validateApiBaseUrl("http://100.128.0.1:11002", allowCleartext = true)
         }
     }
 

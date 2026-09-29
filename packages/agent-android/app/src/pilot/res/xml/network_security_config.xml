@@ -2,14 +2,12 @@
 <network-security-config>
     <!--
       SafeBrowse Pilot Build Configuration:
-      Permits cleartext HTTP traffic specifically for private development and mesh network testing (100.88.17.16:11002).
-      Specific destination endpoint restrictions are enforced programmatically by AgentConfig.validateApiBaseUrl().
-      Production release builds strictly enforce cleartextTrafficPermitted="false" with HTTPS only.
+      Strict HTTPS enforcement matching production. Cleartext HTTP is prohibited.
+      Trust anchors use standard Android system CA certificates.
     -->
-    <base-config cleartextTrafficPermitted="true">
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
-            <certificates src="user" />
         </trust-anchors>
     </base-config>
 </network-security-config>

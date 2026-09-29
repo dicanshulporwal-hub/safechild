@@ -4,16 +4,16 @@
 **Target Build Artifact:** `SafeBrowseChild-Pilot.apk`  
 **Package Name / Application ID:** `com.safebrowse.child`  
 **Target OS:** Android 8.0 (API 26) through Android 14 / 15 (API 34/35)  
-**Target Backend Endpoint (Pilot):** `http://100.88.17.16:11002` (Tailscale Private Mesh)
+**Target Backend Endpoint (Pilot):** `https://safebrowse.porwal.online` (Canonical Public HTTPS Domain)
 
 ---
 
 ## Prerequisites for Physical Device Testing
 
 1. **Android Physical Device:** Android phone running Android 8.0+ (API 26+) with Developer Options and USB Debugging enabled.
-2. **Network Connectivity:** The Android device must have network connectivity to the SafeBrowse backend (either connected via Tailscale to the mesh network or routing to `100.88.17.16:11002`).
+2. **Network Connectivity:** Standard public Internet access (Wi-Fi or cellular). SafeBrowse Android operates independently of Tailscale on the child device.
 3. **ADB (Android Debug Bridge):** Installed on developer workstation (`adb devices` confirms authorized device).
-4. **Parent Web Portal Access:** Parent dashboard running (e.g. `http://100.88.17.16:11000` or local dev portal) with at least one active Child profile (e.g., "Rahul").
+4. **Parent Web Portal Access:** Parent dashboard running at `https://safebrowse.porwal.online` with at least one active Child profile (e.g., "Rahul").
 
 ---
 
