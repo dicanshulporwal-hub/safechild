@@ -402,5 +402,53 @@ To eliminate arbitrary file path injection vulnerabilities in `--apply-mappings 
 ### 20.5 Test Matrix Expansion
 - Added tests 22–27 to `tests/config-manager.test.ts` covering directory ACL generation, sanitized config creation, token exclusion, and legacy migration.
 - Added tests 19–29 to `tests/account-mapping-and-profiles.test.ts` covering nonce staging, replay prevention, freshness enforcement, hash integrity verification, duplicate SID rejection, and unelevated GUI status handling.
-- Full test suite passes 100% across all 197 agent tests.
+
+---
+
+## 21. UAC-Approved Elevated Configuration Architecture & Staging Retirement (v1.0.1-pilot Finalization)
+
+### 21.1 Architectural Objective
+Simplify and finalize Windows account configuration so that:
+1. The normal GUI (`http://127.0.0.1:8885`) remains strictly unelevated and read-only.
+2. All account reconfiguration runs inside a dedicated, Administrator-approved elevated process (`SafeBrowseChild-Pilot.exe --configure-accounts`).
+3. Complete elimination of user-writable staging files (`%TEMP%`, nonce JSON files) and unkeyed SHA-256 hashes from the production account mapping flow.
+
+### 21.2 Normal GUI Status & View-Only Mode
+- Bound to `127.0.0.1:8885`, operates without Administrator privileges.
+- Reads strictly from `state/sanitized-config.json`, `state/profile-mappings.json`, and `state/active-session.json`. Never touches `secure/device-config.json`.
+- Displays real-time device status cards and an interactive, view-only **Configured Laptop Accounts & Protection** table.
+- Direct mapping mutation via `POST /api/mappings` is strictly rejected with `HTTP 403 Forbidden` if caller lacks Administrator privileges.
+- Clicking **Reconfigure Accounts** triggers `POST /api/reconfigure`, which requests Windows UAC elevation via PowerShell:
+  `Start-Process -FilePath "SafeBrowseChild-Pilot.exe" -ArgumentList "--configure-accounts" -Verb RunAs`.
+- Automatically polls `/api/status` to refresh telemetry immediately upon completion of elevated changes.
+
+### 21.3 Dedicated Elevated Configuration Process (`--configure-accounts`)
+When approved via Windows UAC, `SafeBrowseChild-Pilot.exe --configure-accounts`:
+1. Validates Administrator rights.
+2. Loads master configuration securely from `secure/device-config.json` (obtaining `deviceToken` and `backendUrl`).
+3. Live fetches family child profiles directly from `https://safebrowse.porwal.online/api/devices/family-profiles` using `deviceToken`.
+4. As an elevated process, saves synchronized child profiles to `state/family-profiles-cache.json` for persistent offline fallback.
+5. On fresh installs where no cache exists, the live fetch succeeds and populates both the configuration UI and the cache seamlessly.
+6. Starts an elevated configuration loopback server on port `8886` and launches the dedicated configuration GUI window.
+7. Displays interactive human Windows accounts, masks system/sandbox identities, and presents child profile dropdowns with live protection tags.
+8. Upon parent clicking **Save Settings & Protect Laptop**:
+   - Validates SIDs against local discovered accounts.
+   - Validates child IDs against synchronized family profiles.
+   - Saves mappings directly to `state/profile-mappings.json` using atomic write (`temp -> fsync -> rename`).
+   - Applies state ACLs (`SYSTEM:F`, `Administrators:F`, `Users:RX`).
+   - Reloads mappings in memory and triggers session re-evaluation.
+   - Flushes Windows DNS cache (`Clear-DnsClientCache`).
+   - Closes the configuration window and cleanly terminates the elevated process.
+
+### 21.4 Elimination of User-Writable Staging Files
+The `%TEMP%` / nonce mapping-save staging mechanism is retired from the production flow. Because configuration and persistence occur entirely within the elevated process memory, no intermediate files are placed in user-writable directories, eliminating any risk of unauthorized payload tampering or replay.
+
+### 21.5 Expanded Verification Matrix
+- Added tests 30–42 to `tests/account-mapping-and-profiles.test.ts`.
+- Full test suites pass with 100% success rate:
+  - `@safebrowse/agent-windows`: 210 passing tests across 8 test suites.
+  - `@safebrowse/backend`: 192 passing tests across 37 test suites.
+  - `@safebrowse/shared`: 9 passing tests across 2 test suites.
+  - `@safebrowse/parent-web`: Production build succeeds cleanly.
+
 

@@ -272,7 +272,49 @@ export class GuiServer {
           return;
         }
 
+        if ((pathname === '/api/reconfigure' || pathname === '/api/launch-reconfigure') && req.method === 'POST') {
+          try {
+            const exePath = process.argv[0];
+            const isNode = exePath.toLowerCase().endsWith('node.exe') || exePath.toLowerCase().endsWith('node');
+            const psPath = this.configMgr.getPowerShellPath();
+
+            if (process.platform === 'win32') {
+              const args = isNode
+                ? `"${process.argv[1]}" --configure-accounts`
+                : `--configure-accounts`;
+              const psCmd = `Start-Process -FilePath "${exePath}" -ArgumentList '${args}' -Verb RunAs`;
+              await execFileAsync(psPath, [
+                '-NoLogo',
+                '-NoProfile',
+                '-NonInteractive',
+                '-ExecutionPolicy',
+                'Bypass',
+                '-Command',
+                psCmd,
+              ]);
+            }
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, message: 'Administrator elevation requested' }));
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e.message }));
+          }
+          return;
+        }
+
         if (pathname === '/api/mappings' && req.method === 'POST') {
+          const isAdmin = await this.configMgr.isAdministrator();
+          if (!isAdmin && process.platform === 'win32') {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(
+              JSON.stringify({
+                error: 'Administrator approval is required to change account protection. Use Reconfigure Accounts.',
+              })
+            );
+            return;
+          }
+
           let body = '';
           req.on('data', (c) => (body += c));
           req.on('end', async () => {
@@ -283,71 +325,14 @@ export class GuiServer {
               const deviceId = config?.deviceId || 'dev-local';
               const deviceName = config?.deviceName || 'Family Laptop';
 
-              const isAdmin = await this.configMgr.isAdministrator();
+              await this.accountMgr.saveProfileMappingsTransaction(mappings, deviceId, deviceName, {
+                isElevated: true,
+              });
 
-              if (isAdmin || process.platform !== 'win32') {
-                await this.accountMgr.saveProfileMappingsTransaction(
-                  mappings,
-                  deviceId,
-                  deviceName,
-                  { isElevated: true }
-                );
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ success: true }));
-                return;
-              }
-
-              // Unelevated execution on Windows: stage request and invoke elevated helper via UAC
-              const { nonce, reqPath } = await this.accountMgr.createMappingSaveRequest(
-                mappings,
-                deviceId,
-                deviceName
-              );
-
-              const psPath = this.configMgr.getPowerShellPath();
-              const exePath = process.argv[0];
-              const isNode = exePath.toLowerCase().endsWith('node.exe') || exePath.toLowerCase().endsWith('node');
-
-              const psCmd = isNode
-                ? `Start-Process -FilePath "${exePath}" -ArgumentList "${process.argv[1]} --apply-mappings-req ${nonce}" -Verb RunAs -Wait -PassThru`
-                : `Start-Process -FilePath "${exePath}" -ArgumentList "--apply-mappings-req ${nonce}" -Verb RunAs -Wait -PassThru`;
-
-              try {
-                await execFileAsync(psPath, [
-                  '-NoLogo',
-                  '-NoProfile',
-                  '-NonInteractive',
-                  '-ExecutionPolicy',
-                  'Bypass',
-                  '-Command',
-                  psCmd,
-                ]);
-
-                // Verify file was persisted
-                const reloaded = await this.accountMgr.loadProfileMappings();
-                if (reloaded.length === mappings.length) {
-                  res.writeHead(200, { 'Content-Type': 'application/json' });
-                  res.end(JSON.stringify({ success: true }));
-                  return;
-                }
-
-                res.writeHead(403, { 'Content-Type': 'application/json' });
-                res.end(
-                  JSON.stringify({
-                    error: 'Administrator approval is required to change account protection.',
-                  })
-                );
-              } catch (uacErr: any) {
-                try { if (fs.existsSync(reqPath)) fs.unlinkSync(reqPath); } catch {}
-                res.writeHead(403, { 'Content-Type': 'application/json' });
-                res.end(
-                  JSON.stringify({
-                    error: 'Administrator approval is required to change account protection.',
-                  })
-                );
-              }
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: true }));
             } catch (e: any) {
-              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.writeHead(400, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: e.message }));
             }
           });
@@ -709,8 +694,26 @@ export class GuiServer {
         </div>
       </div>
 
+      <div style="margin-top: 24px; text-align: left;">
+        <div style="font-size: 13px; font-weight: 700; color: #cbd5e1; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px;">
+          Configured Laptop Accounts & Protection
+        </div>
+        <table class="account-table">
+          <thead>
+            <tr style="color: var(--text-muted); font-size: 12px; font-weight: 700; text-transform: uppercase; text-align: left;">
+              <th style="padding: 10px 16px;">Windows Account</th>
+              <th style="padding: 10px 16px;">Assigned Profile</th>
+              <th style="padding: 10px 16px;">Protection</th>
+            </tr>
+          </thead>
+          <tbody id="statusAccountsBody">
+            <!-- Populated dynamically -->
+          </tbody>
+        </table>
+      </div>
+
       <div class="button-row">
-        <button class="btn btn-primary" onclick="showScreen('screenAccounts')">Reconfigure Accounts</button>
+        <button class="btn btn-primary" id="btnReconfigure" onclick="launchElevatedReconfigure()">Reconfigure Accounts</button>
         <button class="btn btn-secondary" onclick="loadStatusScreen()">Refresh Status</button>
       </div>
     </div>
@@ -740,17 +743,54 @@ export class GuiServer {
       if (id === 'screenAccounts') loadAccountsScreen();
     }
 
+    let pollInterval = null;
+
     async function handleGetStarted() {
       try {
         const res = await fetch('/api/status');
         const data = await res.json();
         if (data.isPaired) {
-          showScreen('screenAccounts');
+          showScreen('screenStatus');
         } else {
           showScreen('screenPair');
         }
       } catch (e) {
         showScreen('screenPair');
+      }
+    }
+
+    async function launchElevatedReconfigure() {
+      const btn = document.getElementById('btnReconfigure');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = 'Requesting elevation...';
+      }
+      showAlert('Administrator approval requested... Please approve the Windows UAC prompt to reconfigure accounts.', false);
+
+      try {
+        const res = await fetch('/api/reconfigure', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.success) {
+          if (pollInterval) clearInterval(pollInterval);
+          let attempts = 0;
+          pollInterval = setInterval(async () => {
+            attempts++;
+            await loadStatusScreen(true);
+            if (attempts > 90) {
+              clearInterval(pollInterval);
+              pollInterval = null;
+            }
+          }, 2000);
+        } else {
+          showAlert(data.error || 'Failed to launch elevated configuration.', true);
+        }
+      } catch (e) {
+        showAlert('Error launching configuration: ' + e.message, true);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerText = 'Reconfigure Accounts';
+        }
       }
     }
 
@@ -959,13 +999,20 @@ export class GuiServer {
       }
     }
 
-    async function loadStatusScreen() {
+    async function loadStatusScreen(silent = false) {
       try {
-        const res = await fetch('/api/status');
-        const data = await res.json();
+        const [statRes, accRes] = await Promise.all([
+          fetch('/api/status').then(r => r.json()).catch(() => ({})),
+          fetch('/api/accounts').then(r => r.json()).catch(() => ({ accounts: [] }))
+        ]);
 
-        document.getElementById('statUser').innerText = data.activeSession.username || 'System Console';
-        document.getElementById('statUserSid').innerText = data.activeSession.isManaged ? 'Child account' : 'Parent / unmanaged account';
+        const data = statRes;
+        const accounts = accRes.accounts || [];
+        appState.mappings = data.mappings || [];
+        appState.isPaired = Boolean(data.isPaired);
+
+        document.getElementById('statUser').innerText = data.activeSession?.username || 'System Console';
+        document.getElementById('statUserSid').innerText = data.activeSession?.isManaged ? 'Child account' : 'Parent / unmanaged account';
 
         if (data.hasMultipleSessions) {
           document.getElementById('multiSessionBanner').style.display = 'block';
@@ -976,7 +1023,7 @@ export class GuiServer {
           document.getElementById('statModeSub').innerText = 'Multiple Windows users signed in';
         } else {
           document.getElementById('multiSessionBanner').style.display = 'none';
-          if (data.activeSession.isManaged) {
+          if (data.activeSession?.isManaged) {
             document.getElementById('statMode').innerHTML = '<span class="tag-protected">● Child Protected</span>';
             document.getElementById('statModeSub').innerText = 'Profile: ' + (data.activeSession.childName || 'Active Child');
           } else {
@@ -993,8 +1040,46 @@ export class GuiServer {
           document.getElementById('statDns').innerText = sys.dnsEnforced ? '127.0.0.1 (Enforced)' : 'Inactive';
           document.getElementById('statService').innerText = sys.serviceState || 'SafeBrowseChildService';
         }
+
+        // Render view-only status accounts table
+        const tbody = document.getElementById('statusAccountsBody');
+        if (tbody) {
+          tbody.innerHTML = '';
+          if (accounts.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; padding:16px; color:#64748b;">No interactive human accounts detected.</td></tr>';
+          } else {
+            accounts.forEach((acc) => {
+              const mapping = (data.mappings || []).find(m => m.windowsSid === acc.sid || (acc.name && m.windowsUsername && m.windowsUsername.toLowerCase() === acc.name.toLowerCase()));
+              const isManaged = Boolean(mapping && mapping.enabled && mapping.childId);
+              const childLabel = isManaged ? (mapping.childName ? mapping.childName + ' (Child Profile)' : 'Child Protected') : 'Parent / Unmanaged (Bypassed)';
+              const isCurrent = Boolean(acc.isCurrentConsoleUser);
+
+              const tr = document.createElement('tr');
+              tr.className = 'account-row';
+              tr.innerHTML =
+                '<td>' +
+                  '<div class="user-pill">' +
+                    acc.name +
+                    (isCurrent ? ' <span class="badge-current">ACTIVE USER</span>' : '') +
+                  '</div>' +
+                  '<div class="sid-text">' +
+                    (isCurrent ? 'Active Console Account' : 'Standard Windows Account') +
+                  '</div>' +
+                '</td>' +
+                '<td style="color: #cbd5e1; font-weight: 600; font-size: 13px;">' +
+                  childLabel +
+                '</td>' +
+                '<td>' +
+                  '<span class="' + (isManaged ? 'tag-protected' : 'tag-bypass') + '" style="font-weight:800; font-size:13px;">' +
+                    (isManaged ? '● PROTECTED' : '○ BYPASSED') +
+                  '</span>' +
+                '</td>';
+              tbody.appendChild(tr);
+            });
+          }
+        }
       } catch (e) {
-        showAlert('Failed to refresh status: ' + e.message, true);
+        if (!silent) showAlert('Failed to refresh status: ' + e.message, true);
       }
     }
 

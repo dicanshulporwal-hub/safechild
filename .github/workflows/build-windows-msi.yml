@@ -223,7 +223,7 @@ jobs:
             release/windows/SHA256SUMS.txt
           if-no-files-found: error
 
-      - name: Update GitHub Release Assets (v1.0.0-pilot)
+      - name: Update GitHub Release Assets (v1.0.1-pilot)
         if: github.ref == 'refs/heads/feature/stage11-step4-device-enforcement'
         shell: pwsh
         env:
@@ -237,5 +237,11 @@ jobs:
             "release/windows/SafeBrowseServiceHost.exe",
             "release/windows/SHA256SUMS.txt"
           )
-          Write-Host "Updating release v1.0.0-pilot assets via gh CLI..."
-          gh release upload v1.0.0-pilot $files --clobber
+          Write-Host "Checking if release v1.0.1-pilot exists..."
+          gh release view v1.0.1-pilot 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Creating release v1.0.1-pilot..."
+            gh release create v1.0.1-pilot --title "SafeBrowse Windows Pilot Release v1.0.1" --notes "SafeBrowse Windows Pilot v1.0.1 Release with Administrator-approved elevated account reconfiguration and zero-staging persistence."
+          }
+          Write-Host "Updating release v1.0.1-pilot assets via gh CLI..."
+          gh release upload v1.0.1-pilot $files --clobber

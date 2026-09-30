@@ -822,14 +822,54 @@ async function main() {
     console.log('SafeBrowse Family Protection Windows Agent');
     console.log('Usage:');
     console.log('  SafeBrowseChild-Pilot.exe gui                          # Launch SafeBrowse Family Protection GUI');
+    console.log('  SafeBrowseChild-Pilot.exe --configure-accounts         # Launch Administrator Account Configuration GUI');
     console.log('  SafeBrowseChild-Pilot.exe --pair <CODE> [--name <NAME>] [--backend-url <URL>]');
     console.log('  SafeBrowseChild-Pilot.exe --accounts                   # Discover Windows accounts & mappings');
-    console.log('  SafeBrowseChild-Pilot.exe --apply-mappings-req <NONCE> # Verify and persist account mappings (elevated)');
-    console.log('  SafeBrowseChild-Pilot.exe --apply-mappings <FILE>      # Legacy file-based mapping apply');
     console.log('  SafeBrowseChild-Pilot.exe service                      # Run Windows background service');
     console.log('  SafeBrowseChild-Pilot.exe --status                     # Inspect system & protection status');
     console.log('  SafeBrowseChild-Pilot.exe --emergency-restore          # Restore network DNS & firewall');
     process.exit(0);
+  }
+
+  if (args.includes('--configure-accounts')) {
+    const isAdmin = await configManager.isAdministrator();
+    if (!isAdmin && process.platform === 'win32') {
+      console.error('[SafeBrowse] Error: Administrator elevation is required for account reconfiguration.');
+      process.exit(5); // ERROR_ACCESS_DENIED
+    }
+
+    const setIdx = args.indexOf('--set-mappings');
+    if (setIdx !== -1 && args[setIdx + 1]) {
+      try {
+        const secureConfig = await configManager.loadDeviceConfig();
+        if (!secureConfig) {
+          console.error('[SafeBrowse] Error: Device is not paired yet.');
+          process.exit(1);
+        }
+        const mappings = JSON.parse(args[setIdx + 1]);
+        const accounts = await accountManager.discoverAccounts();
+        const allowedSids = accounts.map((a) => a.sid);
+        await accountManager.saveProfileMappingsTransaction(
+          mappings,
+          secureConfig.deviceId,
+          secureConfig.deviceName,
+          { isElevated: true, allowedSids }
+        );
+        console.log('[SafeBrowse] Successfully applied and persisted account mappings.');
+        process.exit(0);
+      } catch (err: any) {
+        console.error(`[SafeBrowse] Failed to save mappings: ${err.message}`);
+        process.exit(1);
+      }
+    }
+
+    console.log('[SafeBrowse] Starting SafeBrowse Administrator Account Configuration GUI...');
+    const { ElevatedConfigServer } = await import('./elevated-config-server');
+    const server = new ElevatedConfigServer();
+    const port = await server.start(8886);
+    await server.launchWindow();
+    console.log(`[SafeBrowse] Elevated configuration running at http://127.0.0.1:${port}.`);
+    return;
   }
 
   if (args.includes('--apply-mappings-req')) {

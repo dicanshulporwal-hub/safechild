@@ -53,6 +53,9 @@ This document provides a comprehensive 30-point physical and automated verificat
 | **W33** | Anti-Tamper | Nonce-based elevated staging (`--apply-mappings-req`) | Single-use replay protection: file unlinked immediately upon reading | Automated |
 | **W34** | Anti-Tamper | Staging freshness & payload hash validation | Rejects requests older than 60s or with altered SHA-256 payloadHash | Automated |
 | **W35** | Integrity | Account SID & Child ID verification | Rejects unknown machine SIDs, duplicate SIDs, or unmapped child profiles | Automated |
+| **W36** | Security Boundary | Normal GUI Read-Only Invariant | Unelevated `POST /api/mappings` rejected with 403; normal GUI view-only | Automated & Manual |
+| **W37** | Privilege Separation | Dedicated Elevated Configuration GUI (`--configure-accounts`) | UAC-launched elevated window loads secure config, fetches live profiles | Automated & Manual |
+| **W38** | Anti-Tamper | Zero-Staging Persistence | Saves directly within elevated process; 0 temporary staging files | Automated |
 
 ---
 
@@ -104,20 +107,29 @@ This document provides a comprehensive 30-point physical and automated verificat
    - Verify that the blue notice appears: `ℹ Using previously synchronized family profiles.`
    - Confirm that child profile dropdowns remain fully populated from local persistent cache (`family-profiles-cache.json`).
 
-### Procedure 5: Privilege Separation & Secure Save Settings Verification
+### Procedure 5: Administrator-Approved Reconfigure Accounts & Privilege Separation
 1. As a standard Windows user (or non-elevated desktop session), open `http://127.0.0.1:8885`.
-2. Change a child mapping (e.g., assign `Rahul` to child profile `Rahul`).
-3. Click **Save Settings & Protect Laptop**.
-4. Confirm that the button changes to `Saving settings...` and a Windows User Account Control (UAC) prompt appears requesting administrator credentials/approval.
-5. **Test Cancel (Child Attempt):**
+2. Verify that the Status screen shows the view-only table: **Configured Laptop Accounts & Protection** displaying discovered accounts and their active protection mode without any raw SIDs.
+3. Attempt to mutate mappings via direct unelevated API call:
+   ```powershell
+   Invoke-RestMethod -Uri "http://127.0.0.1:8885/api/mappings" -Method Post -Body '{"mappings":[]}' -ContentType "application/json"
+   # Expected: HTTP 403 Forbidden with "Administrator approval is required to change account protection."
+   ```
+4. Click **Reconfigure Accounts** on the normal status GUI.
+5. Confirm that the application informs the user: `Administrator approval requested... Please approve the Windows UAC prompt to reconfigure accounts.`
+6. A Windows User Account Control (UAC) prompt appears requesting administrator credentials/approval for `SafeBrowseChild-Pilot.exe --configure-accounts`.
+7. **Test Cancel (Child Attempt):**
    - Click "No" or cancel the UAC prompt.
-   - Verify that the application displays: `Administrator approval is required to change account protection.`
-   - Confirm that previous mappings remain unaltered.
-6. **Test Approve (Parent Approval):**
-   - Click "Save Settings & Protect Laptop" again and approve the UAC elevation prompt (click "Yes" or enter admin PIN/password).
-   - Verify that the success alert appears: `Shared laptop settings saved successfully!`
-   - Verify that the application navigates smoothly to the Status screen.
-   - Confirm that `C:\ProgramData\SafeBrowse\state\profile-mappings.json` is updated atomically with verified ACLs and zero `Access is denied` errors.
+   - Confirm that the normal status GUI remains active and unchanged, and previous protection mappings remain unaltered.
+8. **Test Approve (Parent Approval):**
+   - Click **Reconfigure Accounts** again and approve the UAC elevation prompt (click "Yes" or enter admin PIN/password).
+   - A dedicated elevated configuration window opens (`http://127.0.0.1:8886`) with the banner `🛡️ Administrator Approved`.
+   - The elevated window fetches live family profiles directly using credentials in `secure/device-config.json` and displays child dropdowns.
+   - Change account assignments (e.g. assign `Rahul` to child profile `Rahul`).
+   - Click **Save Settings & Protect Laptop**.
+   - Verify that the elevated window displays: `Shared laptop settings saved successfully! Updating protection...` and automatically closes after 1.2s.
+   - Confirm that the normal status GUI (`http://127.0.0.1:8885`) automatically polls and refreshes its view-only table with the updated child protection state.
+   - Confirm that `C:\ProgramData\SafeBrowse\state\profile-mappings.json` is updated directly and atomically without any intermediate staging files in `%TEMP%`.
 
 ### Procedure 6: Least-Privilege Directory ACL & Sanitized State Verification
 1. Sign in as a standard non-administrative Windows user (e.g. `Rahul`).

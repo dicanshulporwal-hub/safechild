@@ -492,7 +492,13 @@ export class WindowsAccountManager {
     mappings: WindowsProfileMapping[],
     deviceId?: string,
     deviceName?: string,
-    options?: { isElevated?: boolean; skipAcl?: boolean; skipVerification?: boolean }
+    options?: {
+      isElevated?: boolean;
+      skipAcl?: boolean;
+      skipVerification?: boolean;
+      allowedSids?: Iterable<string>;
+      allowedChildIds?: Iterable<string>;
+    }
   ): Promise<{ success: boolean; mappings: WindowsProfileMapping[] }> {
     // Step 1: Input Validation
     if (!Array.isArray(mappings)) {
@@ -502,6 +508,13 @@ export class WindowsAccountManager {
     // Step 2 & 3: Entry & SID Validation & Duplicate SID Check
     const seenSids = new Set<string>();
     const sanitizedMappings: WindowsProfileMapping[] = [];
+
+    const allowedSidsSet = options?.allowedSids
+      ? new Set(Array.from(options.allowedSids).map((s) => s.trim().toUpperCase()))
+      : null;
+    const allowedChildIdsSet = options?.allowedChildIds
+      ? new Set(Array.from(options.allowedChildIds).map((c) => String(c).trim()))
+      : null;
 
     for (const item of mappings) {
       if (!item || typeof item !== 'object') {
@@ -522,6 +535,10 @@ export class WindowsAccountManager {
         throw new Error(`Invalid Windows SID format: '${sid}'`);
       }
 
+      if (allowedSidsSet && !allowedSidsSet.has(sid)) {
+        throw new Error(`Invalid SID: SID '${sid}' does not match any recognized local Windows account.`);
+      }
+
       if (seenSids.has(sid)) {
         throw new Error(`Duplicate mapping detected for Windows SID: ${sid}`);
       }
@@ -529,6 +546,10 @@ export class WindowsAccountManager {
 
       // Step 4: Child ID Validation
       const childId = item.childId ? String(item.childId).trim() : null;
+      if (childId && allowedChildIdsSet && !allowedChildIdsSet.has(childId)) {
+        throw new Error(`Invalid childId: Child ID '${childId}' does not match any registered family profile.`);
+      }
+
       const childName = item.childName ? String(item.childName).trim() : null;
       const enabled = Boolean(item.enabled && childId);
 
