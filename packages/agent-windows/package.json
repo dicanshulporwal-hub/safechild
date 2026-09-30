@@ -1,12 +1,12 @@
 {
   "name": "@safebrowse/agent-windows",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "main": "dist/agent-cli.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/agent-cli.js",
     "dev": "ts-node src/agent-cli.ts",
-    "test": "ts-node tests/config-manager.test.ts && ts-node tests/dns-proxy.test.ts && ts-node tests/network-manager.test.ts && ts-node tests/process-limiter.test.ts && ts-node tests/recovery-and-hardening.test.ts && ts-node tests/shared-laptop-enforcement.test.ts && ts-node tests/pilot-v1-device-management.test.ts"
+    "test": "ts-node tests/config-manager.test.ts && ts-node tests/dns-proxy.test.ts && ts-node tests/network-manager.test.ts && ts-node tests/process-limiter.test.ts && ts-node tests/recovery-and-hardening.test.ts && ts-node tests/shared-laptop-enforcement.test.ts && ts-node tests/pilot-v1-device-management.test.ts && ts-node tests/account-mapping-and-profiles.test.ts"
   },
   "dependencies": {
     "@safebrowse/shared": "^1.0.0",

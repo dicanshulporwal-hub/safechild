@@ -291,3 +291,36 @@ SafeBrowse Windows Pilot v1.0 meets all functional, architectural, and security 
 **Final Release Status:**  
 `PILOT READY FOR SINGLE-ACTIVE-USER DEPLOYMENT`  
 *Signed off autonomously following inspect, design, implement, test, fix, build, verify, and document cycle.*
+
+---
+
+## 19. Account Mapping Reliability & Privilege Separation (v1.0.1-pilot Patch)
+
+### 19.1 Observed Physical Device Failures & Root Cause Analysis
+During physical Windows pilot validation on `http://127.0.0.1:8885`, two defects occurred:
+1. **Intermittent Child Profiles in Dropdown:** The setup UI silently swallowed transient network or auth errors with `.catch(() => ({ profiles: [] }))`, causing cloud profiles to disappear and leaving only `Parent / Unmanaged (Protection OFF)`.
+2. **Save Settings Failure (`Access is denied`):** The unelevated GUI process executed `configManager.ensureDirectories()` and `configManager.applyWindowsAcls()`, which invoked privileged `icacls` on `C:\ProgramData\SafeBrowse`, throwing `Access is denied`.
+
+### 19.2 Architectural Corrections Implemented
+- **Profile Fetch Resilience & Caching:**
+  - Implemented `accountManager.fetchFamilyProfilesWithResilience()` with 3-attempt bounded backoff (0ms, 300ms, ~750ms).
+  - Persisted profiles locally to `family-profiles-cache.json` with atomic write semantics (`temp -> fsync -> rename`).
+  - Added graceful fallback to persistent cache with informational notice: `Using previously synchronized family profiles.`
+  - Added visible `Retry` button and prominent error banner if cloud fetch fails and no cache exists.
+  - Strictly audited all logging paths to prevent `deviceToken` leakage.
+- **Privilege Separation & Child Tamper-Resistance:**
+  - Decoupled directory creation from machine ACL modification in `configManager.ensureDirectories()`.
+  - Added `configManager.hardenMachineDirectories()` called exclusively during privileged service startup and MSI installation.
+  - Implemented 11-step transaction in `accountManager.saveProfileMappingsTransaction()`: input validation, SID format verification (`/^S-1-\d+(-\d+)+$/`), duplicate SID rejection, childId validation, temp file creation, atomic write & fsync, atomic rename, privilege-aware ACL application, reload verification, session notification, and DNS cache flush.
+  - Added elevated CLI command `--apply-mappings <file>`. Unelevated GUI processes invoke this helper via PowerShell UAC (`Start-Process ... -Verb RunAs -Wait`). If UAC is cancelled by a child user, the GUI returns HTTP 403: `Administrator approval is required to change account protection.`
+- **Account Discovery Filtering & Active User Highlighting:**
+  - Filtered out disabled accounts (`disabled: true`).
+  - Filtered out built-in RID accounts (`-500` Administrator, `-501` Guest, `-503` DefaultAccount, `-504` WDAGUtilityAccount).
+  - Filtered out non-interactive sandbox identities matching `/sandbox/i` (e.g. `CodexSandboxOffline`, `CodexSandboxOnline`, `WindowsSandbox`).
+  - Preserved interactive human accounts (`DIC`, `Manjari`, `Rahul`, `acer`) with deterministic alphabetical sorting.
+  - Highlighted active console user cleanly as `DIC — ACTIVE USER` with `Active Console Account` label, completely hiding raw SIDs in standard UI views.
+- **Removal of False WFP Claims in Parent Portal:**
+  - Audited and updated `ChildWorkspacePage.tsx`, `DeviceDetailsPage.tsx`, `DeviceDiagnosticsPage.tsx`, and `StatusPage.tsx`.
+  - Replaced all inaccurate `WFP Kernel` and `WFP` labels with `DNS Filter (Windows Pilot)` or `Local DNS Enforcement`.
+- **Test Verification:**
+  - Added 18 comprehensive tests in `tests/account-mapping-and-profiles.test.ts`. Total `@safebrowse/agent-windows` test suite now stands at 160 passing tests across 8 suites (100% pass rate).

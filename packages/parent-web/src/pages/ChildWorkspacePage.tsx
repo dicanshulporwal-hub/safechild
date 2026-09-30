@@ -520,21 +520,45 @@ export const ChildWorkspacePage: React.FC<{ childrenList: Child[] }> = ({ childr
                         <div className="text-xs text-slate-400">{dev.platform.toUpperCase()} • Agent {dev.agentVersion || '1.0.0'}</div>
                       </div>
                     </div>
-                    <span className="text-[10px] px-2.5 py-1 rounded-full font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                      {dev.healthStatus || 'PROTECTED'}
-                    </span>
+                    {dev.hasMultipleSessions ? (
+                      <span className="text-[10px] px-2.5 py-1 rounded-full font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                        ATTENTION REQUIRED
+                      </span>
+                    ) : dev.protectionStatus === 'PARENT_BYPASS' || dev.healthStatus === 'BYPASSED' ? (
+                      <span className="text-[10px] px-2.5 py-1 rounded-full font-bold bg-blue-500/20 text-blue-300 border border-blue-500/30">
+                        PARENT / UNMANAGED
+                      </span>
+                    ) : dev.healthStatus === 'inactive' || dev.isRevoked ? (
+                      <span className="text-[10px] px-2.5 py-1 rounded-full font-bold bg-slate-800 text-slate-400 border border-slate-700">
+                        INACTIVE
+                      </span>
+                    ) : (
+                      <span className="text-[10px] px-2.5 py-1 rounded-full font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                        PROTECTED
+                      </span>
+                    )}
                   </div>
 
                   <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 grid grid-cols-2 gap-2 text-xs">
                     <div>
                       <span className="text-slate-500 text-[10px] uppercase">Enforcement</span>
-                      <div className="font-semibold text-slate-300">{dev.platform === 'windows' ? 'WFP Kernel' : 'VpnService'}</div>
+                      <div className="font-semibold text-slate-300">{dev.platform === 'windows' ? 'DNS Filter (Windows Pilot)' : 'VpnService'}</div>
                     </div>
                     <div>
-                      <span className="text-slate-500 text-[10px] uppercase">Heartbeat</span>
-                      <div className="font-semibold text-slate-300">Live (WS Connected)</div>
+                      <span className="text-slate-500 text-[10px] uppercase">Current Session</span>
+                      <div className="font-semibold text-slate-300">
+                        {dev.protectionStatus === 'PARENT_BYPASS' || dev.healthStatus === 'BYPASSED'
+                          ? (dev.windowsAccountName ? `${dev.windowsAccountName} (Bypassed)` : 'Parent / Unmanaged')
+                          : (dev.windowsAccountName ? `${dev.windowsAccountName} (Managed)` : 'Child / Managed')}
+                      </div>
                     </div>
                   </div>
+
+                  {(dev.protectionStatus === 'PARENT_BYPASS' || dev.healthStatus === 'BYPASSED') && (
+                    <div className="text-[11px] text-blue-300/80 bg-blue-950/30 px-3 py-1.5 rounded-lg border border-blue-900/30">
+                      Protection: Not currently enforcing child policy (Parent active)
+                    </div>
+                  )}
 
                   <div className="flex items-center justify-between pt-2">
                     <button

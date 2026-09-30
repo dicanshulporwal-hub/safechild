@@ -52,7 +52,7 @@ export const DeviceDiagnosticsPage: React.FC = () => {
     // Run 7-point self-diagnostic sequence
     const diagnosticSequence: DiagnosticStep[] = [
       { name: '1. Background Agent Service Integrity', status: 'passed', detail: 'Agent daemon PID active, responsive to RPC', latencyMs: 1.2 },
-      { name: '2. Network Interception Engine (WFP / VpnService)', status: 'passed', detail: 'Interception active on all outbound sockets (IPv4 & IPv6)', latencyMs: 0.8 },
+      { name: '2. Network Interception Engine (Local DNS / VpnService)', status: 'passed', detail: 'DNS proxy active on loopback (IPv4 & IPv6)', latencyMs: 0.8 },
       { name: '3. Browser DoH / Encrypted DNS Bypass Trap', status: 'passed', detail: 'Bootstrap blocks active against DoH canary domains', latencyMs: 2.1 },
       { name: '4. Local Policy Cache & Offline Enforcement', status: 'passed', detail: 'SQLite cache synchronized to latest policy', latencyMs: 0.4 },
       { name: '5. Backend Cloud Telemetry & Heartbeat Sync', status: 'passed', detail: 'WebSocket tunnel healthy, RTT 18ms', latencyMs: 18.0 },

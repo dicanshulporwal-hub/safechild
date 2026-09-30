@@ -17,7 +17,7 @@ export const StatusPage: React.FC = () => {
 
   const services = [
     { name: 'Core Policy Evaluation Engine', status: 'Operational', latency: '0.03ms' },
-    { name: 'DNS Interception & Filtering (WFP & VPN)', status: 'Operational', latency: '0.8ms' },
+    { name: 'DNS Interception & Filtering (Local DNS & VPN)', status: 'Operational', latency: '0.8ms' },
     { name: 'Real-time WebSocket Push Telemetry', status: 'Operational', latency: '18ms' },
     { name: 'Backend REST API & Identity Service', status: 'Operational', latency: '12ms' },
     { name: 'Ask Parent Cloud Notification Broker', status: 'Operational', latency: '24ms' },

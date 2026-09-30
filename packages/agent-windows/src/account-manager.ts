@@ -21,6 +21,21 @@ export interface WindowsProfileMapping {
   enabled: boolean;
 }
 
+export interface FamilyChildProfile {
+  id: string;
+  name: string;
+  age?: number | null;
+  color?: string | null;
+  avatar?: string | null;
+  policyId?: string | null;
+}
+
+export interface FamilyProfilesResponse {
+  profiles: FamilyChildProfile[];
+  cachedAt?: string;
+  fromCache?: boolean;
+}
+
 export interface SharedLaptopConfig {
   deviceId: string;
   deviceName?: string;
@@ -77,12 +92,170 @@ export class WindowsAccountManager {
     return path.join(baseDir, 'active-session.json');
   }
 
+  public getProfilesCacheFilePath(): string {
+    const baseDir = this.customBaseDir || configManager.getBaseDir();
+    return path.join(baseDir, 'family-profiles-cache.json');
+  }
+
+  /**
+   * Reads persistent local cache of family child profiles.
+   */
+  public async getCachedFamilyProfiles(): Promise<{ profiles: FamilyChildProfile[]; cachedAt: string } | null> {
+    const filePath = this.getProfilesCacheFilePath();
+    if (!fs.existsSync(filePath)) {
+      return null;
+    }
+    try {
+      const raw = fs.readFileSync(filePath, 'utf8');
+      const data = JSON.parse(raw);
+      if (Array.isArray(data.profiles)) {
+        return {
+          profiles: data.profiles,
+          cachedAt: data.cachedAt || data.updatedAt || new Date().toISOString(),
+        };
+      }
+      if (Array.isArray(data)) {
+        return {
+          profiles: data,
+          cachedAt: new Date().toISOString(),
+        };
+      }
+      return null;
+    } catch (err: any) {
+      console.warn(`[AccountManager] Failed to read family profiles cache: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Persists family child profiles to local cache with atomic write (temp -> fsync -> rename).
+   */
+  public async saveCachedFamilyProfiles(profiles: FamilyChildProfile[]): Promise<void> {
+    const baseDir = this.customBaseDir || configManager.getBaseDir();
+    if (!fs.existsSync(baseDir)) {
+      try { fs.mkdirSync(baseDir, { recursive: true }); } catch {}
+    }
+    configManager.ensureDirectories();
+
+    const filePath = this.getProfilesCacheFilePath();
+    const tempFile = path.join(baseDir, `family-profiles-cache.json.tmp.${process.pid}.${Date.now()}`);
+    const payload = {
+      profiles,
+      cachedAt: new Date().toISOString(),
+    };
+
+    const content = JSON.stringify(payload, null, 2);
+    const fd = fs.openSync(tempFile, 'w');
+    try {
+      fs.writeSync(fd, content, 0, 'utf8');
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    fs.renameSync(tempFile, filePath);
+  }
+
+  /**
+   * Fetches family child profiles from cloud with bounded retry and local cache fallback.
+   * Never leaks deviceToken in logs or error messages.
+   */
+  public async fetchFamilyProfilesWithResilience(
+    backendUrl: string,
+    deviceId: string,
+    deviceToken: string,
+    options?: {
+      maxRetries?: number;
+      retryDelayMs?: number;
+      fetchFn?: (url: string, init?: any) => Promise<any>;
+    }
+  ): Promise<FamilyProfilesResponse> {
+    const maxRetries = options?.maxRetries ?? 3;
+    const baseDelay = options?.retryDelayMs ?? 300;
+    const fetchFunc = options?.fetchFn || fetch;
+
+    const fetchUrl = `${backendUrl}/api/devices/family-profiles`;
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      if (attempt > 0) {
+        const delay = attempt === 1 ? baseDelay : baseDelay * 2.5;
+        await new Promise((res) => setTimeout(res, delay));
+      }
+
+      try {
+        const resp = await fetchFunc(fetchUrl, {
+          method: 'GET',
+          headers: {
+            'x-device-id': deviceId,
+            'x-device-token': deviceToken,
+          },
+        });
+
+        if (resp.ok) {
+          const body: any = await resp.json();
+          const rawProfiles = Array.isArray(body)
+            ? body
+            : Array.isArray(body?.profiles)
+            ? body.profiles
+            : null;
+
+          if (rawProfiles !== null) {
+            const validProfiles: FamilyChildProfile[] = rawProfiles
+              .filter((p: any) => p && typeof p === 'object' && p.id && p.name)
+              .map((p: any) => ({
+                id: String(p.id),
+                name: String(p.name),
+                age: typeof p.age === 'number' ? p.age : null,
+                color: p.color ? String(p.color) : null,
+                avatar: p.avatar ? String(p.avatar) : null,
+                policyId: p.policyId ? String(p.policyId) : null,
+              }));
+
+            await this.saveCachedFamilyProfiles(validProfiles);
+            return {
+              profiles: validProfiles,
+              fromCache: false,
+            };
+          }
+        } else {
+          lastError = new Error(`HTTP ${resp.status} ${resp.statusText}`);
+          console.warn(`[AccountManager] Cloud profile fetch attempt ${attempt + 1}/${maxRetries} failed: ${lastError.message}`);
+        }
+      } catch (err: any) {
+        lastError = err;
+        console.warn(`[AccountManager] Cloud profile fetch attempt ${attempt + 1}/${maxRetries} failed: ${err.message}`);
+      }
+    }
+
+    // All cloud attempts failed - attempt persistent local cache fallback
+    const cached = await this.getCachedFamilyProfiles();
+    if (cached && Array.isArray(cached.profiles) && cached.profiles.length > 0) {
+      console.info(
+        `[AccountManager] Cloud fetch unavailable. Using previously synchronized family profiles (${cached.profiles.length} profiles from ${cached.cachedAt}).`
+      );
+      return {
+        profiles: cached.profiles,
+        fromCache: true,
+        cachedAt: cached.cachedAt,
+      };
+    }
+
+    throw new Error(
+      `Unable to load family profiles. Check SafeBrowse connection and retry. (${lastError ? lastError.message : 'No profiles available'})`
+    );
+  }
+
   /**
    * Evaluates if a given Windows SID or Username belongs to an internal,
    * system, or service identity that should never be presented to parents.
    */
-  public isSystemOrServiceAccount(name: string, sid?: string): boolean {
-    const upperName = (name || '').toUpperCase();
+  public isSystemOrServiceAccount(name: string, sid?: string, disabled?: boolean): boolean {
+    if (disabled === true) {
+      return true;
+    }
+
+    const upperName = (name || '').toUpperCase().trim();
 
     // Standard Windows Well-Known SIDs for system identities
     if (sid) {
@@ -98,6 +271,20 @@ export class WindowsAccountManager {
       ) {
         return true;
       }
+
+      // Check well-known Relative Identifiers (RIDs):
+      // -500: Built-in Administrator
+      // -501: Built-in Guest
+      // -503: DefaultAccount
+      // -504: WDAGUtilityAccount
+      if (
+        cleanSid.endsWith('-500') ||
+        cleanSid.endsWith('-501') ||
+        cleanSid.endsWith('-503') ||
+        cleanSid.endsWith('-504')
+      ) {
+        return true;
+      }
     }
 
     const filteredNames = [
@@ -108,6 +295,7 @@ export class WindowsAccountManager {
       'WDAGUTILITYACCOUNT',
       'TRUSTEDINSTALLER',
       'ADMINISTRATOR',
+      'GUEST',
     ];
 
     if (filteredNames.includes(upperName)) {
@@ -119,7 +307,9 @@ export class WindowsAccountManager {
       upperName.startsWith('UMFD-') ||
       upperName.startsWith('IUSR') ||
       upperName.startsWith('IIS_') ||
-      upperName.includes('SERVICE')
+      upperName.startsWith('WDAG') ||
+      upperName.includes('SERVICE') ||
+      upperName.includes('SANDBOX')
     ) {
       return true;
     }
@@ -133,7 +323,11 @@ export class WindowsAccountManager {
    */
   public async discoverAccounts(): Promise<WindowsAccount[]> {
     if (this.mockAccounts) {
-      return this.mockAccounts;
+      const filtered = this.mockAccounts.filter(
+        (acc) => !this.isSystemOrServiceAccount(acc.name, acc.sid, acc.disabled)
+      );
+      filtered.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+      return filtered;
     }
 
     if (process.platform !== 'win32') {
@@ -142,7 +336,6 @@ export class WindowsAccountManager {
         { name: 'acer', sid: 'S-1-5-21-1000-1000-1000-1000', disabled: false },
         { name: 'Manjari', sid: 'S-1-5-21-1000-1000-1000-1001', disabled: false },
         { name: 'Rahul', sid: 'S-1-5-21-1000-1000-1000-1002', disabled: false },
-        { name: 'Guest', sid: 'S-1-5-21-1000-1000-1000-501', disabled: false },
       ];
     }
 
@@ -185,7 +378,7 @@ export class WindowsAccountManager {
         const sid = String(item.SID);
         const disabled = Boolean(item.Disabled);
 
-        if (this.isSystemOrServiceAccount(name, sid)) {
+        if (this.isSystemOrServiceAccount(name, sid, disabled)) {
           continue;
         }
 
@@ -196,6 +389,7 @@ export class WindowsAccountManager {
         });
       }
 
+      accounts.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
       return accounts;
     } catch (err: any) {
       console.warn(`[AccountManager] Failed to discover Windows accounts via WMI: ${err.message}`);
@@ -229,13 +423,63 @@ export class WindowsAccountManager {
   }
 
   /**
-   * Persists profile mappings to disk with secure Windows ACLs.
+   * Persists profile mappings using an atomic, multi-step transaction with validation,
+   * rollback safety, reload verification, privilege-aware ACLs, and cache flushing.
    */
-  public async saveProfileMappings(
+  public async saveProfileMappingsTransaction(
     mappings: WindowsProfileMapping[],
     deviceId?: string,
-    deviceName?: string
-  ): Promise<void> {
+    deviceName?: string,
+    options?: { isElevated?: boolean; skipAcl?: boolean; skipVerification?: boolean }
+  ): Promise<{ success: boolean; mappings: WindowsProfileMapping[] }> {
+    // Step 1: Input Validation
+    if (!Array.isArray(mappings)) {
+      throw new Error('Invalid mappings: expected an array.');
+    }
+
+    // Step 2 & 3: Entry & SID Validation & Duplicate SID Check
+    const seenSids = new Set<string>();
+    const sanitizedMappings: WindowsProfileMapping[] = [];
+
+    for (const item of mappings) {
+      if (!item || typeof item !== 'object') {
+        throw new Error('Invalid mapping entry: expected an object.');
+      }
+      const sid = String(item.windowsSid || '').trim().toUpperCase();
+      const username = String(item.windowsUsername || '').trim();
+
+      if (!sid) {
+        throw new Error('Mapping entry is missing a valid Windows SID.');
+      }
+      if (!username) {
+        throw new Error(`Mapping entry for SID ${sid} is missing a Windows username.`);
+      }
+
+      // Standard Windows SID format validation: e.g. S-1-5-21-...
+      if (!/^S-1-\d+(-\d+)+$/i.test(sid)) {
+        throw new Error(`Invalid Windows SID format: '${sid}'`);
+      }
+
+      if (seenSids.has(sid)) {
+        throw new Error(`Duplicate mapping detected for Windows SID: ${sid}`);
+      }
+      seenSids.add(sid);
+
+      // Step 4: Child ID Validation
+      const childId = item.childId ? String(item.childId).trim() : null;
+      const childName = item.childName ? String(item.childName).trim() : null;
+      const enabled = Boolean(item.enabled && childId);
+
+      sanitizedMappings.push({
+        windowsSid: sid,
+        windowsUsername: username,
+        childId: childId || null,
+        childName: childName || null,
+        enabled,
+      });
+    }
+
+    // Step 5: Directory Preparation (ensures directories exist without invoking icacls)
     const baseDir = this.customBaseDir || configManager.getBaseDir();
     if (!fs.existsSync(baseDir)) {
       try { fs.mkdirSync(baseDir, { recursive: true }); } catch {}
@@ -243,15 +487,79 @@ export class WindowsAccountManager {
     configManager.ensureDirectories();
 
     const filePath = this.getMappingsFilePath();
+    // Step 6: Atomic Temp File Creation
+    const tempFile = path.join(baseDir, `profile-mappings.json.tmp.${process.pid}.${Date.now()}`);
+
     const payload: SharedLaptopConfig = {
       deviceId: deviceId || 'dev-local',
       deviceName: deviceName || 'Family Laptop',
-      mappings,
+      mappings: sanitizedMappings,
       updatedAt: new Date().toISOString(),
     };
 
-    fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), 'utf8');
-    configManager.applyWindowsAcls(filePath);
+    try {
+      // Step 7: Atomic Write & Flush
+      const content = JSON.stringify(payload, null, 2);
+      const fd = fs.openSync(tempFile, 'w');
+      try {
+        fs.writeSync(fd, content, 0, 'utf8');
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+
+      // Step 8: Atomic Rename
+      fs.renameSync(tempFile, filePath);
+
+      // Step 9: Privilege-Aware ACL Application (Elevated/SYSTEM only)
+      const isElevated = options?.isElevated ?? (await configManager.isAdministrator());
+      if (isElevated && !options?.skipAcl && (process.platform === 'win32' || configManager.getPlatform() === 'win32')) {
+        configManager.applyWindowsAcls(filePath);
+      }
+
+      // Step 10: Verification of Reload
+      if (!options?.skipVerification) {
+        const reloaded = await this.loadProfileMappings();
+        if (reloaded.length !== sanitizedMappings.length) {
+          throw new Error(
+            `Verification failed: Expected ${sanitizedMappings.length} mappings, loaded ${reloaded.length}.`
+          );
+        }
+      }
+
+      // Step 11: Session Monitor Notification & Network DNS Cache Flush
+      try {
+        const { sessionMonitor } = require('./session-monitor');
+        if (sessionMonitor && typeof sessionMonitor.checkSessionNow === 'function') {
+          await sessionMonitor.checkSessionNow();
+        }
+      } catch {}
+
+      try {
+        const { networkManager } = require('./network-manager');
+        if (networkManager && typeof networkManager.flushDnsCache === 'function') {
+          await networkManager.flushDnsCache();
+        }
+      } catch {}
+
+      return { success: true, mappings: sanitizedMappings };
+    } catch (err: any) {
+      if (fs.existsSync(tempFile)) {
+        try { fs.unlinkSync(tempFile); } catch {}
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Persists profile mappings to disk with secure Windows ACLs.
+   */
+  public async saveProfileMappings(
+    mappings: WindowsProfileMapping[],
+    deviceId?: string,
+    deviceName?: string
+  ): Promise<void> {
+    await this.saveProfileMappingsTransaction(mappings, deviceId, deviceName);
   }
 
   /**

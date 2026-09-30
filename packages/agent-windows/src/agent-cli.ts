@@ -176,6 +176,13 @@ async function runServiceMode(): Promise<void> {
   logServiceMessage('INFO', '[SafeBrowse Service] SafeBrowse Windows Enforcement Service');
   logServiceMessage('INFO', '==================================================');
 
+  // Ensure machine directory permissions are secured by the privileged service
+  try {
+    await configManager.hardenMachineDirectories();
+  } catch (aclErr: any) {
+    logServiceMessage('WARN', `[SafeBrowse Service] [WARN] Machine directory ACL hardening note: ${aclErr.message}`);
+  }
+
   // Graceful shutdown handling
   let isShuttingDown = false;
   let currentEngineStatus: EngineOperationalStatus = 'DEGRADED_DNS_NOT_ENFORCED';
@@ -817,10 +824,52 @@ async function main() {
     console.log('  SafeBrowseChild-Pilot.exe gui                          # Launch SafeBrowse Family Protection GUI');
     console.log('  SafeBrowseChild-Pilot.exe --pair <CODE> [--name <NAME>] [--backend-url <URL>]');
     console.log('  SafeBrowseChild-Pilot.exe --accounts                   # Discover Windows accounts & mappings');
+    console.log('  SafeBrowseChild-Pilot.exe --apply-mappings <FILE>      # Elevate and persist account mappings');
     console.log('  SafeBrowseChild-Pilot.exe service                      # Run Windows background service');
     console.log('  SafeBrowseChild-Pilot.exe --status                     # Inspect system & protection status');
     console.log('  SafeBrowseChild-Pilot.exe --emergency-restore          # Restore network DNS & firewall');
     process.exit(0);
+  }
+
+  if (args.includes('--apply-mappings')) {
+    const idx = args.indexOf('--apply-mappings');
+    const reqPath = args[idx + 1];
+    if (!reqPath) {
+      console.error('[SafeBrowse] Error: --apply-mappings requires a path to a request file.');
+      process.exit(1);
+    }
+    try {
+      const isAdmin = await configManager.isAdministrator();
+      if (!isAdmin && process.platform === 'win32') {
+        console.error('[SafeBrowse] Error: Administrator elevation is required to apply account protection mappings.');
+        process.exit(5); // ERROR_ACCESS_DENIED
+      }
+
+      if (!fs.existsSync(reqPath)) {
+        console.error(`[SafeBrowse] Error: Request file not found: ${reqPath}`);
+        process.exit(2);
+      }
+
+      const raw = fs.readFileSync(reqPath, 'utf8');
+      const data = JSON.parse(raw);
+      const mappings = Array.isArray(data.mappings) ? data.mappings : [];
+      const deviceId = data.deviceId || 'dev-local';
+      const deviceName = data.deviceName || 'Family Laptop';
+
+      await accountManager.saveProfileMappingsTransaction(mappings, deviceId, deviceName, {
+        isElevated: true,
+      });
+
+      try {
+        fs.unlinkSync(reqPath);
+      } catch {}
+
+      console.log('[SafeBrowse] Successfully applied and persisted account mappings.');
+      process.exit(0);
+    } catch (err: any) {
+      console.error(`[SafeBrowse] Failed to apply mappings: ${err.message}`);
+      process.exit(1);
+    }
   }
 
   if (args.includes('gui') || args.includes('--gui')) {

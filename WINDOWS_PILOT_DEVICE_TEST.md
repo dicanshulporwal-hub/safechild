@@ -1,6 +1,6 @@
 # SafeBrowse Windows Pilot v1.0 — Device & Account Manual Verification Protocol
 
-**Version:** 1.0.0-pilot  
+**Version:** 1.0.1-pilot  
 **Classification:** Pilot Ready for Single-Active-User Deployment  
 **Repository:** `dicanshulporwal-hub/safechild`  
 **Branch:** `feature/stage11-step4-device-enforcement`  
@@ -85,3 +85,32 @@ This document provides a comprehensive 30-point physical and automated verificat
 6. Verify the device card badge displays `⚠️ Attention Required` and `Degraded (Multiple Sessions)`.
 7. Sign out the background `acer` account.
 8. Verify that the banner disappears and status returns to `Protected`.
+
+### Procedure 4: Family Profile Resilience & Dropdown Verification
+1. Open `http://127.0.0.1:8885` and click **Reconfigure Accounts**.
+2. Verify that the loading indicator `"Loading family profiles..."` appears momentarily while accounts and cloud profiles load.
+3. Confirm that each interactive human Windows account (`DIC`, `Manjari`, `Rahul`, `acer`) appears in the list.
+4. Verify that non-interactive sandbox identities (`CodexSandboxOffline`, `CodexSandboxOnline`, `WindowsSandbox`) and service identities are absent.
+5. Verify that the current active console account is marked clearly: `DIC — ACTIVE USER`.
+6. Confirm that the dropdown list for each account displays:
+   - `Parent / Unmanaged (Protection OFF)`
+   - Each synchronized child profile (e.g. `Manjari (Child Profile)`, `Rahul (Child Profile)`).
+7. Disconnect network or simulate backend offline. Refresh or click **Retry**:
+   - Verify that the blue notice appears: `ℹ Using previously synchronized family profiles.`
+   - Confirm that child profile dropdowns remain fully populated from local persistent cache (`family-profiles-cache.json`).
+
+### Procedure 5: Privilege Separation & Secure Save Settings Verification
+1. As a standard Windows user (or non-elevated desktop session), open `http://127.0.0.1:8885`.
+2. Change a child mapping (e.g., assign `Rahul` to child profile `Rahul`).
+3. Click **Save Settings & Protect Laptop**.
+4. Confirm that the button changes to `Saving settings...` and a Windows User Account Control (UAC) prompt appears requesting administrator credentials/approval.
+5. **Test Cancel (Child Attempt):**
+   - Click "No" or cancel the UAC prompt.
+   - Verify that the application displays: `Administrator approval is required to change account protection.`
+   - Confirm that previous mappings remain unaltered.
+6. **Test Approve (Parent Approval):**
+   - Click "Save Settings & Protect Laptop" again and approve the UAC elevation prompt (click "Yes" or enter admin PIN/password).
+   - Verify that the success alert appears: `Shared laptop settings saved successfully!`
+   - Verify that the application navigates smoothly to the Status screen.
+   - Confirm that `C:\ProgramData\SafeBrowse\profile-mappings.json` is updated atomically with verified ACLs and zero `Access is denied` errors.
+

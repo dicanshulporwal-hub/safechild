@@ -1,7 +1,7 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <?ifndef ProductVersion?>
-  <?define ProductVersion = "1.0.0.0" ?>
+  <?define ProductVersion = "1.0.1.0" ?>
   <?endif?>
   <Package
       Name="SafeBrowse Child Pilot"
@@ -73,7 +73,11 @@
     <StandardDirectory Id="CommonAppDataFolder">
       <Directory Id="CommonAppDataSafeBrowse" Name="SafeBrowse">
         <Component Id="CreateProgramDataDir" Guid="8F4F2BD7-05A4-493D-B265-B6D789F4AB66">
-          <CreateFolder />
+          <CreateFolder>
+            <util:PermissionEx User="Users" GenericRead="yes" GenericExecute="yes" />
+            <util:PermissionEx User="Administrators" GenericAll="yes" />
+            <util:PermissionEx User="SYSTEM" GenericAll="yes" />
+          </CreateFolder>
         </Component>
         <Directory Id="CommonAppDataLogs" Name="logs">
           <Component Id="CreateLogsDir" Guid="9A5A3CE8-16B5-4A4E-C376-C7E890A5BC77">

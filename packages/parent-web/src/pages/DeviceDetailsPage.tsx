@@ -361,25 +361,36 @@ export const DeviceDetailsPage: React.FC<DeviceDetailsPageProps> = ({ childrenLi
 
           <div className="space-y-3 text-xs">
             <div className="flex items-center justify-between">
-              <span className="text-slate-400">Active Windows Account:</span>
-              <span className="font-bold text-white">
-                {device.windowsAccountName || 'Desktop Console (Default)'}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between">
-              <span className="text-slate-400">Assigned SafeBrowse Profile:</span>
+              <span className="text-slate-400">Assigned Child:</span>
               <span className="font-bold text-indigo-300">{child?.name || 'Unassigned'}</span>
             </div>
 
             <div className="flex items-center justify-between">
-              <span className="text-slate-400">Enforcement Mode:</span>
+              <span className="text-slate-400">Child Policy:</span>
+              <span className="font-mono text-emerald-400">v{device.activePolicyVersion || policy?.version || 1} configured</span>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <span className="text-slate-400">Current Session:</span>
+              <span className="font-bold text-white">
+                {device.windowsAccountName
+                  ? `${device.windowsAccountName} (${isBypass ? 'Parent / Unmanaged' : 'Child / Managed'})`
+                  : (isBypass ? 'Parent / Unmanaged' : 'Child / Managed')}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <span className="text-slate-400">Protection:</span>
               <span
                 className={`font-semibold ${
-                  isBypass ? 'text-blue-400' : 'text-emerald-400'
+                  isBypass ? 'text-blue-400' : hasMultiple ? 'text-amber-400' : 'text-emerald-400'
                 }`}
               >
-                {isBypass ? 'Parent Transparent Bypass' : 'Enforced Child Protection'}
+                {isBypass
+                  ? 'Not currently enforcing child policy'
+                  : hasMultiple
+                  ? 'Attention Required (Multiple sessions)'
+                  : 'Protected'}
               </span>
             </div>
 

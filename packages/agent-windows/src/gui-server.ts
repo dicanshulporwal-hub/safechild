@@ -1,18 +1,34 @@
 import http from 'http';
 import url from 'url';
-import { exec } from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import { configManager, DeviceConfig, ConfigManager } from './config-manager';
-import { accountManager, WindowsProfileMapping } from './account-manager';
+import {
+  accountManager,
+  WindowsAccountManager,
+  WindowsAccount,
+  WindowsProfileMapping,
+} from './account-manager';
 import { sessionMonitor } from './session-monitor';
 import { evaluateSystemStatus } from './agent-cli';
 import { logServiceMessage } from './network-manager';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export class GuiServer {
   private server: http.Server | null = null;
   private port: number = 8885;
+  private configMgr: ConfigManager;
+  private accountMgr: WindowsAccountManager;
+
+  constructor(customConfigMgr?: ConfigManager, customAccountMgr?: WindowsAccountManager) {
+    this.configMgr = customConfigMgr || configManager;
+    this.accountMgr = customAccountMgr || accountManager;
+  }
 
   public async start(port: number = 8885): Promise<number> {
     this.port = port;
@@ -36,10 +52,10 @@ export class GuiServer {
         // API Routes
         if (pathname === '/api/status' && req.method === 'GET') {
           try {
-            const config = await configManager.loadDeviceConfig();
-            const mappings = await accountManager.loadProfileMappings();
-            const activeSession = await accountManager.getActiveConsoleSession();
-            const activePolicy = await accountManager.resolveUserPolicy(activeSession.sid, activeSession.username);
+            const config = await this.configMgr.loadDeviceConfig();
+            const mappings = await this.accountMgr.loadProfileMappings();
+            const activeSession = await this.accountMgr.getActiveConsoleSession();
+            const activePolicy = await this.accountMgr.resolveUserPolicy(activeSession.sid, activeSession.username);
             let systemStatus: any = null;
             try {
               systemStatus = await evaluateSystemStatus();
@@ -89,9 +105,9 @@ export class GuiServer {
 
         if (pathname === '/api/accounts' && req.method === 'GET') {
           try {
-            const accounts = await accountManager.discoverAccounts();
-            const activeSession = await accountManager.getActiveConsoleSession();
-            const marked = accounts.map((acc) => ({
+            const accounts = await this.accountMgr.discoverAccounts();
+            const activeSession = await this.accountMgr.getActiveConsoleSession();
+            const marked = accounts.map((acc: WindowsAccount) => ({
               ...acc,
               isCurrentConsoleUser:
                 (activeSession.sid && acc.sid === activeSession.sid) ||
@@ -109,33 +125,35 @@ export class GuiServer {
 
         if (pathname === '/api/family-profiles' && req.method === 'GET') {
           try {
-            const config = await configManager.loadDeviceConfig();
+            const config = await this.configMgr.loadDeviceConfig();
             if (!config) {
               res.writeHead(400, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: 'Device is not yet paired.' }));
               return;
             }
 
-            const fetchUrl = `${config.backendUrl}/api/devices/family-profiles`;
-            const resp = await fetch(fetchUrl, {
-              headers: {
-                'x-device-id': config.deviceId,
-                'x-device-token': config.deviceToken,
-              },
-            });
+            const profileRes = await this.accountMgr.fetchFamilyProfilesWithResilience(
+              config.backendUrl,
+              config.deviceId,
+              config.deviceToken
+            );
 
-            if (!resp.ok) {
-              res.writeHead(resp.status, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: 'Failed to fetch family profiles from cloud.' }));
-              return;
-            }
-
-            const profiles = await resp.json();
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ profiles }));
+            res.end(
+              JSON.stringify({
+                profiles: profileRes.profiles,
+                fromCache: Boolean(profileRes.fromCache),
+                cachedAt: profileRes.cachedAt,
+              })
+            );
           } catch (e: any) {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: e.message }));
+            res.writeHead(502, { 'Content-Type': 'application/json' });
+            res.end(
+              JSON.stringify({
+                error: e.message || 'Unable to load family profiles. Check SafeBrowse connection and retry.',
+                profiles: [],
+              })
+            );
           }
           return;
         }
@@ -192,7 +210,7 @@ export class GuiServer {
                 pairedAt: new Date().toISOString(),
               };
 
-              await configManager.saveDeviceConfig(newConfig);
+              await this.configMgr.saveDeviceConfig(newConfig);
 
               // Signal SafeBrowse service to start or reload if on Windows
               if (process.platform === 'win32') {
@@ -228,19 +246,78 @@ export class GuiServer {
             try {
               const data = JSON.parse(body);
               const mappings: WindowsProfileMapping[] = Array.isArray(data.mappings) ? data.mappings : [];
-              const config = await configManager.loadDeviceConfig();
+              const config = await this.configMgr.loadDeviceConfig();
+              const deviceId = config?.deviceId || 'dev-local';
+              const deviceName = config?.deviceName || 'Family Laptop';
 
-              await accountManager.saveProfileMappings(
-                mappings,
-                config?.deviceId || 'dev-local',
-                config?.deviceName || 'Family Laptop'
+              const isAdmin = await this.configMgr.isAdministrator();
+
+              if (isAdmin || process.platform !== 'win32') {
+                await this.accountMgr.saveProfileMappingsTransaction(
+                  mappings,
+                  deviceId,
+                  deviceName,
+                  { isElevated: true }
+                );
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true }));
+                return;
+              }
+
+              // Unelevated execution on Windows: invoke elevated helper via UAC
+              const tempReqFile = path.join(
+                os.tmpdir(),
+                `safebrowse-mappings-req-${Date.now()}-${process.pid}.json`
               );
 
-              // Trigger immediate session re-evaluation and DNS cache flush
-              await sessionMonitor.checkSessionNow();
+              fs.writeFileSync(
+                tempReqFile,
+                JSON.stringify({ mappings, deviceId, deviceName }, null, 2),
+                'utf8'
+              );
 
-              res.writeHead(200, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ success: true }));
+              const psPath = this.configMgr.getPowerShellPath();
+              const exePath = process.argv[0];
+              const isNode = exePath.toLowerCase().endsWith('node.exe') || exePath.toLowerCase().endsWith('node');
+
+              const psCmd = isNode
+                ? `Start-Process -FilePath "${exePath}" -ArgumentList "${process.argv[1]} --apply-mappings \\"${tempReqFile}\\"" -Verb RunAs -Wait -PassThru`
+                : `Start-Process -FilePath "${exePath}" -ArgumentList "--apply-mappings \\"${tempReqFile}\\"" -Verb RunAs -Wait -PassThru`;
+
+              try {
+                await execFileAsync(psPath, [
+                  '-NoLogo',
+                  '-NoProfile',
+                  '-NonInteractive',
+                  '-ExecutionPolicy',
+                  'Bypass',
+                  '-Command',
+                  psCmd,
+                ]);
+
+                // Verify file was persisted
+                const reloaded = await this.accountMgr.loadProfileMappings();
+                if (reloaded.length === mappings.length) {
+                  res.writeHead(200, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ success: true }));
+                  return;
+                }
+
+                res.writeHead(403, { 'Content-Type': 'application/json' });
+                res.end(
+                  JSON.stringify({
+                    error: 'Administrator approval is required to change account protection.',
+                  })
+                );
+              } catch (uacErr: any) {
+                try { if (fs.existsSync(tempReqFile)) fs.unlinkSync(tempReqFile); } catch {}
+                res.writeHead(403, { 'Content-Type': 'application/json' });
+                res.end(
+                  JSON.stringify({
+                    error: 'Administrator approval is required to change account protection.',
+                  })
+                );
+              }
             } catch (e: any) {
               res.writeHead(500, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: e.message }));
@@ -536,6 +613,9 @@ export class GuiServer {
         SafeBrowse detected these Windows accounts. Choose which profile to apply to each account. Parent accounts can remain unmanaged with zero restrictions.
       </p>
 
+      <div id="profilesBanner" style="display:none; margin-bottom: 16px; padding: 12px 16px; border-radius: 12px; font-size: 13px;"></div>
+      <div id="accountsLoading" style="display:none; text-align: center; padding: 30px; color: var(--text-muted); font-size: 14px;">Loading family profiles...</div>
+
       <table class="account-table">
         <thead>
           <tr style="color: var(--text-muted); font-size: 12px; font-weight: 700; text-transform: uppercase; text-align: left;">
@@ -550,8 +630,9 @@ export class GuiServer {
       </table>
 
       <div class="button-row">
-        <button class="btn btn-primary" onclick="saveMappings()">Save Settings & Protect Laptop</button>
+        <button class="btn btn-primary" id="btnSaveMappings" onclick="saveMappings()">Save Settings & Protect Laptop</button>
         <button class="btn btn-secondary" onclick="showScreen('screenStatus')">Skip to Status</button>
+        <button class="btn btn-secondary" id="btnRetryProfiles" onclick="loadAccountsScreen()" style="display:none;">Retry</button>
       </div>
     </div>
 
@@ -688,20 +769,59 @@ export class GuiServer {
     }
 
     async function loadAccountsScreen() {
+      const banner = document.getElementById('profilesBanner');
+      const loading = document.getElementById('accountsLoading');
+      const table = document.querySelector('.account-table');
+      const saveBtn = document.getElementById('btnSaveMappings');
+      const retryBtn = document.getElementById('btnRetryProfiles');
+
+      if (banner) banner.style.display = 'none';
+      if (retryBtn) retryBtn.style.display = 'none';
+      if (loading) loading.style.display = 'block';
+      if (table) table.style.display = 'none';
+      if (saveBtn) saveBtn.disabled = true;
+
       try {
         const [accRes, profRes, statRes] = await Promise.all([
-          fetch('/api/accounts').then(r => r.json()),
-          fetch('/api/family-profiles').then(r => r.json()).catch(() => ({ profiles: [] })),
-          fetch('/api/status').then(r => r.json())
+          fetch('/api/accounts').then(r => r.json()).catch(() => ({ accounts: [] })),
+          fetch('/api/family-profiles').then(r => r.json()).catch(err => ({ error: err.message, profiles: [] })),
+          fetch('/api/status').then(r => r.json()).catch(() => ({}))
         ]);
 
         appState.accounts = accRes.accounts || [];
-        appState.familyProfiles = profRes.profiles || [];
         appState.mappings = statRes.mappings || [];
+
+        if (profRes.error && (!profRes.profiles || profRes.profiles.length === 0)) {
+          // Cloud fetch failed and no cache available
+          appState.familyProfiles = [];
+          if (banner) {
+            banner.style.display = 'flex';
+            banner.style.alignItems = 'center';
+            banner.style.justifyContent = 'space-between';
+            banner.style.background = 'rgba(239, 68, 68, 0.15)';
+            banner.style.border = '1px solid rgba(239, 68, 68, 0.3)';
+            banner.style.color = '#fca5a5';
+            banner.innerHTML = '<span>⚠️ Unable to load family profiles. Check SafeBrowse connection and retry.</span>';
+          }
+          if (retryBtn) retryBtn.style.display = 'inline-block';
+        } else {
+          appState.familyProfiles = profRes.profiles || [];
+          if (profRes.fromCache && banner) {
+            banner.style.display = 'block';
+            banner.style.background = 'rgba(59, 130, 246, 0.15)';
+            banner.style.border = '1px solid rgba(59, 130, 246, 0.3)';
+            banner.style.color = '#93c5fd';
+            banner.innerText = 'ℹ Using previously synchronized family profiles.';
+          }
+        }
 
         renderAccountsTable();
       } catch (e) {
         showAlert('Failed to load accounts: ' + e.message, true);
+      } finally {
+        if (loading) loading.style.display = 'none';
+        if (table) table.style.display = 'table';
+        if (saveBtn) saveBtn.disabled = false;
       }
     }
 
@@ -728,14 +848,17 @@ export class GuiServer {
         });
 
         const isProtected = Boolean(selectedChildId);
+        const isCurrent = Boolean(acc.isCurrentConsoleUser);
 
         tr.innerHTML =
           '<td>' +
             '<div class="user-pill">' +
               acc.name +
-              (acc.isCurrentConsoleUser ? ' <span class="badge-current">ACTIVE USER</span>' : '') +
+              (isCurrent ? ' <span class="badge-current">ACTIVE USER</span>' : '') +
             '</div>' +
-            '<div class="sid-text" style="color: #64748b; font-size: 11px;">Standard Windows Account</div>' +
+            '<div class="sid-text" style="color: #64748b; font-size: 11px;">' +
+              (isCurrent ? 'Active Console Account' : 'Standard Windows Account') +
+            '</div>' +
           '</td>' +
           '<td>' +
             '<select id="sel_' + idx + '" onchange="updateRowProtection(' + idx + ')">' +
@@ -761,10 +884,16 @@ export class GuiServer {
     }
 
     async function saveMappings() {
+      const saveBtn = document.getElementById('btnSaveMappings');
+      if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.innerText = 'Saving settings...';
+      }
+
       const mappings = [];
       appState.accounts.forEach((acc, idx) => {
         const sel = document.getElementById('sel_' + idx);
-        const childId = sel.value || null;
+        const childId = sel ? (sel.value || null) : null;
         const profile = appState.familyProfiles.find(p => p.id === childId);
 
         mappings.push({
@@ -782,15 +911,23 @@ export class GuiServer {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ mappings })
         });
+        const data = await res.json().catch(() => ({}));
 
-        if (res.ok) {
+        if (res.ok && data.success) {
           showAlert('Shared laptop settings saved successfully!');
           setTimeout(() => showScreen('screenStatus'), 800);
+        } else if (res.status === 403) {
+          showAlert(data.error || 'Administrator approval is required to change account protection.', true);
         } else {
-          showAlert('Failed to save settings.', true);
+          showAlert(data.error || 'Failed to save settings.', true);
         }
       } catch (e) {
         showAlert('Network error: ' + e.message, true);
+      } finally {
+        if (saveBtn) {
+          saveBtn.disabled = false;
+          saveBtn.innerText = 'Save Settings & Protect Laptop';
+        }
       }
     }
 

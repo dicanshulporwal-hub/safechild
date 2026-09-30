@@ -93,6 +93,30 @@ export class ConfigManager {
     return `icacls "${targetDir}" /inheritance:r /grant:r "SYSTEM":(OI)(CI)F /grant:r "BUILTIN\\Administrators":(OI)(CI)F /remove:g "Users" /q`;
   }
 
+  private mockIsAdministrator: boolean | null = null;
+
+  public setMockIsAdministratorForTesting(isAdmin: boolean | null): void {
+    this.mockIsAdministrator = isAdmin;
+  }
+
+  /**
+   * Determines if the current process is running with elevated / administrative privileges.
+   */
+  public async isAdministrator(): Promise<boolean> {
+    if (this.mockIsAdministrator !== null) {
+      return this.mockIsAdministrator;
+    }
+    if (this.getPlatform() !== 'win32' || process.platform !== 'win32') {
+      return true; // Non-Windows dev/test environment defaults to permitted
+    }
+    try {
+      execSync('net session', { stdio: 'ignore' });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Applies secure Windows ACLs to target directory.
    * Fails closed on Windows if permissions cannot be secured.
@@ -115,16 +139,26 @@ export class ConfigManager {
   }
 
   /**
-   * Ensures base directories exist with appropriate permissions.
-   * On Windows, enforces restrictive ACLs (SYSTEM and Administrators Full Control only).
+   * Ensures base directories exist.
+   * Privileged machine ACLs are decoupled and owned strictly by installer & LocalSystem service.
    */
   public ensureDirectories(): void {
     const dirs = [this.getBaseDir(), this.getLogsDir(), this.getCacheDir()];
     for (const dir of dirs) {
       if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
+        try {
+          fs.mkdirSync(dir, { recursive: true });
+        } catch {}
       }
     }
+  }
+
+  /**
+   * Applies machine-level ACL hardening (SYSTEM and Administrators Full Control only).
+   * Owned strictly by the privileged LocalSystem service upon startup or installer.
+   */
+  public hardenMachineDirectories(): void {
+    this.ensureDirectories();
     this.applyWindowsAcls(this.getBaseDir());
   }
 
@@ -459,6 +493,9 @@ export class ConfigManager {
    */
   public async saveDeviceConfig(config: DeviceConfig): Promise<void> {
     this.ensureDirectories();
+    if (process.platform === 'win32' || this.getPlatform() === 'win32') {
+      this.applyWindowsAcls(this.getBaseDir());
+    }
     const configPath = this.getConfigFilePath();
 
     const validatedUrl = this.validateBackendUrl(config.backendUrl || ConfigManager.DEFAULT_PILOT_URL);
