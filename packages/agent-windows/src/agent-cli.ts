@@ -16,6 +16,12 @@ import { promisify } from 'util';
 const execAsync = promisify(exec);
 
 async function pairDevice(args: string[]): Promise<void> {
+  const isAdmin = await configManager.isAdministrator();
+  if (!isAdmin && process.platform === 'win32') {
+    console.error('[SafeBrowse] FAILURE: Administrator elevation is required to pair device.');
+    process.exit(5); // ERROR_ACCESS_DENIED
+  }
+
   const pairIdx = args.indexOf('--pair') !== -1 ? args.indexOf('--pair') : args.indexOf('--pairing-code');
   const code = args[pairIdx + 1];
   if (!code || code.startsWith('-')) {
@@ -54,7 +60,7 @@ async function pairDevice(args: string[]): Promise<void> {
         code,
         deviceName: name,
         platform: 'windows',
-        agentVersion: '1.0.0',
+        agentVersion: '1.0.2',
       }),
     });
 
@@ -81,6 +87,13 @@ async function pairDevice(args: string[]): Promise<void> {
     };
 
     await configManager.saveDeviceConfig(config);
+    await configManager.hardenMachineDirectories();
+
+    try {
+      if (data.device.deviceToken) {
+        await accountManager.fetchFamilyProfilesWithResilience(backendUrl, config.deviceId, config.deviceToken);
+      }
+    } catch {}
 
     console.log('--------------------------------------------------');
     console.log('[SafeBrowse] SUCCESS: Device successfully paired!');
@@ -822,6 +835,7 @@ async function main() {
     console.log('SafeBrowse Family Protection Windows Agent');
     console.log('Usage:');
     console.log('  SafeBrowseChild-Pilot.exe gui                          # Launch SafeBrowse Family Protection GUI');
+    console.log('  SafeBrowseChild-Pilot.exe --attach-device              # Launch Administrator Device Attachment Wizard');
     console.log('  SafeBrowseChild-Pilot.exe --configure-accounts         # Launch Administrator Account Configuration GUI');
     console.log('  SafeBrowseChild-Pilot.exe --pair <CODE> [--name <NAME>] [--backend-url <URL>]');
     console.log('  SafeBrowseChild-Pilot.exe --accounts                   # Discover Windows accounts & mappings');
@@ -829,6 +843,29 @@ async function main() {
     console.log('  SafeBrowseChild-Pilot.exe --status                     # Inspect system & protection status');
     console.log('  SafeBrowseChild-Pilot.exe --emergency-restore          # Restore network DNS & firewall');
     process.exit(0);
+  }
+
+  if (args.includes('--attach-device') || args.includes('--pair-device-gui')) {
+    const isAdmin = await configManager.isAdministrator();
+    if (!isAdmin && process.platform === 'win32') {
+      console.error('[SafeBrowse] Error: Administrator elevation is required to attach device.');
+      process.exit(5); // ERROR_ACCESS_DENIED
+    }
+
+    const codeIdx = args.indexOf('--code');
+    const prefillCode = codeIdx !== -1 && args[codeIdx + 1] ? args[codeIdx + 1] : '';
+
+    const nameIdx = args.indexOf('--name');
+    const prefillName = nameIdx !== -1 && args[nameIdx + 1] ? args[nameIdx + 1] : 'Family Laptop';
+
+    console.log('[SafeBrowse] Starting SafeBrowse Administrator Device Attachment Wizard...');
+    const { ElevatedPairServer } = await import('./elevated-pair-server');
+    const server = new ElevatedPairServer();
+    server.setPrefill(prefillCode, prefillName);
+    const port = await server.start(8887);
+    await server.launchWindow(prefillCode, prefillName);
+    console.log(`[SafeBrowse] Elevated device attachment running at http://127.0.0.1:${port}.`);
+    return;
   }
 
   if (args.includes('--configure-accounts')) {

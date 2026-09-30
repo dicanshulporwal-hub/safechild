@@ -192,11 +192,22 @@ export class GuiServer {
         }
 
         if (pathname === '/api/pair' && req.method === 'POST') {
+          const isAdmin = await this.configMgr.isAdministrator();
+          if (!isAdmin) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(
+              JSON.stringify({
+                error: 'Administrator approval is required to attach this device.',
+              })
+            );
+            return;
+          }
+
           let body = '';
           req.on('data', (c) => (body += c));
           req.on('end', async () => {
             try {
-              const data = JSON.parse(body);
+              const data = JSON.parse(body || '{}');
               const code = (data.code || '').trim();
               const deviceName = (data.deviceName || 'Family Laptop').trim();
               const backendUrl = data.backendUrl || ConfigManager.DEFAULT_PILOT_URL;
@@ -214,14 +225,20 @@ export class GuiServer {
                   code,
                   deviceName,
                   platform: 'windows',
-                  agentVersion: '1.0.0',
+                  agentVersion: '1.0.2',
                 }),
               });
 
               if (!claimRes.ok) {
                 const errData: any = await claimRes.json().catch(() => ({ error: 'Invalid pairing code' }));
-                res.writeHead(claimRes.status, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: errData.error || 'Server rejected pairing code' }));
+                const status = claimRes.status;
+                let userFriendlyError = errData.error || 'Server rejected pairing code';
+                if (status === 400 || status === 404) {
+                  userFriendlyError =
+                    'The pairing code is invalid or has expired. Please generate a new code from the Parent Dashboard.';
+                }
+                res.writeHead(status, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: userFriendlyError }));
                 return;
               }
 
@@ -244,6 +261,13 @@ export class GuiServer {
               };
 
               await this.configMgr.saveDeviceConfig(newConfig);
+              await this.configMgr.hardenMachineDirectories();
+
+              try {
+                if (dev.deviceToken) {
+                  await this.accountMgr.fetchFamilyProfilesWithResilience(backendUrl, dev.id, dev.deviceToken);
+                }
+              } catch {}
 
               // Signal SafeBrowse service to start or reload if on Windows
               if (process.platform === 'win32') {
@@ -258,7 +282,7 @@ export class GuiServer {
                   success: true,
                   device: {
                     deviceId: dev.id,
-                    deviceName: dev.name,
+                    deviceName: dev.name || deviceName,
                     childId: dev.childId,
                   },
                   familyProfiles: claimData.familyProfiles || [],
@@ -267,6 +291,64 @@ export class GuiServer {
             } catch (e: any) {
               res.writeHead(500, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: e.message }));
+            }
+          });
+          return;
+        }
+
+        if ((pathname === '/api/launch-pair' || pathname === '/api/launch-attach') && req.method === 'POST') {
+          let body = '';
+          req.on('data', (c) => (body += c));
+          req.on('end', async () => {
+            try {
+              let parsedBody: any = {};
+              try {
+                parsedBody = JSON.parse(body || '{}');
+              } catch {}
+
+              const exePath = process.argv[0];
+              const isNode = exePath.toLowerCase().endsWith('node.exe') || exePath.toLowerCase().endsWith('node');
+              const psPath = this.configMgr.getPowerShellPath();
+
+              if (process.platform === 'win32' && process.env.NODE_ENV !== 'test') {
+                let extraArgs = '';
+                if (parsedBody.code && typeof parsedBody.code === 'string') {
+                  const safeCode = parsedBody.code.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32);
+                  if (safeCode) extraArgs += ` --code ${safeCode}`;
+                }
+                if (parsedBody.deviceName && typeof parsedBody.deviceName === 'string') {
+                  const safeName = parsedBody.deviceName.replace(/[^A-Za-z0-9 _-]/g, '').slice(0, 50);
+                  if (safeName) extraArgs += ` --name "${safeName}"`;
+                }
+
+                const args = isNode
+                  ? `"${process.argv[1]}" --attach-device${extraArgs}`
+                  : `--attach-device${extraArgs}`;
+                const psCmd = `Start-Process -FilePath "${exePath}" -ArgumentList '${args}' -Verb RunAs`;
+                await execFileAsync(psPath, [
+                  '-NoLogo',
+                  '-NoProfile',
+                  '-NonInteractive',
+                  '-ExecutionPolicy',
+                  'Bypass',
+                  '-Command',
+                  psCmd,
+                ]);
+              }
+
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: true, message: 'Administrator elevation requested' }));
+            } catch (e: any) {
+              const msg = (e.stderr || e.message || '').toString();
+              const isCancelled = msg.includes('canceled by the user') || msg.includes('1223');
+              res.writeHead(isCancelled ? 403 : 500, { 'Content-Type': 'application/json' });
+              res.end(
+                JSON.stringify({
+                  error: isCancelled
+                    ? 'Administrator approval is required to attach this device.'
+                    : e.message,
+                })
+              );
             }
           });
           return;
@@ -297,8 +379,16 @@ export class GuiServer {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, message: 'Administrator elevation requested' }));
           } catch (e: any) {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: e.message }));
+            const msg = (e.stderr || e.message || '').toString();
+            const isCancelled = msg.includes('canceled by the user') || msg.includes('1223');
+            res.writeHead(isCancelled ? 403 : 500, { 'Content-Type': 'application/json' });
+            res.end(
+              JSON.stringify({
+                error: isCancelled
+                  ? 'Administrator approval is required to reconfigure accounts.'
+                  : e.message,
+              })
+            );
           }
           return;
         }
@@ -598,9 +688,9 @@ export class GuiServer {
 
     <!-- SCREEN 2: PAIR FAMILY -->
     <div id="screenPair" class="screen">
-      <h2 style="font-size: 22px; font-weight: 800; margin: 0 0 8px 0;">Connect to your Family</h2>
+      <h2 style="font-size: 22px; font-weight: 800; margin: 0 0 8px 0;">Attach Device to Family</h2>
       <p style="color: var(--text-muted); font-size: 14px; margin-bottom: 24px;">
-        Obtain a pairing code from the SafeBrowse Parent Portal (<a href="https://safebrowse.porwal.online" target="_blank" style="color: #60a5fa;">safebrowse.porwal.online</a>) under <strong>Add Device</strong>.
+        Obtain a pairing code from the SafeBrowse Parent Portal (<a href="https://safebrowse.porwal.online" target="_blank" style="color: #60a5fa;">safebrowse.porwal.online</a>) under <strong>Add Device</strong>. Attaching this device requires Administrator approval.
       </p>
 
       <div class="input-group">
@@ -614,7 +704,7 @@ export class GuiServer {
       </div>
 
       <div class="button-row">
-        <button class="btn btn-primary" id="btnPair" onclick="submitPairing()">Connect to Family</button>
+        <button class="btn btn-primary" id="btnPair" onclick="launchElevatedPair()">Attach Device</button>
         <button class="btn btn-secondary" onclick="showScreen('screenWelcome')">Back</button>
       </div>
     </div>
@@ -798,42 +888,62 @@ export class GuiServer {
       showScreen('screenStatus');
     }
 
-    async function submitPairing() {
-      const code = document.getElementById('pairingCode').value.trim();
-      const deviceName = document.getElementById('deviceName').value.trim();
+    async function launchElevatedPair() {
+      const code = (document.getElementById('pairingCode')?.value || '').trim();
+      const deviceName = (document.getElementById('deviceName')?.value || '').trim();
       const btn = document.getElementById('btnPair');
 
-      if (!code) {
-        showAlert('Please enter a valid pairing code.', true);
-        return;
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = 'Requesting elevation...';
       }
-
-      btn.disabled = true;
-      btn.innerText = 'Connecting...';
+      showAlert('Administrator approval requested... Please approve the Windows UAC prompt to attach this device.', false);
 
       try {
-        const res = await fetch('/api/pair', {
+        const res = await fetch('/api/launch-pair', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ code, deviceName })
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
 
         if (res.ok && data.success) {
-          appState.isPaired = true;
-          appState.config = data.device;
-          appState.familyProfiles = data.familyProfiles || [];
-          showAlert('Device paired successfully with family!');
-          setTimeout(() => showScreen('screenAccounts'), 1000);
+          showAlert('Administrator pairing wizard launched. Please complete pairing in the elevated SafeBrowse window.', false);
+          if (pollInterval) clearInterval(pollInterval);
+          let attempts = 0;
+          pollInterval = setInterval(async () => {
+            attempts++;
+            try {
+              const sRes = await fetch('/api/status');
+              const sData = await sRes.json();
+              if (sData.isPaired) {
+                clearInterval(pollInterval);
+                pollInterval = null;
+                appState.isPaired = true;
+                showAlert('Device attached successfully! Welcome to SafeBrowse.');
+                setTimeout(() => showScreen('screenStatus'), 800);
+              }
+            } catch {}
+            if (attempts > 90) {
+              clearInterval(pollInterval);
+              pollInterval = null;
+            }
+          }, 2000);
         } else {
-          showAlert(data.error || 'Pairing failed. Check pairing code.', true);
+          showAlert(data.error || 'Administrator approval is required to attach this device.', true);
         }
       } catch (e) {
-        showAlert('Network error communicating with server: ' + e.message, true);
+        showAlert('Error requesting administrator setup: ' + e.message, true);
       } finally {
-        btn.disabled = false;
-        btn.innerText = 'Connect to Family';
+        if (btn) {
+          btn.disabled = false;
+          btn.innerText = 'Attach Device';
+        }
       }
+    }
+
+    async function submitPairing() {
+      return launchElevatedPair();
     }
 
     async function loadAccountsScreen() {
@@ -1089,6 +1199,7 @@ export class GuiServer {
         .then(r => r.json())
         .then(data => {
           if (data.isPaired) {
+            appState.isPaired = true;
             showScreen('screenStatus');
           } else {
             showScreen('screenWelcome');
@@ -1096,6 +1207,21 @@ export class GuiServer {
         })
         .catch(() => showScreen('screenWelcome'));
     });
+
+    // Background watcher for elevated pairing completion
+    setInterval(async () => {
+      if (!appState.isPaired) {
+        try {
+          const res = await fetch('/api/status');
+          const data = await res.json();
+          if (data && data.isPaired) {
+            appState.isPaired = true;
+            showAlert('Device attached successfully! Welcome to SafeBrowse.');
+            showScreen('screenStatus');
+          }
+        } catch {}
+      }
+    }, 3000);
   </script>
 </body>
 </html>`;

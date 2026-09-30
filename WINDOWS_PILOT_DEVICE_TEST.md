@@ -56,6 +56,13 @@ This document provides a comprehensive 30-point physical and automated verificat
 | **W36** | Security Boundary | Normal GUI Read-Only Invariant | Unelevated `POST /api/mappings` rejected with 403; normal GUI view-only | Automated & Manual |
 | **W37** | Privilege Separation | Dedicated Elevated Configuration GUI (`--configure-accounts`) | UAC-launched elevated window loads secure config, fetches live profiles | Automated & Manual |
 | **W38** | Anti-Tamper | Zero-Staging Persistence | Saves directly within elevated process; 0 temporary staging files | Automated |
+| **W39** | Privilege Separation | Normal GUI Attach Device UAC Trigger | Clicking "Attach Device" launches UAC elevation (`Start-Process -Verb RunAs`) | Automated & Manual |
+| **W40** | Failure Resilience | UAC Cancellation Handling | Cancelling UAC shows "Administrator approval is required"; 0 code burned | Automated & Manual |
+| **W41** | Security Boundary | Unelevated Pairing Rejection | Direct `POST /api/pair` from unelevated process returns 403 Forbidden | Automated |
+| **W42** | Privilege Separation | Elevated Pairing Server (`--attach-device`) | Dedicated port 8887 with Administrator badge and secure claim handler | Automated & Manual |
+| **W43** | Cryptographic Storage | DPAPI Machine Scope Device Credential Encryption | `deviceToken` encrypted with LocalMachine DPAPI, stored in `secure/` only | Automated |
+| **W44** | State Separation | Zero-Secret State Storage | `state/sanitized-config.json` written with `isPaired: true`, 0 tokens | Automated |
+| **W45** | Reactive Refresh | Normal GUI Background Auto-Detection | Unelevated GUI on `8885` automatically switches from Not Paired to Paired | Automated & Manual |
 
 ---
 
@@ -68,12 +75,15 @@ This document provides a comprehensive 30-point physical and automated verificat
    msiexec /i SafeBrowseChild-Pilot.msi /qn
    Start-Service SafeBrowseChildService
    ```
-3. Open a browser and navigate to `http://127.0.0.1:8885`.
-4. Verify that the Setup screen opens cleanly and lists discovered Windows accounts with friendly names.
+3. Open a browser and navigate to `http://127.0.0.1:8885` (or double-click desktop shortcut).
+4. Verify that the Setup screen opens cleanly and shows "Connect to your Family" or "Attach Device".
 5. In the Parent Portal (`https://safebrowse.porwal.online`), go to **Devices** (`/devices`) and click **Pair New Device**.
-6. Select the child profile (e.g. "Manjari") and generate a 6-digit code.
-7. Enter the code in the local setup window on the laptop and click **Pair Device**.
-8. Verify that the laptop status screen transitions to **● Active Protection** (or **⚠️ Attention Required** if multiple users are signed in).
+6. Select the child profile (e.g. "Manjari") and generate a pairing code (e.g. `SB-XXXX-XXXX`).
+7. In the local setup window, click **Attach Device**.
+8. Confirm Windows UAC elevation prompt ("Do you want to allow this app to make changes to your device?").
+9. Enter the pairing code in the elevated SafeBrowse Setup Wizard window on port `8887` and click **Attach Device & Protect Laptop**.
+10. Verify that the device claims successfully, encrypts credentials, starts `SafeBrowseChildService`, and closes the elevated window.
+11. Verify that the unelevated GUI on `8885` automatically detects the paired state and transitions to the **Protection Status** screen showing active protection.
 
 ### Procedure 2: Single-Active-User Isolation & User Switching
 1. Log in as child user `Manjari`.

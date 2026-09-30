@@ -461,5 +461,80 @@ The `%TEMP%` / nonce mapping-save staging mechanism is retired from the producti
   - `SafeBrowseServiceHost.exe` (37.00 KiB): `9b28e9b96d6c6b40171098961289872c92391f983f08900a0bc509d632ced345`
   - `SHA256SUMS.txt` (481 B): `a8d13c67d77cc95cf35fbb805626da4ae88950d4812328ba8beff85392efef54`
 
+---
+
+## 22. SafeBrowse Windows Pilot v1.0.2 Patch Release — UAC-Isolated Device Attachment Wizard
+
+### 22.1 Physical Device Failure & Root Cause Analysis
+During physical device validation of `v1.0.1-pilot`, initial device attachment/pairing from the normal SafeBrowse GUI (`http://127.0.0.1:8885`) failed with:
+`Access is denied` (EACCES).
+
+**Root Cause:**
+1. The normal GUI at `127.0.0.1:8885` runs under the logged-in standard Windows account (unelevated), as designed.
+2. In `v1.0.1`, `POST /api/pair` directly claimed the pairing code from the backend and called `configManager.saveDeviceConfig()`.
+3. `saveDeviceConfig()` writes machine credentials to `C:\ProgramData\SafeBrowse\secure\device-config.json` and enforces machine ACLs (`SYSTEM:F`, `BUILTIN\Administrators:F`, `Users: None`).
+4. Because the standard user lacks write permissions to `secure/`, the write failed with `Access is denied`.
+5. Crucially, claiming the code before elevation caused the one-time pairing code to be consumed on the cloud backend even if the local write failed.
+
+### 22.2 Architectural Resolution: Dedicated Elevated Pairing Wizard
+To enforce strict privilege separation and protect one-time pairing codes:
+1. **Normal GUI (`http://127.0.0.1:8885`):**
+   - Strictly view-only and unelevated.
+   - Direct `POST /api/pair` from an unelevated process is blocked and returns `403 Forbidden` (`Administrator approval is required to attach this device`).
+   - The "Attach Device" button calls `POST /api/launch-pair`, invoking `Start-Process -FilePath "SafeBrowseChild-Pilot.exe" -ArgumentList "--attach-device" -Verb RunAs`.
+   - If the user cancels the Windows UAC prompt, `POST /api/launch-pair` returns a descriptive error: `Administrator approval is required to attach this device.` Zero pairing codes are burned in the cloud, and zero partial local files are created.
+   - Begins polling `GET /api/status` every 2 seconds. When `isPaired: true` is reported, it automatically transitions from "Not Paired" to the active "Protection Status" screen.
+   - A background interval also continuously monitors `GET /api/status` so external pairing automatically refreshes the UI.
+
+2. **Elevated Pairing Server (`ElevatedPairServer` on port `8887`):**
+   - Launched exclusively via UAC elevation (`SafeBrowseChild-Pilot.exe --attach-device` or `--pair-device-gui`).
+   - Enforces administrator check (`configManager.isAdministrator()`).
+   - Serves a dedicated, beautiful setup wizard HTML page with an `🛡️ ADMINISTRATOR` security badge.
+   - The user inputs the pairing code and computer display name directly in the elevated UI.
+   - Route `POST /api/claim-and-pair`:
+     1. Claims code from `${backendUrl}/api/devices/claim`.
+     2. Handles failure modes distinctly (expired/invalid code, cloud unreachable, server errors).
+     3. Encrypts `deviceToken` using Windows machine-scope DPAPI (`[System.Security.Cryptography.ProtectedData]`).
+     4. Persists full configuration to `secure/device-config.json` (zero plaintext tokens on disk).
+     5. Persists sanitized configuration to `state/sanitized-config.json` (zero secrets, readable by standard users).
+     6. Hardens machine directory ACLs (`configManager.hardenMachineDirectories()`).
+     7. Pre-caches family child profiles for immediate account mapping readiness.
+     8. Signals `SafeBrowseChildService` to start (`sc.exe start SafeBrowseChildService`) and verifies it is in `RUNNING` state.
+     9. Triggers initial child policy synchronization.
+     10. Returns success and automatically closes the elevated wizard window.
+
+3. **CLI Headless Pairing:**
+   - `SafeBrowseChild-Pilot.exe --pair <CODE> [--name <NAME>] [--backend-url <URL>]` enforces `isAdministrator()`, exits with code 5 (`ERROR_ACCESS_DENIED`) if non-elevated, and completes automated pairing when elevated.
+
+### 22.3 Verification Matrix & Regression Coverage
+- Created dedicated test suite: `packages/agent-windows/tests/elevated-pairing-and-privilege.test.ts` (15 physical & regression tests).
+- Automated test coverage:
+  1. Normal GUI opens unelevated without requiring administrative rights.
+  2. Normal GUI cannot directly write secure config via `POST /api/pair` (returns 403 Forbidden).
+  3. Normal GUI Attach Device triggers UAC request via `POST /api/launch-pair`.
+  4. Cancelling UAC leaves zero configuration and does not consume pairing code.
+  5. Elevated pairing process starts on dedicated port `8887` and renders administrator UI.
+  6. Valid code claims device, persists DPAPI secure config, and sanitizes state.
+  7. Invalid or expired pairing code is rejected with user-friendly error without writing files.
+  8. Invariant: `deviceToken` is never exposed in normal GUI status or API endpoints.
+  9. Invariant: `deviceToken` is never written plaintext to disk (only DPAPI ciphertext).
+  10. Invariant: `sanitized-config.json` contains zero secrets or encrypted tokens.
+  11. `SafeBrowseChildService` start and verification returns clean result.
+  12. Normal GUI automatically transitions from Not Paired to Paired after elevated pairing.
+  13. Reconfigure accounts continues to function seamlessly with UAC elevation.
+  14. Backend unreachable during pairing returns descriptive network error without writing config.
+  15. `ElevatedPairServer` rejects pairing attempts when unelevated (returns 403 Forbidden).
+- **Test Results Across All Workspaces:**
+  - `@safebrowse/agent-windows`: 225 passing tests across 9 test suites (100% pass rate).
+  - `@safebrowse/backend`: 192 passing tests across 37 test suites (100% pass rate).
+  - `@safebrowse/shared`: 9 passing tests across 2 test suites (100% pass rate).
+  - `@safebrowse/parent-web`: Production build succeeds cleanly (0 errors).
+
+### 22.4 Official Release Publication (v1.0.2-pilot)
+- **Release Tag:** `v1.0.2-pilot`
+- **WiX Product Version:** `1.0.2.0`
+- **Agent Package Version:** `1.0.2`
+
+
 
 
