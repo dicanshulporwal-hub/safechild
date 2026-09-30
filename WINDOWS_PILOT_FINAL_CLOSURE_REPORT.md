@@ -4,7 +4,7 @@
 **Repository:** `dicanshulporwal-hub/safechild`  
 **Workspace:** `/home/agdev/projects/safebrowse`  
 **Branch:** `feature/stage11-step4-device-enforcement`  
-**Commit:** `d3dad64`  
+**Commit:** `3e2622d`  
 **Release Tag:** `v1.0.0-pilot`  
 **Release Classification:** `PILOT READY FOR SINGLE-ACTIVE-USER DEPLOYMENT`  
 **Target Platform:** Windows 10 / Windows 11 (64-bit)  
@@ -202,8 +202,9 @@ Heartbeat payload transmitted every 60s:
 4. **`SHA256SUMS.txt`**: Cryptographic checksum manifest.
 
 ### SHA-256 Checksums
-- `SafeBrowseChild-Pilot.msi`: `6c68f85a0eb0415fd6451a59cb873d6ebef9ef229eb9321e10260461ae497b71`
-- `SafeBrowseChild-Pilot.exe`: `e88335cc0daaa90ebc7445a1a1f0a174092b7ef66236b2803b9f4c0a52dfdb9a`
+- `SafeBrowseChild-Pilot.msi`: `dbc2ecb3237c215e3c7613a40e895ace8d969d6854c0eca32c441ba0d185291e`
+- `SafeBrowseChild-Pilot.exe`: `3259e9141b91ab982a280ba9c490db5b717321d6424ae207f13615cb0df41ff5`
+- `SafeBrowseServiceHost.exe`: `7e64b713aded0e3daa6a5bc0718d346c8dd13e4d477c5f0e40a1b1c111aab4e8`
 - `SafeBrowse-Pair.cmd`: `a2d08c8854f12e6cd00ce3048a1c97a5f6e80b2a76f68593498a44d0361250cf`
 
 ---
