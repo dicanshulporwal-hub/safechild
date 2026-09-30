@@ -344,6 +344,21 @@ async function runServiceMode(): Promise<void> {
     recomputeAndApplyEngineStatus(`Policy status changed: ${prevStatus} -> ${newStatus}`);
   });
 
+  syncClient.setDeviceStateProvider(() => {
+    const currentPol = sessionMonitor.getCurrentPolicy();
+    const hasMultiple = sessionMonitor.hasMultipleSessions();
+    const protStatus = hasMultiple
+      ? 'ATTENTION_REQUIRED'
+      : currentPol?.isManaged
+      ? 'PROTECTED'
+      : 'PARENT_BYPASS';
+    return {
+      mappedAccountName: currentPol?.accountName,
+      hasMultipleSessions: hasMultiple,
+      protectionStatus: protStatus,
+    };
+  });
+
   // Await bounded initial policy synchronization (max 5s) before computing initial engine status
   await syncClient.start(5000);
 
@@ -673,6 +688,9 @@ export async function evaluateSystemStatus(options?: {
     parentStatus = 'Temporarily limited (DNS Not Redirected)';
   } else if (!hasUsablePolicy) {
     parentStatus = 'Degraded (Policy Unavailable)';
+  } else if (sessionMonitor.hasMultipleSessions()) {
+    parentStatus = 'Degraded (Attention Required: Multiple Windows users signed in)';
+    isProtected = false;
   } else {
     parentStatus = 'Protected';
     isProtected = true;

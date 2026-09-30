@@ -69,6 +69,12 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
       badge: undefined,
     },
     {
+      to: '/devices',
+      label: 'Devices',
+      icon: Laptop,
+      badge: undefined,
+    },
+    {
       to: '/requests',
       label: 'Ask Parent',
       icon: MessageSquare,

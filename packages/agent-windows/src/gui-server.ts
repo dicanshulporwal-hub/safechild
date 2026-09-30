@@ -45,6 +45,15 @@ export class GuiServer {
               systemStatus = await evaluateSystemStatus();
             } catch {}
 
+            const hasMultipleSessions = sessionMonitor.hasMultipleSessions();
+            const sessionWarning = sessionMonitor.getSessionWarning();
+            const multiSessionState = sessionMonitor.getMultiSessionState();
+            const protectionState = hasMultipleSessions
+              ? 'ATTENTION_REQUIRED'
+              : activePolicy.isManaged
+              ? 'PROTECTED'
+              : 'PARENT_BYPASS';
+
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(
               JSON.stringify({
@@ -54,17 +63,19 @@ export class GuiServer {
                       deviceId: config.deviceId,
                       deviceName: config.deviceName,
                       childId: config.childId,
-                      backendUrl: config.backendUrl,
                       pairedAt: config.pairedAt,
                     }
                   : null,
                 activeSession: {
-                  sid: activeSession.sid,
                   username: activeSession.username,
                   isManaged: activePolicy.isManaged,
                   childId: activePolicy.childId,
                   childName: activePolicy.childName,
                 },
+                hasMultipleSessions,
+                sessionWarning,
+                activeUsers: multiSessionState.activeUsers,
+                protectionState,
                 mappings,
                 systemStatus,
               })
@@ -551,6 +562,18 @@ export class GuiServer {
         Active protection telemetry and live console session state.
       </p>
 
+      <div id="multiSessionBanner" style="display:none; background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.4); border-radius: 16px; padding: 18px; margin-bottom: 24px; text-align: left;">
+        <div style="display: flex; align-items: flex-start; gap: 12px;">
+          <span style="font-size: 20px;">⚠️</span>
+          <div>
+            <div style="font-weight: 800; color: #fde68a; font-size: 14px; margin-bottom: 4px;">Protection State: Attention Required</div>
+            <div style="color: #cbd5e1; font-size: 13px; line-height: 1.5;" id="multiSessionText">
+              Multiple Windows users are currently signed in. For reliable SafeBrowse protection on this Pilot version, sign out other Windows users before switching accounts.
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="status-grid">
         <div class="status-card">
           <div class="status-label">Active Windows User</div>
@@ -712,7 +735,7 @@ export class GuiServer {
               acc.name +
               (acc.isCurrentConsoleUser ? ' <span class="badge-current">ACTIVE USER</span>' : '') +
             '</div>' +
-            '<div class="sid-text">' + acc.sid + '</div>' +
+            '<div class="sid-text" style="color: #64748b; font-size: 11px;">Standard Windows Account</div>' +
           '</td>' +
           '<td>' +
             '<select id="sel_' + idx + '" onchange="updateRowProtection(' + idx + ')">' +
@@ -777,18 +800,28 @@ export class GuiServer {
         const data = await res.json();
 
         document.getElementById('statUser').innerText = data.activeSession.username || 'System Console';
-        document.getElementById('statUserSid').innerText = data.activeSession.sid || 'SID: LocalSystem';
+        document.getElementById('statUserSid').innerText = data.activeSession.isManaged ? 'Child account' : 'Parent / unmanaged account';
 
-        if (data.activeSession.isManaged) {
-          document.getElementById('statMode').innerHTML = '<span class="tag-protected">● Child Protected</span>';
-          document.getElementById('statModeSub').innerText = 'Profile: ' + (data.activeSession.childName || 'Active Child');
+        if (data.hasMultipleSessions) {
+          document.getElementById('multiSessionBanner').style.display = 'block';
+          if (data.sessionWarning) {
+            document.getElementById('multiSessionText').innerText = data.sessionWarning;
+          }
+          document.getElementById('statMode').innerHTML = '<span class="tag-warning" style="color: #f59e0b; font-weight: 800;">⚠️ Attention Required</span>';
+          document.getElementById('statModeSub').innerText = 'Multiple Windows users signed in';
         } else {
-          document.getElementById('statMode').innerHTML = '<span class="tag-bypass">○ Parent Bypass</span>';
-          document.getElementById('statModeSub').innerText = 'Unmanaged (Child rules bypassed)';
+          document.getElementById('multiSessionBanner').style.display = 'none';
+          if (data.activeSession.isManaged) {
+            document.getElementById('statMode').innerHTML = '<span class="tag-protected">● Child Protected</span>';
+            document.getElementById('statModeSub').innerText = 'Profile: ' + (data.activeSession.childName || 'Active Child');
+          } else {
+            document.getElementById('statMode').innerHTML = '<span class="tag-bypass">○ Parent Bypass</span>';
+            document.getElementById('statModeSub').innerText = 'Unmanaged (Child rules bypassed)';
+          }
         }
 
-        document.getElementById('statDevice').innerText = data.config ? data.config.deviceName : 'Not Paired';
-        document.getElementById('statDeviceId').innerText = data.config ? data.config.deviceId : 'Run pairing setup';
+        document.getElementById('statDevice').innerText = data.config ? data.config.deviceName : 'Family Laptop';
+        document.getElementById('statDeviceId').innerText = data.isPaired ? 'Registered with family' : 'Run pairing setup';
 
         const sys = data.systemStatus;
         if (sys) {

@@ -47,15 +47,44 @@ export interface Policy {
 export interface Device {
   id: string;
   childId: string;
+  childName?: string;
   parentId: string;
   familyId: string;
   name: string;
   platform: 'android' | 'windows' | 'ios' | 'macos';
-  deviceToken: string;
+  deviceToken?: string;
+  pairedAt?: string;
+  lastSyncAt?: string;
   lastHeartbeatAt: string;
   activePolicyVersion: number;
-  healthStatus: 'protected' | 'syncing' | 'inactive' | 'PROTECTED' | 'DEGRADED' | 'OFFLINE' | 'BYPASSED';
+  healthStatus: 'protected' | 'syncing' | 'inactive' | 'attention_required' | 'PROTECTED' | 'DEGRADED' | 'OFFLINE' | 'BYPASSED';
+  healthState?: 'PROTECTED' | 'DEGRADED' | 'OFFLINE' | 'INACTIVE';
   agentVersion?: string;
+  isOnline?: boolean;
+  isRevoked?: boolean;
+  windowsAccountName?: string;
+  protectionStatus?: string;
+  hasMultipleSessions?: boolean;
+}
+
+export interface DeviceDetails {
+  device: Device;
+  child?: {
+    id: string;
+    name: string;
+    age?: number;
+    avatar?: string;
+  } | null;
+  policy?: {
+    version: number;
+    mode: string;
+    isPaused: boolean;
+    studyMode: boolean;
+    safeSearch: any;
+    categories: any[];
+    customRulesCount: number;
+    updatedAt: string;
+  } | null;
 }
 
 export interface AccessRequest {
@@ -493,8 +522,54 @@ class ApiClient {
     return data;
   }
 
+  async getAllDevices(forceRefresh: boolean = false): Promise<Device[]> {
+    return this.cachedGet<Device[]>(`${API_BASE}/devices`, 8000, forceRefresh);
+  }
+
+  async getDeviceDetails(deviceId: string, forceRefresh: boolean = false): Promise<DeviceDetails> {
+    return this.cachedGet<DeviceDetails>(`${API_BASE}/devices/${deviceId}`, 6000, forceRefresh);
+  }
+
+  async renameDevice(deviceId: string, name: string): Promise<any> {
+    this.invalidateCache(`${API_BASE}/devices`);
+    this.invalidateCache(`${API_BASE}/devices/${deviceId}`);
+    const res = await fetch(`${API_BASE}/devices/${deviceId}`, {
+      method: 'PATCH',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ name }),
+    });
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to rename device');
+    return data;
+  }
+
+  async reassignDevice(deviceId: string, childId: string): Promise<any> {
+    this.invalidateCache(`${API_BASE}/devices`);
+    this.invalidateCache(`${API_BASE}/devices/${deviceId}`);
+    const res = await fetch(`${API_BASE}/devices/${deviceId}`, {
+      method: 'PATCH',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ childId }),
+    });
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to reassign device');
+    return data;
+  }
+
+  async syncDevicePolicy(deviceId: string): Promise<any> {
+    this.invalidateCache(`${API_BASE}/devices/${deviceId}`);
+    const res = await fetch(`${API_BASE}/devices/${deviceId}/sync`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+    });
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to trigger policy sync');
+    return data;
+  }
+
   async removeDevice(deviceId: string) {
-    this.invalidateCache();
+    this.invalidateCache(`${API_BASE}/devices`);
+    this.invalidateCache(`${API_BASE}/devices/${deviceId}`);
     const res = await fetch(`${API_BASE}/devices/${deviceId}`, {
       method: 'DELETE',
       headers: this.getHeaders(),

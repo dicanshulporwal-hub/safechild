@@ -36,10 +36,18 @@ export interface ResolvedUserPolicy {
   sid: string;
 }
 
+export interface MultiSessionCheckResult {
+  hasMultipleSessions: boolean;
+  sessionCount: number;
+  activeUsers: string[];
+  warning: string | null;
+}
+
 export class WindowsAccountManager {
   private customBaseDir: string | null = null;
   private mockAccounts: WindowsAccount[] | null = null;
   private mockConsoleSid: string | null = null;
+  private mockInteractiveSessions: string[] | null = null;
 
   constructor(customBaseDir?: string) {
     if (customBaseDir) {
@@ -53,6 +61,10 @@ export class WindowsAccountManager {
 
   public setMockConsoleSidForTesting(sid: string | null): void {
     this.mockConsoleSid = sid;
+  }
+
+  public setMockInteractiveSessionsForTesting(sessions: string[] | null): void {
+    this.mockInteractiveSessions = sessions;
   }
 
   public getMappingsFilePath(): string {
@@ -469,6 +481,92 @@ export class WindowsAccountManager {
     }
 
     return this.resolveUserPolicy(processUser.sid, processUser.username);
+  }
+
+  /**
+   * Evaluates if multiple interactive Windows user sessions are concurrently logged in (Fast User Switching).
+   * Because userspace loopback DNS cannot isolate packets between concurrent sessions,
+   * multiple simultaneously active desktop sessions require an explicit warning and attention state.
+   */
+  public async detectMultipleInteractiveSessions(): Promise<MultiSessionCheckResult> {
+    if (this.mockInteractiveSessions !== null) {
+      const users = this.mockInteractiveSessions;
+      const hasMultiple = users.length > 1;
+      return {
+        hasMultipleSessions: hasMultiple,
+        sessionCount: users.length,
+        activeUsers: users,
+        warning: hasMultiple
+          ? 'Multiple Windows users are currently signed in. For reliable SafeBrowse protection on this Pilot version, sign out other Windows users before switching accounts.'
+          : null,
+      };
+    }
+
+    if (process.platform !== 'win32') {
+      return {
+        hasMultipleSessions: false,
+        sessionCount: 1,
+        activeUsers: ['CurrentConsoleUser'],
+        warning: null,
+      };
+    }
+
+    try {
+      const psPath = configManager.getPowerShellPath();
+      const psCmd = [
+        "$ErrorActionPreference = 'SilentlyContinue'",
+        '$procs = Get-Process -Name explorer -IncludeUserName -ErrorAction SilentlyContinue',
+        'if ($procs) {',
+        '  $users = @($procs | Select-Object -ExpandProperty UserName -Unique | Where-Object { $_ -and $_ -ne "" })',
+        '  $users | ConvertTo-Json -Compress',
+        '} else {',
+        '  "[]"',
+        '}',
+      ].join('; ');
+
+      const { stdout } = await execFileAsync(psPath, [
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        psCmd,
+      ]);
+
+      const trimmed = (stdout || '').trim();
+      let users: string[] = [];
+      if (trimmed) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          users = Array.isArray(parsed) ? parsed : [parsed];
+        } catch {
+          if (trimmed && !trimmed.startsWith('[')) {
+            users = [trimmed];
+          }
+        }
+      }
+
+      const cleanUsers = users.map((u) => (u.includes('\\') ? u.split('\\').pop()! : u)).filter(Boolean);
+      const uniqueUsers = Array.from(new Set(cleanUsers));
+      const hasMultiple = uniqueUsers.length > 1;
+
+      return {
+        hasMultipleSessions: hasMultiple,
+        sessionCount: uniqueUsers.length,
+        activeUsers: uniqueUsers,
+        warning: hasMultiple
+          ? 'Multiple Windows users are currently signed in. For reliable SafeBrowse protection on this Pilot version, sign out other Windows users before switching accounts.'
+          : null,
+      };
+    } catch {
+      return {
+        hasMultipleSessions: false,
+        sessionCount: 1,
+        activeUsers: [],
+        warning: null,
+      };
+    }
   }
 }
 

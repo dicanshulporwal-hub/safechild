@@ -10,6 +10,8 @@ import { ParentProfilePage } from './pages/ParentProfilePage';
 import { SecuritySettingsPage } from './pages/SecuritySettingsPage';
 import { FamilyManagementPage } from './pages/FamilyManagementPage';
 import { DeviceDiagnosticsPage } from './pages/DeviceDiagnosticsPage';
+import { DevicesPage } from './pages/DevicesPage';
+import { DeviceDetailsPage } from './pages/DeviceDetailsPage';
 import { OperationsDashboardPage } from './pages/OperationsDashboardPage';
 import { AdminParentsPage } from './pages/AdminParentsPage';
 import { StatusPage } from './pages/StatusPage';
@@ -209,6 +211,8 @@ function AuthenticatedApp() {
         <Route path="/children/:childId" element={<ChildWorkspacePage childrenList={childrenList} />} />
         <Route path="/requests" element={<RequestsPage />} />
         <Route path="/requests/:requestId" element={<RequestsPage />} />
+        <Route path="/devices" element={<DevicesPage childrenList={childrenList} />} />
+        <Route path="/devices/:deviceId" element={<DeviceDetailsPage childrenList={childrenList} />} />
         <Route path="/devices/:deviceId/diagnostics" element={<DeviceDiagnosticsPage />} />
         <Route path="/settings/profile" element={<ParentProfilePage />} />
         <Route path="/settings/security" element={<SecuritySettingsPage />} />

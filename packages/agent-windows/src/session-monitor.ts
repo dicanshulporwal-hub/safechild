@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { accountManager, WindowsAccountManager, ResolvedUserPolicy } from './account-manager';
+import { accountManager, WindowsAccountManager, ResolvedUserPolicy, MultiSessionCheckResult } from './account-manager';
 import { configManager } from './config-manager';
 import { logServiceMessage } from './network-manager';
 
@@ -13,6 +13,12 @@ export class WindowsSessionMonitor {
   private checkIntervalMs: number;
   private timer: NodeJS.Timeout | null = null;
   private currentResolvedPolicy: ResolvedUserPolicy | null = null;
+  private multiSessionState: MultiSessionCheckResult = {
+    hasMultipleSessions: false,
+    sessionCount: 1,
+    activeUsers: [],
+    warning: null,
+  };
   private callbacks: SessionChangeCallback[] = [];
   private isRunning: boolean = false;
   private customDnsFlushFn: (() => Promise<void>) | null = null;
@@ -53,6 +59,18 @@ export class WindowsSessionMonitor {
 
   public getCurrentPolicy(): ResolvedUserPolicy | null {
     return this.currentResolvedPolicy;
+  }
+
+  public getMultiSessionState(): MultiSessionCheckResult {
+    return this.multiSessionState;
+  }
+
+  public hasMultipleSessions(): boolean {
+    return this.multiSessionState.hasMultipleSessions;
+  }
+
+  public getSessionWarning(): string | null {
+    return this.multiSessionState.warning;
   }
 
   /**
@@ -97,12 +115,30 @@ export class WindowsSessionMonitor {
     const resolved = await this.accountMgr.resolveUserPolicy();
     const prev = this.currentResolvedPolicy;
 
+    // Evaluate concurrent interactive user sessions (Multi-Session Safety Guard)
+    const multiCheck = await this.accountMgr.detectMultipleInteractiveSessions();
+    const hadMultiple = this.multiSessionState.hasMultipleSessions;
+    this.multiSessionState = multiCheck;
+
+    if (multiCheck.hasMultipleSessions && !hadMultiple) {
+      logServiceMessage(
+        'WARN',
+        `[SessionMonitor] [ATTENTION_REQUIRED] Multiple Windows users are currently signed in: ${multiCheck.activeUsers.join(', ')}. Sign out other Windows users for reliable SafeBrowse protection.`
+      );
+    } else if (!multiCheck.hasMultipleSessions && hadMultiple) {
+      logServiceMessage(
+        'INFO',
+        `[SessionMonitor] Concurrent session condition cleared. Single active user detected: ${resolved.accountName}.`
+      );
+    }
+
     const userChanged =
       !prev ||
       prev.sid !== resolved.sid ||
       prev.accountName !== resolved.accountName ||
       prev.isManaged !== resolved.isManaged ||
-      prev.childId !== resolved.childId;
+      prev.childId !== resolved.childId ||
+      multiCheck.hasMultipleSessions !== hadMultiple;
 
     if (userChanged) {
       this.currentResolvedPolicy = resolved;

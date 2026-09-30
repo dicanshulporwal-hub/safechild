@@ -204,6 +204,9 @@ export interface HeartbeatPayload {
   enforcementActive: boolean;
   platform: DevicePlatform;
   agentVersion: string;
+  mappedAccountName?: string;
+  hasMultipleSessions?: boolean;
+  protectionStatus?: string;
 }
 
 export interface HeartbeatResponse {

@@ -26,6 +26,11 @@ export class PolicySyncClient {
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private wsReconnectTimer: NodeJS.Timeout | null = null;
   private enforcementActiveProvider?: () => boolean;
+  private deviceStateProvider?: () => {
+    mappedAccountName?: string;
+    hasMultipleSessions?: boolean;
+    protectionStatus?: string;
+  };
   private onPolicyStatusChangeCallback?: (newStatus: PolicyStatus, previousStatus: PolicyStatus) => void;
 
   private childPolicies: Map<string, Policy> = new Map();
@@ -44,6 +49,12 @@ export class PolicySyncClient {
     this.cacheFilePath = path.join(this.cacheDir, `policy-${config.deviceId}.json`);
     this.activeChildId = config.childId;
     this.loadCachedPolicy();
+  }
+
+  public setDeviceStateProvider(
+    provider: () => { mappedAccountName?: string; hasMultipleSessions?: boolean; protectionStatus?: string }
+  ): void {
+    this.deviceStateProvider = provider;
   }
 
   public getCacheFilePathForChild(childId: string): string {
@@ -282,13 +293,18 @@ export class PolicySyncClient {
         isEnforcing = false;
       }
 
+      const extraState = this.deviceStateProvider ? this.deviceStateProvider() : undefined;
+
       const payload: HeartbeatPayload = {
         deviceId: this.config.deviceId,
         deviceToken: this.config.deviceToken,
         activePolicyVersion: this.currentPolicy?.version || 1,
         enforcementActive: isEnforcing,
         platform: 'windows',
-        agentVersion: '1.0.0',
+        agentVersion: '1.0.0-pilot',
+        mappedAccountName: extraState?.mappedAccountName,
+        hasMultipleSessions: extraState?.hasMultipleSessions,
+        protectionStatus: extraState?.protectionStatus,
       };
 
       const res = await fetch(`${this.config.backendUrl}/api/devices/heartbeat`, {

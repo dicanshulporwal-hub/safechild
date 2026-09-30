@@ -17,10 +17,18 @@ export interface ExtendedDevice extends Device {
   isRevoked?: boolean;
   revokedAt?: string | null;
   healthState: HealthState;
+  childName?: string;
+  isOnline?: boolean;
+  windowsAccountName?: string;
+  hasMultipleSessions?: boolean;
+  protectionStatus?: string;
 }
 
 export class DeviceService {
   private revokedTokenBlacklist: Set<string> = new Set();
+  private deviceAccountNames: Map<string, string> = new Map();
+  private deviceMultiSessionWarnings: Map<string, boolean> = new Map();
+  private deviceProtectionStatuses: Map<string, string> = new Map();
 
   /**
    * Generate cryptographically secure, high-entropy pairing code (e.g. "SB-K8X9-M2W7")
@@ -199,12 +207,23 @@ export class DeviceService {
     let computedHealthState: any = 'PROTECTED';
     let computedHealthStatus = 'protected';
 
-    if (!payload.enforcementActive) {
+    if (payload.hasMultipleSessions) {
+      computedHealthState = 'DEGRADED';
+      computedHealthStatus = 'attention_required';
+    } else if (!payload.enforcementActive) {
       computedHealthState = 'DEGRADED';
       computedHealthStatus = 'inactive';
     } else if (isPolicyChanged) {
       computedHealthState = 'DEGRADED';
       computedHealthStatus = 'syncing';
+    }
+
+    if (payload.mappedAccountName) {
+      this.deviceAccountNames.set(device.id, payload.mappedAccountName);
+    }
+    this.deviceMultiSessionWarnings.set(device.id, Boolean(payload.hasMultipleSessions));
+    if (payload.protectionStatus) {
+      this.deviceProtectionStatuses.set(device.id, payload.protectionStatus);
     }
 
     await prisma.device.update({
@@ -226,6 +245,8 @@ export class DeviceService {
         healthStatus: computedHealthStatus,
         activePolicyVersion: payload.activePolicyVersion,
         lastHeartbeatAt: now.toISOString(),
+        mappedAccountName: payload.mappedAccountName,
+        hasMultipleSessions: Boolean(payload.hasMultipleSessions),
       },
       parentId: device.parentId,
       childId: device.childId,
@@ -339,21 +360,29 @@ export class DeviceService {
     const now = Date.now();
     const list = await prisma.device.findMany({
       where: { childId },
+      include: {
+        child: {
+          select: { name: true, policy: { select: { version: true } } },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
     });
 
-    return list.map((dev) => {
+    return list.map((dev: any) => {
       const lastHb = dev.lastHeartbeatAt.getTime();
       const elapsedSeconds = (now - lastHb) / 1000;
+      const isOnline = elapsedSeconds < 90 && !dev.isRevoked;
       let state: HealthState = (dev.healthState as any) || 'PROTECTED';
       if (dev.isRevoked) {
         state = 'INACTIVE';
-      } else if (elapsedSeconds > 90) {
+      } else if (!isOnline) {
         state = 'OFFLINE';
       }
 
       return {
         id: dev.id,
         childId: dev.childId,
+        childName: dev.child?.name,
         parentId: dev.parentId,
         familyId: dev.familyId,
         name: dev.name,
@@ -362,9 +391,10 @@ export class DeviceService {
         pairedAt: dev.createdAt.toISOString(),
         lastSyncAt: dev.updatedAt.toISOString(),
         lastHeartbeatAt: dev.lastHeartbeatAt.toISOString(),
-        activePolicyVersion: 1,
+        activePolicyVersion: dev.child?.policy?.version || 1,
         healthStatus: (state === 'OFFLINE' || state === 'INACTIVE' ? 'inactive' : dev.healthStatus) as any,
         healthState: state,
+        isOnline,
         isRevoked: dev.isRevoked,
         agentVersion: dev.agentVersion,
       };
@@ -379,21 +409,29 @@ export class DeviceService {
     const now = Date.now();
     const list = await prisma.device.findMany({
       where: { familyId: { in: allowedSet } },
+      include: {
+        child: {
+          select: { name: true, policy: { select: { version: true } } },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
     });
 
-    return list.map((dev) => {
+    return list.map((dev: any) => {
       const lastHb = dev.lastHeartbeatAt.getTime();
       const elapsedSeconds = (now - lastHb) / 1000;
+      const isOnline = elapsedSeconds < 90 && !dev.isRevoked;
       let state: HealthState = (dev.healthState as any) || 'PROTECTED';
       if (dev.isRevoked) {
         state = 'INACTIVE';
-      } else if (elapsedSeconds > 90) {
+      } else if (!isOnline) {
         state = 'OFFLINE';
       }
 
       return {
         id: dev.id,
         childId: dev.childId,
+        childName: dev.child?.name,
         parentId: dev.parentId,
         familyId: dev.familyId,
         name: dev.name,
@@ -402,11 +440,15 @@ export class DeviceService {
         pairedAt: dev.createdAt.toISOString(),
         lastSyncAt: dev.updatedAt.toISOString(),
         lastHeartbeatAt: dev.lastHeartbeatAt.toISOString(),
-        activePolicyVersion: 1,
+        activePolicyVersion: dev.child?.policy?.version || 1,
         healthStatus: (state === 'OFFLINE' || state === 'INACTIVE' ? 'inactive' : dev.healthStatus) as any,
         healthState: state,
+        isOnline,
         isRevoked: dev.isRevoked,
         agentVersion: dev.agentVersion,
+        windowsAccountName: this.deviceAccountNames.get(dev.id) || '',
+        hasMultipleSessions: this.deviceMultiSessionWarnings.get(dev.id) || false,
+        protectionStatus: this.deviceProtectionStatuses.get(dev.id) || (state === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN'),
       };
     });
   }
@@ -451,9 +493,209 @@ export class DeviceService {
       throw new Error('Forbidden. Insufficient permissions to remove devices.');
     }
 
+    if (device.deviceToken) {
+      this.revokedTokenBlacklist.add(device.deviceToken);
+    }
+
     await prisma.device.delete({
       where: { id: deviceId },
     });
+
+    wsManager.broadcast({
+      type: 'DEVICE_HEALTH_CHANGED',
+      payload: {
+        deviceId,
+        isRevoked: true,
+        healthState: 'INACTIVE',
+      },
+      parentId: device.parentId,
+      childId: device.childId,
+    });
+  }
+
+  public async renameDevice(deviceId: string, newName: string, actorUserId: string): Promise<ExtendedDevice> {
+    const device = await prisma.device.findUnique({ where: { id: deviceId } });
+    if (!device) throw new Error('Device not found.');
+
+    const family = await rbacService.getFamilyForDevice(deviceId);
+    if (!family || !(await rbacService.getFamilyMembership(actorUserId, family.id))) {
+      throw new Error('Forbidden. You do not belong to the family that owns this device.');
+    }
+
+    const hasPerm = await rbacService.hasFamilyPermission(
+      actorUserId,
+      family.id,
+      FamilyPermission.DEVICE_MANAGE
+    );
+    if (!hasPerm) {
+      throw new Error('Forbidden. Insufficient permissions to rename devices.');
+    }
+
+    const trimmedName = (newName || '').trim();
+    if (!trimmedName) {
+      throw new Error('Device name cannot be empty.');
+    }
+
+    const updated = await prisma.device.update({
+      where: { id: deviceId },
+      data: { name: trimmedName },
+    });
+
+    const extended = await this.getDevice(updated.id);
+    if (!extended) throw new Error('Failed to retrieve updated device.');
+
+    wsManager.broadcast({
+      type: 'DEVICE_HEALTH_CHANGED',
+      payload: extended,
+      parentId: updated.parentId,
+      childId: updated.childId,
+    });
+
+    return extended;
+  }
+
+  public async reassignDevice(deviceId: string, targetChildId: string, actorUserId: string): Promise<ExtendedDevice> {
+    const device = await prisma.device.findUnique({ where: { id: deviceId } });
+    if (!device) throw new Error('Device not found.');
+
+    const family = await rbacService.getFamilyForDevice(deviceId);
+    if (!family || !(await rbacService.getFamilyMembership(actorUserId, family.id))) {
+      throw new Error('Forbidden. You do not belong to the family that owns this device.');
+    }
+
+    const hasPerm = await rbacService.hasFamilyPermission(
+      actorUserId,
+      family.id,
+      FamilyPermission.DEVICE_MANAGE
+    );
+    if (!hasPerm) {
+      throw new Error('Forbidden. Insufficient permissions to reassign devices.');
+    }
+
+    const targetChild = await prisma.child.findUnique({ where: { id: targetChildId } });
+    if (!targetChild || targetChild.familyId !== family.id) {
+      throw new Error('Target child does not belong to this family.');
+    }
+
+    const updated = await prisma.device.update({
+      where: { id: deviceId },
+      data: { childId: targetChildId },
+    });
+
+    const extended = await this.getDevice(updated.id);
+    if (!extended) throw new Error('Failed to retrieve updated device.');
+
+    wsManager.broadcast({
+      type: 'DEVICE_HEALTH_CHANGED',
+      payload: extended,
+      parentId: updated.parentId,
+      childId: targetChildId,
+    });
+
+    return extended;
+  }
+
+  public async triggerDevicePolicySync(deviceId: string, actorUserId: string): Promise<{ success: boolean; message: string }> {
+    const device = await prisma.device.findUnique({ where: { id: deviceId } });
+    if (!device) throw new Error('Device not found.');
+
+    const family = await rbacService.getFamilyForDevice(deviceId);
+    if (!family || !(await rbacService.getFamilyMembership(actorUserId, family.id))) {
+      throw new Error('Forbidden. You do not belong to the family that owns this device.');
+    }
+
+    const hasPerm =
+      (await rbacService.hasFamilyPermission(actorUserId, family.id, FamilyPermission.DEVICE_MANAGE)) ||
+      (await rbacService.hasFamilyPermission(actorUserId, family.id, FamilyPermission.POLICY_MANAGE));
+    if (!hasPerm) {
+      throw new Error('Forbidden. Insufficient permissions to sync device policy.');
+    }
+
+    const policy = await prisma.policy.findUnique({ where: { childId: device.childId } });
+
+    wsManager.broadcast({
+      type: 'POLICY_UPDATED',
+      payload: policy || { version: 1, rules: [] },
+      childId: device.childId,
+      parentId: device.parentId,
+    });
+
+    return { success: true, message: 'Policy synchronization signal queued for device.' };
+  }
+
+  public async getDeviceDetails(deviceId: string, actorUserId: string): Promise<any> {
+    const device = await prisma.device.findUnique({
+      where: { id: deviceId },
+      include: {
+        child: {
+          include: {
+            policy: true,
+          },
+        },
+      },
+    });
+    if (!device) throw new Error('Device not found.');
+
+    const family = await rbacService.getFamilyForDevice(deviceId);
+    if (!family || !(await rbacService.getFamilyMembership(actorUserId, family.id))) {
+      throw new Error('Forbidden. You do not belong to the family that owns this device.');
+    }
+
+    const hasPerm = await rbacService.hasFamilyPermission(
+      actorUserId,
+      family.id,
+      FamilyPermission.DEVICE_READ
+    );
+    if (!hasPerm) {
+      throw new Error('Forbidden. Insufficient permissions to view device details.');
+    }
+
+    const now = Date.now();
+    const elapsedSeconds = (now - device.lastHeartbeatAt.getTime()) / 1000;
+    const isOnline = elapsedSeconds < 90 && !device.isRevoked;
+
+    let computedHealthState: HealthState = (device.healthState as any) || 'PROTECTED';
+    if (device.isRevoked) {
+      computedHealthState = 'INACTIVE';
+    } else if (!isOnline) {
+      computedHealthState = 'OFFLINE';
+    }
+
+    return {
+      device: {
+        id: device.id,
+        childId: device.childId,
+        childName: device.child.name,
+        parentId: device.parentId,
+        familyId: device.familyId,
+        name: device.name,
+        platform: device.platform,
+        agentVersion: device.agentVersion,
+        healthStatus: (computedHealthState === 'OFFLINE' || computedHealthState === 'INACTIVE') ? 'inactive' : device.healthStatus,
+        healthState: computedHealthState,
+        isOnline,
+        isRevoked: device.isRevoked,
+        lastHeartbeatAt: device.lastHeartbeatAt.toISOString(),
+        pairedAt: device.createdAt.toISOString(),
+        windowsAccountName: this.deviceAccountNames.get(device.id) || '',
+        hasMultipleSessions: this.deviceMultiSessionWarnings.get(device.id) || false,
+        protectionStatus: this.deviceProtectionStatuses.get(device.id) || (computedHealthState === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN'),
+      },
+      child: {
+        id: device.child.id,
+        name: device.child.name,
+        age: device.child.age,
+        avatar: device.child.avatar,
+      },
+      policy: device.child.policy ? {
+        version: device.child.policy.version,
+        isPaused: device.child.policy.isPaused,
+        safeSearch: device.child.policy.safeSearch,
+        routines: device.child.policy.routines,
+        customRulesCount: Array.isArray(device.child.policy.rules) ? (device.child.policy.rules as any[]).length : 0,
+        updatedAt: device.child.policy.updatedAt.toISOString(),
+      } : null,
+    };
   }
 }
 

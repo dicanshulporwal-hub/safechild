@@ -78,7 +78,15 @@ deviceRouter.post('/pair', pairingRateLimiter, async (req, res) => {
 // Periodic heartbeat from child agent (Device authentication required)
 deviceRouter.post('/heartbeat', deviceAuthMiddleware, async (req: AuthenticatedDeviceRequest, res) => {
   try {
-    const { activePolicyVersion, enforcementActive, platform, agentVersion } = req.body;
+    const {
+      activePolicyVersion,
+      enforcementActive,
+      platform,
+      agentVersion,
+      mappedAccountName,
+      hasMultipleSessions,
+      protectionStatus,
+    } = req.body;
 
     const response = await deviceService.processHeartbeat({
       deviceId: req.deviceId!,
@@ -87,6 +95,9 @@ deviceRouter.post('/heartbeat', deviceAuthMiddleware, async (req: AuthenticatedD
       enforcementActive: enforcementActive !== false,
       platform: platform || 'windows',
       agentVersion: agentVersion || '1.0.0',
+      mappedAccountName,
+      hasMultipleSessions,
+      protectionStatus,
     });
 
     res.json(response);
@@ -152,7 +163,7 @@ deviceRouter.get('/', authMiddleware, requireVerifiedEmail, async (req: Authenti
       return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to view devices.' });
     }
     const devices = await deviceService.getDevicesForParent(req.userId!, reqFamilyId);
-    return res.json(devices);
+    return res.json(devices.map(({ deviceToken, ...rest }: any) => rest));
   }
 
   const userMemberships = await rbacService.getUserFamilyMemberships(req.userId!);
@@ -168,7 +179,7 @@ deviceRouter.get('/', authMiddleware, requireVerifiedEmail, async (req: Authenti
   }
 
   const devices = await deviceService.getDevicesForParent(req.userId!);
-  res.json(devices);
+  res.json(devices.map(({ deviceToken, ...rest }: any) => rest));
 });
 
 // Get devices for a specific child
@@ -188,7 +199,7 @@ deviceRouter.get('/child/:childId', authMiddleware, requireVerifiedEmail, async 
   }
 
   const devices = await deviceService.getDevicesForChild(req.params.childId);
-  res.json(devices);
+  res.json(devices.map(({ deviceToken, ...rest }: any) => rest));
 });
 
 // Self-Diagnostics ("Run Protection Check") - Parent diagnostic verification
@@ -260,5 +271,56 @@ deviceRouter.delete('/:id', authMiddleware, requireVerifiedEmail, async (req: Au
       return res.status(403).json({ error: e.message });
     }
     res.status(404).json({ error: e.message });
+  }
+});
+
+// Get device details
+deviceRouter.get('/:id', authMiddleware, requireVerifiedEmail, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const details = await deviceService.getDeviceDetails(req.params.id, req.userId!);
+    res.json(details);
+  } catch (e: any) {
+    if (e.message.startsWith('Forbidden') || e.message.includes('Forbidden')) {
+      return res.status(403).json({ error: e.message });
+    }
+    res.status(404).json({ error: e.message });
+  }
+});
+
+// Update device (rename and/or reassign child)
+deviceRouter.patch('/:id', authMiddleware, requireVerifiedEmail, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { name, childId } = req.body;
+    if (!name && !childId) {
+      return res.status(400).json({ error: 'Either name or childId must be provided.' });
+    }
+
+    let result: any = null;
+    if (name) {
+      result = await deviceService.renameDevice(req.params.id, name, req.userId!);
+    }
+    if (childId) {
+      result = await deviceService.reassignDevice(req.params.id, childId, req.userId!);
+    }
+
+    res.json({ success: true, device: result });
+  } catch (e: any) {
+    if (e.message.startsWith('Forbidden') || e.message.includes('Forbidden')) {
+      return res.status(403).json({ error: e.message });
+    }
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Trigger immediate policy sync for device
+deviceRouter.post('/:id/sync', authMiddleware, requireVerifiedEmail, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const result = await deviceService.triggerDevicePolicySync(req.params.id, req.userId!);
+    res.json(result);
+  } catch (e: any) {
+    if (e.message.startsWith('Forbidden') || e.message.includes('Forbidden')) {
+      return res.status(403).json({ error: e.message });
+    }
+    res.status(400).json({ error: e.message });
   }
 });

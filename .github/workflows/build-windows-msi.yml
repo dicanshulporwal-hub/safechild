@@ -17,6 +17,8 @@ jobs:
   build-windows-msi:
     name: Build Windows MSI Pilot Package
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -217,5 +219,23 @@ jobs:
             release/windows/SafeBrowseChild-Pilot.msi.sha256
             release/windows/SafeBrowseChild-Pilot.exe
             release/windows/SafeBrowseChild-Pilot.exe.sha256
+            release/windows/SafeBrowseServiceHost.exe
             release/windows/SHA256SUMS.txt
           if-no-files-found: error
+
+      - name: Update GitHub Release Assets (v1.0.0-pilot)
+        if: github.ref == 'refs/heads/feature/stage11-step4-device-enforcement'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $files = @(
+            "release/windows/SafeBrowseChild-Pilot.msi",
+            "release/windows/SafeBrowseChild-Pilot.msi.sha256",
+            "release/windows/SafeBrowseChild-Pilot.exe",
+            "release/windows/SafeBrowseChild-Pilot.exe.sha256",
+            "release/windows/SafeBrowseServiceHost.exe",
+            "release/windows/SHA256SUMS.txt"
+          )
+          Write-Host "Updating release v1.0.0-pilot assets via gh CLI..."
+          gh release upload v1.0.0-pilot $files --clobber
