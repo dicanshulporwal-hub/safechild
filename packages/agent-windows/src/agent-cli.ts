@@ -824,11 +824,35 @@ async function main() {
     console.log('  SafeBrowseChild-Pilot.exe gui                          # Launch SafeBrowse Family Protection GUI');
     console.log('  SafeBrowseChild-Pilot.exe --pair <CODE> [--name <NAME>] [--backend-url <URL>]');
     console.log('  SafeBrowseChild-Pilot.exe --accounts                   # Discover Windows accounts & mappings');
-    console.log('  SafeBrowseChild-Pilot.exe --apply-mappings <FILE>      # Elevate and persist account mappings');
+    console.log('  SafeBrowseChild-Pilot.exe --apply-mappings-req <NONCE> # Verify and persist account mappings (elevated)');
+    console.log('  SafeBrowseChild-Pilot.exe --apply-mappings <FILE>      # Legacy file-based mapping apply');
     console.log('  SafeBrowseChild-Pilot.exe service                      # Run Windows background service');
     console.log('  SafeBrowseChild-Pilot.exe --status                     # Inspect system & protection status');
     console.log('  SafeBrowseChild-Pilot.exe --emergency-restore          # Restore network DNS & firewall');
     process.exit(0);
+  }
+
+  if (args.includes('--apply-mappings-req')) {
+    const idx = args.indexOf('--apply-mappings-req');
+    const nonce = args[idx + 1];
+    if (!nonce) {
+      console.error('[SafeBrowse] Error: --apply-mappings-req requires a single-use UUID nonce.');
+      process.exit(1);
+    }
+    try {
+      const isAdmin = await configManager.isAdministrator();
+      if (!isAdmin && process.platform === 'win32') {
+        console.error('[SafeBrowse] Error: Administrator elevation is required to apply account protection mappings.');
+        process.exit(5); // ERROR_ACCESS_DENIED
+      }
+
+      await accountManager.applyMappingSaveRequest(nonce);
+      console.log('[SafeBrowse] Successfully verified and persisted account mappings.');
+      process.exit(0);
+    } catch (err: any) {
+      console.error(`[SafeBrowse] Failed to apply mappings: ${err.message}`);
+      process.exit(1);
+    }
   }
 
   if (args.includes('--apply-mappings')) {

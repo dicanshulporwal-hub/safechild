@@ -586,7 +586,13 @@ namespace SafeBrowse
                 catch { }
 
                 string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-                string sessionFilePath = Path.Combine(programData, "SafeBrowse", "active-session.json");
+                string stateDir = Path.Combine(programData, "SafeBrowse", "state");
+                if (!Directory.Exists(stateDir))
+                {
+                    try { Directory.CreateDirectory(stateDir); } catch { }
+                }
+                string stateSessionFilePath = Path.Combine(stateDir, "active-session.json");
+                string legacySessionFilePath = Path.Combine(programData, "SafeBrowse", "active-session.json");
 
                 string jsonContent = string.Format(
                     "{{\n  \"sessionId\": {0},\n  \"activeConsoleSession\": {1},\n  \"windowsSid\": {2},\n  \"windowsUsername\": {3},\n  \"reason\": \"{4}\",\n  \"timestamp\": \"{5}\"\n}}",
@@ -598,7 +604,8 @@ namespace SafeBrowse
                     DateTime.UtcNow.ToString("o")
                 );
 
-                File.WriteAllText(sessionFilePath, jsonContent);
+                File.WriteAllText(stateSessionFilePath, jsonContent);
+                try { File.WriteAllText(legacySessionFilePath, jsonContent); } catch { }
                 Log(string.Format("[SESSION] Active console user recorded: User '{0}' (SID: {1}, Session {2}, Reason {3})",
                     username ?? "Unknown", sidStr ?? "N/A", sessionId, reason));
             }
@@ -728,7 +735,11 @@ namespace SafeBrowse
             {
                 Log("[INFO] Attempting native PowerShell DNS restore fallback...");
                 string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-                string backupPath = Path.Combine(programData, "SafeBrowse", "network-backup.json");
+                string backupPath = Path.Combine(programData, "SafeBrowse", "secure", "network-backup.json");
+                if (!File.Exists(backupPath))
+                {
+                    backupPath = Path.Combine(programData, "SafeBrowse", "network-backup.json");
+                }
 
                 if (File.Exists(backupPath))
                 {
@@ -741,7 +752,8 @@ namespace SafeBrowse
 
                 string psScript =
                     "$ErrorActionPreference = 'SilentlyContinue'; " +
-                    "$backupPath = Join-Path $env:ProgramData 'SafeBrowse\\network-backup.json'; " +
+                    "$backupPath = Join-Path $env:ProgramData 'SafeBrowse\\secure\\network-backup.json'; " +
+                    "if (-not (Test-Path $backupPath)) { $backupPath = Join-Path $env:ProgramData 'SafeBrowse\\network-backup.json' }; " +
                     "$restoredAny = $false; " +
                     "$rules = @('SafeBrowse_Block_DoT_853_TCP', 'SafeBrowse_Block_DoT_853_UDP', 'SafeBrowse_Block_DoH_Bootstrap'); " +
                     "foreach ($r in $rules) { netsh advfirewall firewall delete rule name=$r | Out-Null }; " +

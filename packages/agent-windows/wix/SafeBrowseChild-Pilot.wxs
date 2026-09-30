@@ -79,9 +79,36 @@
             <util:PermissionEx User="SYSTEM" GenericAll="yes" />
           </CreateFolder>
         </Component>
+
+        <!-- Secure Directory: SYSTEM + Administrators ONLY (credentials, tokens, network backup) -->
+        <Directory Id="CommonAppDataSecure" Name="secure">
+          <Component Id="CreateSecureDir" Guid="C1D2E3F4-A5B6-7890-1234-567890ABCDEF">
+            <CreateFolder>
+              <util:PermissionEx User="Administrators" GenericAll="yes" />
+              <util:PermissionEx User="SYSTEM" GenericAll="yes" />
+            </CreateFolder>
+          </Component>
+        </Directory>
+
+        <!-- State Directory: SYSTEM + Administrators Full Control, Users Read/Execute (sanitized state, mappings) -->
+        <Directory Id="CommonAppDataState" Name="state">
+          <Component Id="CreateStateDir" Guid="D2E3F4A5-B6C7-8901-2345-678901BCDEFA">
+            <CreateFolder>
+              <util:PermissionEx User="Users" GenericRead="yes" GenericExecute="yes" />
+              <util:PermissionEx User="Administrators" GenericAll="yes" />
+              <util:PermissionEx User="SYSTEM" GenericAll="yes" />
+            </CreateFolder>
+          </Component>
+        </Directory>
+
+        <!-- Logs Directory: SYSTEM + Administrators Full Control, Users Read/Execute -->
         <Directory Id="CommonAppDataLogs" Name="logs">
           <Component Id="CreateLogsDir" Guid="9A5A3CE8-16B5-4A4E-C376-C7E890A5BC77">
-            <CreateFolder />
+            <CreateFolder>
+              <util:PermissionEx User="Users" GenericRead="yes" GenericExecute="yes" />
+              <util:PermissionEx User="Administrators" GenericAll="yes" />
+              <util:PermissionEx User="SYSTEM" GenericAll="yes" />
+            </CreateFolder>
           </Component>
         </Directory>
       </Directory>
@@ -148,6 +175,8 @@
       <ComponentRef Id="RestoreScript" />
       <ComponentRef Id="DnsScripts" />
       <ComponentRef Id="CreateProgramDataDir" />
+      <ComponentRef Id="CreateSecureDir" />
+      <ComponentRef Id="CreateStateDir" />
       <ComponentRef Id="CreateLogsDir" />
     </Feature>
   </Package>

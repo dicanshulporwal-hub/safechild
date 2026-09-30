@@ -1,5 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
+import * as crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { configManager } from './config-manager';
@@ -43,6 +45,38 @@ export interface SharedLaptopConfig {
   updatedAt: string;
 }
 
+export interface MappingSaveRequestPayload {
+  nonce: string;
+  timestamp: string; // ISO 8601
+  deviceId: string;
+  deviceName?: string;
+  mappings: WindowsProfileMapping[];
+  payloadHash: string;
+}
+
+export function canonicalizeMappings(mappings: WindowsProfileMapping[]): string {
+  const sorted = [...mappings].sort((a, b) => (a.windowsSid || '').localeCompare(b.windowsSid || ''));
+  const normalized = sorted.map((m) => ({
+    childId: m.childId ?? null,
+    childName: m.childName ?? null,
+    enabled: Boolean(m.enabled && m.childId),
+    windowsSid: (m.windowsSid || '').trim().toUpperCase(),
+    windowsUsername: (m.windowsUsername || '').trim(),
+  }));
+  return JSON.stringify(normalized);
+}
+
+export function computeMappingPayloadHash(
+  nonce: string,
+  timestamp: string,
+  deviceId: string,
+  mappings: WindowsProfileMapping[]
+): string {
+  const canonicalJson = canonicalizeMappings(mappings);
+  const data = `${nonce}:${timestamp}:${deviceId}:${canonicalJson}`;
+  return crypto.createHash('sha256').update(data, 'utf8').digest('hex');
+}
+
 export interface ResolvedUserPolicy {
   isManaged: boolean;
   childId: string | null;
@@ -78,32 +112,54 @@ export class WindowsAccountManager {
     this.mockConsoleSid = sid;
   }
 
+  private customStagingDir: string | null = null;
+
   public setMockInteractiveSessionsForTesting(sessions: string[] | null): void {
     this.mockInteractiveSessions = sessions;
   }
 
+  public setStagingDirForTesting(stagingDir: string | null): void {
+    this.customStagingDir = stagingDir;
+  }
+
+  public getStagingDir(): string {
+    if (this.customStagingDir) {
+      return this.customStagingDir;
+    }
+    return os.tmpdir();
+  }
+
+  public getStateDir(): string {
+    if (this.customBaseDir) {
+      return path.join(this.customBaseDir, 'state');
+    }
+    return configManager.getStateDir();
+  }
+
   public getMappingsFilePath(): string {
-    const baseDir = this.customBaseDir || configManager.getBaseDir();
-    return path.join(baseDir, 'profile-mappings.json');
+    return path.join(this.getStateDir(), 'profile-mappings.json');
   }
 
   public getActiveSessionFilePath(): string {
-    const baseDir = this.customBaseDir || configManager.getBaseDir();
-    return path.join(baseDir, 'active-session.json');
+    return path.join(this.getStateDir(), 'active-session.json');
   }
 
   public getProfilesCacheFilePath(): string {
-    const baseDir = this.customBaseDir || configManager.getBaseDir();
-    return path.join(baseDir, 'family-profiles-cache.json');
+    return path.join(this.getStateDir(), 'family-profiles-cache.json');
   }
 
   /**
    * Reads persistent local cache of family child profiles.
    */
   public async getCachedFamilyProfiles(): Promise<{ profiles: FamilyChildProfile[]; cachedAt: string } | null> {
-    const filePath = this.getProfilesCacheFilePath();
+    let filePath = this.getProfilesCacheFilePath();
     if (!fs.existsSync(filePath)) {
-      return null;
+      const legacyPath = path.join(this.customBaseDir || configManager.getBaseDir(), 'family-profiles-cache.json');
+      if (fs.existsSync(legacyPath)) {
+        filePath = legacyPath;
+      } else {
+        return null;
+      }
     }
     try {
       const raw = fs.readFileSync(filePath, 'utf8');
@@ -131,14 +187,14 @@ export class WindowsAccountManager {
    * Persists family child profiles to local cache with atomic write (temp -> fsync -> rename).
    */
   public async saveCachedFamilyProfiles(profiles: FamilyChildProfile[]): Promise<void> {
-    const baseDir = this.customBaseDir || configManager.getBaseDir();
-    if (!fs.existsSync(baseDir)) {
-      try { fs.mkdirSync(baseDir, { recursive: true }); } catch {}
+    const stateDir = this.getStateDir();
+    if (!fs.existsSync(stateDir)) {
+      try { fs.mkdirSync(stateDir, { recursive: true }); } catch {}
     }
     configManager.ensureDirectories();
 
     const filePath = this.getProfilesCacheFilePath();
-    const tempFile = path.join(baseDir, `family-profiles-cache.json.tmp.${process.pid}.${Date.now()}`);
+    const tempFile = path.join(stateDir, `family-profiles-cache.json.tmp.${process.pid}.${Date.now()}`);
     const payload = {
       profiles,
       cachedAt: new Date().toISOString(),
@@ -399,11 +455,17 @@ export class WindowsAccountManager {
 
   /**
    * Loads saved profile mappings from disk.
+   * Checks state directory first, with fallback to legacy base directory.
    */
   public async loadProfileMappings(): Promise<WindowsProfileMapping[]> {
-    const filePath = this.getMappingsFilePath();
+    let filePath = this.getMappingsFilePath();
     if (!fs.existsSync(filePath)) {
-      return [];
+      const legacyPath = path.join(this.customBaseDir || configManager.getBaseDir(), 'profile-mappings.json');
+      if (fs.existsSync(legacyPath)) {
+        filePath = legacyPath;
+      } else {
+        return [];
+      }
     }
 
     try {
@@ -479,16 +541,16 @@ export class WindowsAccountManager {
       });
     }
 
-    // Step 5: Directory Preparation (ensures directories exist without invoking icacls)
-    const baseDir = this.customBaseDir || configManager.getBaseDir();
-    if (!fs.existsSync(baseDir)) {
-      try { fs.mkdirSync(baseDir, { recursive: true }); } catch {}
+    // Step 5: Directory Preparation (ensures state directory exists)
+    const stateDir = this.getStateDir();
+    if (!fs.existsSync(stateDir)) {
+      try { fs.mkdirSync(stateDir, { recursive: true }); } catch {}
     }
     configManager.ensureDirectories();
 
     const filePath = this.getMappingsFilePath();
-    // Step 6: Atomic Temp File Creation
-    const tempFile = path.join(baseDir, `profile-mappings.json.tmp.${process.pid}.${Date.now()}`);
+    // Step 6: Atomic Temp File Creation in state dir
+    const tempFile = path.join(stateDir, `profile-mappings.json.tmp.${process.pid}.${Date.now()}`);
 
     const payload: SharedLaptopConfig = {
       deviceId: deviceId || 'dev-local',
@@ -514,7 +576,7 @@ export class WindowsAccountManager {
       // Step 9: Privilege-Aware ACL Application (Elevated/SYSTEM only)
       const isElevated = options?.isElevated ?? (await configManager.isAdministrator());
       if (isElevated && !options?.skipAcl && (process.platform === 'win32' || configManager.getPlatform() === 'win32')) {
-        configManager.applyWindowsAcls(filePath);
+        configManager.applyWindowsAcls(filePath, 'state');
       }
 
       // Step 10: Verification of Reload
@@ -560,6 +622,228 @@ export class WindowsAccountManager {
     deviceName?: string
   ): Promise<void> {
     await this.saveProfileMappingsTransaction(mappings, deviceId, deviceName);
+  }
+
+  /**
+   * Creates a staged mapping save request with single-use nonce, timestamp,
+   * deviceId binding, and SHA-256 payload integrity hash.
+   */
+  public async createMappingSaveRequest(
+    mappings: WindowsProfileMapping[],
+    deviceId: string,
+    deviceName?: string
+  ): Promise<{ nonce: string; reqPath: string; payload: MappingSaveRequestPayload }> {
+    const nonce = crypto.randomUUID();
+    const timestamp = new Date().toISOString();
+    const payloadHash = computeMappingPayloadHash(nonce, timestamp, deviceId, mappings);
+
+    const stagingDir = this.getStagingDir();
+    if (!fs.existsSync(stagingDir)) {
+      try {
+        fs.mkdirSync(stagingDir, { recursive: true });
+      } catch {}
+    }
+
+    const reqPath = path.join(stagingDir, `sb-mapping-req-${nonce}.json`);
+    const payload: MappingSaveRequestPayload = {
+      nonce,
+      timestamp,
+      deviceId,
+      deviceName,
+      mappings,
+      payloadHash,
+    };
+
+    fs.writeFileSync(reqPath, JSON.stringify(payload, null, 2), 'utf8');
+    return { nonce, reqPath, payload };
+  }
+
+  /**
+   * Locates a staged mapping save request by nonce across allowed staging directories.
+   * Never accepts arbitrary file paths.
+   */
+  public findMappingSaveRequest(nonce: string): string | null {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(nonce)) {
+      throw new Error('Invalid nonce format: must be a valid UUID v4.');
+    }
+
+    const candidateDirs = [
+      this.getStagingDir(),
+      os.tmpdir(),
+      process.env.TEMP,
+      process.env.TMP,
+      path.join(configManager.getBaseDir(), 'staging'),
+    ].filter(Boolean) as string[];
+
+    const filename = `sb-mapping-req-${nonce}.json`;
+
+    for (const dir of candidateDirs) {
+      const candidatePath = path.join(dir, filename);
+      if (fs.existsSync(candidatePath)) {
+        return candidatePath;
+      }
+    }
+
+    // Windows fallback: check standard user temp dirs if elevated
+    if (process.platform === 'win32') {
+      try {
+        const usersRoot = process.env.SystemDrive ? `${process.env.SystemDrive}\\Users` : 'C:\\Users';
+        if (fs.existsSync(usersRoot)) {
+          const userDirs = fs.readdirSync(usersRoot);
+          for (const u of userDirs) {
+            const userTemp = path.join(usersRoot, u, 'AppData', 'Local', 'Temp', filename);
+            if (fs.existsSync(userTemp)) {
+              return userTemp;
+            }
+          }
+        }
+      } catch {}
+    }
+
+    return null;
+  }
+
+  /**
+   * Applies and persists a staged mapping save request after strict verification:
+   * 1. Validate nonce UUID format
+   * 2. Locate staged file (reject arbitrary paths)
+   * 3. Read and immediately unlink file (replay prevention)
+   * 4. Verify timestamp freshness (<= 60 seconds)
+   * 5. Verify deviceId matches machine configuration
+   * 6. Verify payloadHash matches canonicalized payload
+   * 7. Check for duplicate SIDs in payload
+   * 8. Validate every SID against discovered machine accounts
+   * 9. Validate every childId against authoritative family profiles
+   * 10. Atomically write to state/profile-mappings.json
+   */
+  public async applyMappingSaveRequest(
+    nonce: string,
+    options?: {
+      expectedDeviceId?: string;
+      maxAgeMs?: number;
+      skipSidValidation?: boolean;
+      skipChildIdValidation?: boolean;
+    }
+  ): Promise<{ success: boolean; mappings: WindowsProfileMapping[] }> {
+    // 1. Nonce format validation
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(nonce)) {
+      throw new Error('Invalid nonce format: must be a valid UUID v4.');
+    }
+
+    // 2. Locate staged request file
+    const reqPath = this.findMappingSaveRequest(nonce);
+    if (!reqPath || !fs.existsSync(reqPath)) {
+      throw new Error(`Mapping save request file not found for nonce: ${nonce}`);
+    }
+
+    // 3. Immediately read and unlink to prevent replay
+    let raw: string;
+    try {
+      raw = fs.readFileSync(reqPath, 'utf8');
+    } finally {
+      try {
+        fs.unlinkSync(reqPath);
+      } catch {}
+    }
+
+    let payload: MappingSaveRequestPayload;
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      throw new Error('Invalid mapping save request: malformed JSON.');
+    }
+
+    if (!payload || typeof payload !== 'object' || !Array.isArray(payload.mappings)) {
+      throw new Error('Invalid mapping save request: missing required payload fields.');
+    }
+
+    if (payload.nonce !== nonce) {
+      throw new Error(`Nonce mismatch: payload contains '${payload.nonce}', expected '${nonce}'.`);
+    }
+
+    // 4. Timestamp freshness verification (default <= 60 seconds)
+    const maxAge = options?.maxAgeMs ?? 60000;
+    const reqTime = new Date(payload.timestamp).getTime();
+    if (isNaN(reqTime)) {
+      throw new Error('Invalid mapping save request: malformed timestamp.');
+    }
+    const ageMs = Date.now() - reqTime;
+    if (ageMs > maxAge || ageMs < -15000) {
+      throw new Error(`Mapping save request has expired (${Math.round(ageMs / 1000)}s old, max allowed is ${Math.round(maxAge / 1000)}s).`);
+    }
+
+    // 5. DeviceId verification
+    let expectedDevId = options?.expectedDeviceId;
+    if (!expectedDevId) {
+      try {
+        const sanitized = await configManager.loadSanitizedConfig();
+        expectedDevId = sanitized?.deviceId;
+      } catch {}
+    }
+    if (expectedDevId && payload.deviceId && payload.deviceId !== expectedDevId) {
+      throw new Error(
+        `DeviceId mismatch: request specifies '${payload.deviceId}', but machine is configured with '${expectedDevId}'.`
+      );
+    }
+
+    // 6. Cryptographic payload hash verification (tamper detection)
+    const expectedHash = computeMappingPayloadHash(
+      payload.nonce,
+      payload.timestamp,
+      payload.deviceId,
+      payload.mappings
+    );
+    if (payload.payloadHash !== expectedHash) {
+      throw new Error('Payload integrity check failed: payloadHash mismatch (tampering detected).');
+    }
+
+    // 7. Duplicate SID check
+    const seenSids = new Set<string>();
+    for (const m of payload.mappings) {
+      const cleanSid = String(m?.windowsSid || '').trim().toUpperCase();
+      if (!cleanSid) {
+        throw new Error('Mapping entry is missing a valid Windows SID.');
+      }
+      if (seenSids.has(cleanSid)) {
+        throw new Error(`Duplicate mapping detected for Windows SID: ${cleanSid}`);
+      }
+      seenSids.add(cleanSid);
+    }
+
+    // 8. SID existence validation against discovered machine accounts
+    if (!options?.skipSidValidation) {
+      const discovered = await this.discoverAccounts();
+      if (discovered.length > 0) {
+        const validSids = new Set(discovered.map((a) => a.sid.toUpperCase()));
+        for (const m of payload.mappings) {
+          const sid = (m.windowsSid || '').trim().toUpperCase();
+          if (!validSids.has(sid)) {
+            throw new Error(`Validation error: Windows SID '${m.windowsSid}' is not a valid discovered account on this machine.`);
+          }
+        }
+      }
+    }
+
+    // 9. Child ID existence validation against authoritative family profiles
+    if (!options?.skipChildIdValidation) {
+      const cached = await this.getCachedFamilyProfiles();
+      if (cached && Array.isArray(cached.profiles) && cached.profiles.length > 0) {
+        const validChildIds = new Set(cached.profiles.map((p) => p.id));
+        for (const m of payload.mappings) {
+          if (m.childId && !validChildIds.has(m.childId)) {
+            throw new Error(`Validation error: Child ID '${m.childId}' does not exist in family profiles.`);
+          }
+        }
+      }
+    }
+
+    // 10. Persist validated mappings atomically
+    return await this.saveProfileMappingsTransaction(
+      payload.mappings,
+      payload.deviceId,
+      payload.deviceName,
+      { isElevated: true }
+    );
   }
 
   /**

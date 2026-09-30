@@ -48,6 +48,11 @@ This document provides a comprehensive 30-point physical and automated verificat
 | **W28** | Device Reassignment | Reassigning device to different child from Parent Web | Updates child assignment, pushes new child policy to agent | Automated |
 | **W29** | Device Unpairing | Parent clicks Unpair Device in Parent Dashboard | Blacklists `deviceToken` in memory, deletes device from DB, revokes access | Automated |
 | **W30** | Security Hardening | WebSocket URL and HTTP telemetry audit | Zero credentials in query parameters (`/ws`); no token leak in GET responses | Automated |
+| **W31** | Security Hardening | ProgramData ACL Separation (`secure/` vs `state/`) | `secure/` blocks Users; `state/`, `logs/`, and root permit Users `RX` | Automated & Manual |
+| **W32** | Security Hardening | Sanitized configuration state verification | `state/sanitized-config.json` readable by standard user; contains 0 secrets | Automated & Manual |
+| **W33** | Anti-Tamper | Nonce-based elevated staging (`--apply-mappings-req`) | Single-use replay protection: file unlinked immediately upon reading | Automated |
+| **W34** | Anti-Tamper | Staging freshness & payload hash validation | Rejects requests older than 60s or with altered SHA-256 payloadHash | Automated |
+| **W35** | Integrity | Account SID & Child ID verification | Rejects unknown machine SIDs, duplicate SIDs, or unmapped child profiles | Automated |
 
 ---
 
@@ -112,5 +117,47 @@ This document provides a comprehensive 30-point physical and automated verificat
    - Click "Save Settings & Protect Laptop" again and approve the UAC elevation prompt (click "Yes" or enter admin PIN/password).
    - Verify that the success alert appears: `Shared laptop settings saved successfully!`
    - Verify that the application navigates smoothly to the Status screen.
-   - Confirm that `C:\ProgramData\SafeBrowse\profile-mappings.json` is updated atomically with verified ACLs and zero `Access is denied` errors.
+   - Confirm that `C:\ProgramData\SafeBrowse\state\profile-mappings.json` is updated atomically with verified ACLs and zero `Access is denied` errors.
+
+### Procedure 6: Least-Privilege Directory ACL & Sanitized State Verification
+1. Sign in as a standard non-administrative Windows user (e.g. `Rahul`).
+2. Open PowerShell (unelevated):
+   ```powershell
+   # Attempt to read secure directory (must be rejected)
+   Get-ChildItem -Path "C:\ProgramData\SafeBrowse\secure"
+   # Expected: Access is denied
+
+   # Read sanitized config (must succeed)
+   Get-Content -Path "C:\ProgramData\SafeBrowse\state\sanitized-config.json" | ConvertFrom-Json
+   # Expected: Returns deviceId, deviceName, backendUrl, platform.
+   # Invariant: deviceToken, parentToken, and network secrets are STRICTLY absent.
+
+   # Verify state directory readability
+   Get-ChildItem -Path "C:\ProgramData\SafeBrowse\state"
+   # Expected: Lists sanitized-config.json, profile-mappings.json, family-profiles-cache.json
+   ```
+3. Open browser to `http://127.0.0.1:8885`:
+   - Status page loads without any permission errors.
+   - Device name and assigned child profile render accurately.
+   - Accounts page lists human accounts without requesting UAC elevation for viewing.
+
+### Procedure 7: Nonce Staging & Single-Use Replay Protection Verification
+1. In `http://127.0.0.1:8885`, update a mapping and click **Save Settings & Protect Laptop**.
+2. Approve the UAC prompt.
+3. Verify in service logs (`C:\ProgramData\SafeBrowse\logs\agent.log`):
+   ```
+   [AccountManager] Applying mapping request nonce: <uuid-v4>
+   [AccountManager] Staging request unlinked immediately: ...
+   [AccountManager] Successfully applied mapping request <uuid-v4>
+   ```
+4. Attempt to replay the same nonce via elevated command prompt:
+   ```powershell
+   SafeBrowseChild-Pilot.exe --apply-mappings-req <uuid-v4>
+   ```
+   - Expected: Immediately fails with `Staging request not found for nonce: <uuid-v4>`.
+5. Verify freshness window:
+   - If a staging request older than 60 seconds is processed, verify rejection: `Staging request expired`.
+6. Verify hash integrity:
+   - If payload data is tampered with, verify rejection: `Payload hash mismatch: integrity verification failed`.
+
 

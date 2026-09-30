@@ -17,6 +17,16 @@ export interface DeviceConfig {
   migratedAt?: string;
 }
 
+export interface SanitizedDeviceConfig {
+  deviceId: string;
+  deviceName: string;
+  childId: string;
+  parentId: string;
+  backendUrl: string;
+  pairedAt?: string;
+  isPaired: boolean;
+}
+
 export class ConfigManager {
   public static readonly DEFAULT_PILOT_URL = 'https://safebrowse.porwal.online';
   private customBaseDir: string | null = null;
@@ -65,12 +75,32 @@ export class ConfigManager {
     return path.join(process.env.HOME || process.cwd(), '.safebrowse');
   }
 
+  /**
+   * Privileged secure storage directory (SYSTEM and Administrators ONLY, no Users).
+   * Holds device-config.json (credentials, tokens) and network-backup.json.
+   */
+  public getSecureDir(): string {
+    return path.join(this.getBaseDir(), 'secure');
+  }
+
+  /**
+   * Sanitized machine state directory (SYSTEM and Administrators Full Control, Users RX).
+   * Holds sanitized-config.json, profile-mappings.json, family-profiles-cache.json, active-session.json.
+   */
+  public getStateDir(): string {
+    return path.join(this.getBaseDir(), 'state');
+  }
+
   public getConfigFilePath(): string {
-    return path.join(this.getBaseDir(), 'device-config.json');
+    return path.join(this.getSecureDir(), 'device-config.json');
+  }
+
+  public getSanitizedConfigFilePath(): string {
+    return path.join(this.getStateDir(), 'sanitized-config.json');
   }
 
   public getNetworkBackupFilePath(): string {
-    return path.join(this.getBaseDir(), 'network-backup.json');
+    return path.join(this.getSecureDir(), 'network-backup.json');
   }
 
   public getLogsDir(): string {
@@ -82,15 +112,38 @@ export class ConfigManager {
   }
 
   /**
-   * Builds the Windows icacls command to secure base storage.
-   * - Strips inherited permissive permissions from ProgramData (/inheritance:r)
+   * Builds the Windows icacls command for root storage (C:\ProgramData\SafeBrowse).
+   * Grants SYSTEM (F), Administrators (F), Users (RX) to allow traversal into state and logs.
+   */
+  public getWindowsRootAclCommand(targetDir: string): string {
+    return `icacls "${targetDir}" /grant:r "SYSTEM":(OI)(CI)F /grant:r "BUILTIN\\Administrators":(OI)(CI)F /grant:r "Users":(OI)(CI)RX /q`;
+  }
+
+  /**
+   * Builds the Windows icacls command to secure sensitive credential storage (secure\).
+   * - Strips inherited permissive permissions from parent directory (/inheritance:r)
    * - Grants SYSTEM Full Control with Object & Container inheritance ((OI)(CI)F)
    * - Grants BUILTIN\Administrators Full Control with Object & Container inheritance ((OI)(CI)F)
    * - Explicitly removes any granted permissions for standard Users (/remove:g Users)
-   * - Restricts device-config.json, network-backup.json, cache, and logs from child/standard user accounts
+   * - Restricts device-config.json, network-backup.json, and sensitive machine configuration
+   */
+  public getWindowsSecureAclCommand(targetDir: string): string {
+    return `icacls "${targetDir}" /inheritance:r /grant:r "SYSTEM":(OI)(CI)F /grant:r "BUILTIN\\Administrators":(OI)(CI)F /remove:g "Users" /q`;
+  }
+
+  /**
+   * Builds the Windows icacls command for state and log directories.
+   * Grants SYSTEM (F), Administrators (F), and standard Users Read & Execute (RX).
+   */
+  public getWindowsStateAclCommand(targetDir: string): string {
+    return `icacls "${targetDir}" /grant:r "SYSTEM":(OI)(CI)F /grant:r "BUILTIN\\Administrators":(OI)(CI)F /grant:r "Users":(OI)(CI)RX /q`;
+  }
+
+  /**
+   * Backward-compatible alias for secure directory ACL command.
    */
   public getWindowsAclCommand(targetDir: string): string {
-    return `icacls "${targetDir}" /inheritance:r /grant:r "SYSTEM":(OI)(CI)F /grant:r "BUILTIN\\Administrators":(OI)(CI)F /remove:g "Users" /q`;
+    return this.getWindowsSecureAclCommand(targetDir);
   }
 
   private mockIsAdministrator: boolean | null = null;
@@ -118,11 +171,19 @@ export class ConfigManager {
   }
 
   /**
-   * Applies secure Windows ACLs to target directory.
+   * Applies Windows ACLs to target directory based on security zone.
    * Fails closed on Windows if permissions cannot be secured.
    */
-  public applyWindowsAcls(targetDir: string): void {
-    const cmd = this.getWindowsAclCommand(targetDir);
+  public applyWindowsAcls(targetDir: string, type: 'secure' | 'state' | 'root' = 'secure'): void {
+    let cmd: string;
+    if (type === 'secure') {
+      cmd = this.getWindowsSecureAclCommand(targetDir);
+    } else if (type === 'state') {
+      cmd = this.getWindowsStateAclCommand(targetDir);
+    } else {
+      cmd = this.getWindowsRootAclCommand(targetDir);
+    }
+
     if (this.aclExecutor) {
       this.aclExecutor(cmd);
       return;
@@ -139,11 +200,16 @@ export class ConfigManager {
   }
 
   /**
-   * Ensures base directories exist.
-   * Privileged machine ACLs are decoupled and owned strictly by installer & LocalSystem service.
+   * Ensures base, secure, state, logs, and cache directories exist.
    */
   public ensureDirectories(): void {
-    const dirs = [this.getBaseDir(), this.getLogsDir(), this.getCacheDir()];
+    const dirs = [
+      this.getBaseDir(),
+      this.getSecureDir(),
+      this.getStateDir(),
+      this.getLogsDir(),
+      this.getCacheDir(),
+    ];
     for (const dir of dirs) {
       if (!fs.existsSync(dir)) {
         try {
@@ -154,12 +220,19 @@ export class ConfigManager {
   }
 
   /**
-   * Applies machine-level ACL hardening (SYSTEM and Administrators Full Control only).
+   * Applies machine-level ACL hardening across all SafeBrowse directories:
+   * - Root: SYSTEM (F), Administrators (F), Users (RX)
+   * - Secure: SYSTEM (F), Administrators (F), /inheritance:r, Users REMOVED
+   * - State: SYSTEM (F), Administrators (F), Users (RX)
+   * - Logs: SYSTEM (F), Administrators (F), Users (RX)
    * Owned strictly by the privileged LocalSystem service upon startup or installer.
    */
   public hardenMachineDirectories(): void {
     this.ensureDirectories();
-    this.applyWindowsAcls(this.getBaseDir());
+    this.applyWindowsAcls(this.getBaseDir(), 'root');
+    this.applyWindowsAcls(this.getSecureDir(), 'secure');
+    this.applyWindowsAcls(this.getStateDir(), 'state');
+    this.applyWindowsAcls(this.getLogsDir(), 'state');
   }
 
   /**
@@ -355,6 +428,27 @@ export class ConfigManager {
   public async migrateLegacyConfigIfPresent(explicitLegacyPath?: string): Promise<boolean> {
     const targetPath = this.getConfigFilePath();
     if (fs.existsSync(targetPath)) {
+      // Even if secure target exists, ensure sanitized-config.json exists in state/
+      const sanitizedPath = this.getSanitizedConfigFilePath();
+      if (!fs.existsSync(sanitizedPath)) {
+        try {
+          const raw = fs.readFileSync(targetPath, 'utf8');
+          const parsed = JSON.parse(raw);
+          if (parsed && parsed.deviceId) {
+            const sanitized: SanitizedDeviceConfig = {
+              deviceId: parsed.deviceId,
+              deviceName: parsed.deviceName || 'Windows Laptop',
+              childId: parsed.childId || '',
+              parentId: parsed.parentId || '',
+              backendUrl: parsed.backendUrl || ConfigManager.DEFAULT_PILOT_URL,
+              pairedAt: parsed.pairedAt,
+              isPaired: true,
+            };
+            this.ensureDirectories();
+            fs.writeFileSync(sanitizedPath, JSON.stringify(sanitized, null, 2), 'utf8');
+          }
+        } catch {}
+      }
       return false; // Target already exists, no migration needed
     }
 
@@ -362,6 +456,7 @@ export class ConfigManager {
     const legacyCandidates = [
       ...(explicitLegacyPath ? [explicitLegacyPath] : []),
       ...(this.customLegacyPath ? [this.customLegacyPath] : []),
+      path.join(this.getBaseDir(), 'device-config.json'),
       path.join(process.cwd(), 'device-config.json'),
       path.join(process.env.ProgramFiles || 'C:\\Program Files', 'SafeBrowse', 'device-config.json'),
     ];
@@ -391,6 +486,21 @@ export class ConfigManager {
             fs.writeFileSync(tempTargetPath, JSON.stringify(parsed, null, 2), 'utf8');
             fs.renameSync(tempTargetPath, targetPath);
 
+            // Write sanitized state configuration (without any tokens/credentials)
+            const sanitizedPath = this.getSanitizedConfigFilePath();
+            const sanitized: SanitizedDeviceConfig = {
+              deviceId: parsed.deviceId,
+              deviceName: parsed.deviceName || 'Windows Laptop',
+              childId: parsed.childId || '',
+              parentId: parsed.parentId || '',
+              backendUrl: parsed.backendUrl || ConfigManager.DEFAULT_PILOT_URL,
+              pairedAt: parsed.pairedAt,
+              isPaired: true,
+            };
+            const tempSanitized = `${sanitizedPath}.tmp.${Date.now()}`;
+            fs.writeFileSync(tempSanitized, JSON.stringify(sanitized, null, 2), 'utf8');
+            fs.renameSync(tempSanitized, sanitizedPath);
+
             // Legacy file is not deleted until secured target file is confirmed to exist
             if (fs.existsSync(targetPath)) {
               try {
@@ -399,6 +509,16 @@ export class ConfigManager {
               } catch (unlinkErr: any) {
                 console.warn(`[ConfigManager] Could not remove legacy config file at ${legacyPath}: ${unlinkErr.message}`);
               }
+            }
+
+            // Migrate legacy network backup if present
+            const legacyBackup = path.join(this.getBaseDir(), 'network-backup.json');
+            const targetBackup = this.getNetworkBackupFilePath();
+            if (fs.existsSync(legacyBackup) && path.resolve(legacyBackup) !== path.resolve(targetBackup) && !fs.existsSync(targetBackup)) {
+              try {
+                fs.copyFileSync(legacyBackup, targetBackup);
+                fs.unlinkSync(legacyBackup);
+              } catch {}
             }
 
             console.log(`[ConfigManager] Successfully migrated legacy configuration from ${legacyPath} to ${targetPath}`);
@@ -485,16 +605,63 @@ export class ConfigManager {
   }
 
   /**
+   * Loads sanitized device configuration (safe for non-elevated GUI).
+   * Reads from secure directory if accessible, otherwise falls back to state/sanitized-config.json.
+   * Guarantees zero secrets / zero tokens in return value.
+   */
+  public async loadSanitizedConfig(): Promise<SanitizedDeviceConfig | null> {
+    // 1. If elevated, try loading full device config to get authoritative data
+    try {
+      const full = await this.loadDeviceConfig();
+      if (full) {
+        return {
+          deviceId: full.deviceId,
+          deviceName: full.deviceName,
+          childId: full.childId,
+          parentId: full.parentId,
+          backendUrl: full.backendUrl,
+          pairedAt: full.pairedAt,
+          isPaired: true,
+        };
+      }
+    } catch {}
+
+    // 2. If unelevated or full config unreadable, load sanitized config from state/
+    const sanitizedPath = this.getSanitizedConfigFilePath();
+    if (fs.existsSync(sanitizedPath)) {
+      try {
+        const raw = fs.readFileSync(sanitizedPath, 'utf8');
+        const data = JSON.parse(raw);
+        if (data && data.deviceId) {
+          return {
+            deviceId: data.deviceId,
+            deviceName: data.deviceName || 'Windows Laptop',
+            childId: data.childId || '',
+            parentId: data.parentId || '',
+            backendUrl: data.backendUrl || ConfigManager.DEFAULT_PILOT_URL,
+            pairedAt: data.pairedAt,
+            isPaired: true,
+          };
+        }
+      } catch (err: any) {
+        console.warn(`[ConfigManager] Error reading ${sanitizedPath}: ${err.message}`);
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Persists device configuration into ProgramData.
-   * On Windows:
-   *  - Encrypts deviceToken with DPAPI LocalMachine
-   *  - Fails closed if encryption fails (throws, never writes plaintext)
-   *  - Persisted JSON only contains deviceTokenEncrypted (deviceToken is omitted)
+   * - Saves full config (with encrypted token, omitting plaintext) to secure/device-config.json
+   * - Saves sanitized config (zero secrets) to state/sanitized-config.json
    */
   public async saveDeviceConfig(config: DeviceConfig): Promise<void> {
     this.ensureDirectories();
     if (process.platform === 'win32' || this.getPlatform() === 'win32') {
-      this.applyWindowsAcls(this.getBaseDir());
+      this.applyWindowsAcls(this.getBaseDir(), 'root');
+      this.applyWindowsAcls(this.getSecureDir(), 'secure');
+      this.applyWindowsAcls(this.getStateDir(), 'state');
     }
     const configPath = this.getConfigFilePath();
 
@@ -527,6 +694,22 @@ export class ConfigManager {
     const tempConfigPath = `${configPath}.tmp.${Date.now()}`;
     fs.writeFileSync(tempConfigPath, JSON.stringify(recordToSave, null, 2), 'utf8');
     fs.renameSync(tempConfigPath, configPath);
+
+    // Write sanitized configuration into state directory (contains ZERO secrets)
+    const sanitizedRecord: SanitizedDeviceConfig = {
+      deviceId: config.deviceId,
+      deviceName: config.deviceName || 'Windows Laptop',
+      childId: config.childId || '',
+      parentId: config.parentId || '',
+      backendUrl: validatedUrl,
+      pairedAt: recordToSave.pairedAt,
+      isPaired: true,
+    };
+    const sanitizedPath = this.getSanitizedConfigFilePath();
+    const tempSanitizedPath = `${sanitizedPath}.tmp.${Date.now()}`;
+    fs.writeFileSync(tempSanitizedPath, JSON.stringify(sanitizedRecord, null, 2), 'utf8');
+    fs.renameSync(tempSanitizedPath, sanitizedPath);
+
     console.log(`[ConfigManager] Device configuration persisted securely at: ${configPath}`);
   }
 
@@ -547,32 +730,54 @@ export class ConfigManager {
     }
 
     const configPath = this.getConfigFilePath();
+    const sanitizedPath = this.getSanitizedConfigFilePath();
     const baseDir = this.getBaseDir();
 
+    // 1. Check secure config first
     try {
-      fs.accessSync(configPath, fs.constants.R_OK);
-      return 'CONFIGURED';
+      if (fs.existsSync(configPath)) {
+        fs.accessSync(configPath, fs.constants.R_OK);
+        return 'CONFIGURED';
+      }
+    } catch (err: any) {
+      if (err.code === 'EACCES' || err.code === 'EPERM') {
+        // If secure config is access-denied, check if sanitized config is readable
+        try {
+          if (fs.existsSync(sanitizedPath)) {
+            fs.accessSync(sanitizedPath, fs.constants.R_OK);
+            return 'CONFIGURED';
+          }
+        } catch {}
+        return 'ACCESS_DENIED';
+      }
+    }
+
+    // 2. Check sanitized config
+    try {
+      if (fs.existsSync(sanitizedPath)) {
+        fs.accessSync(sanitizedPath, fs.constants.R_OK);
+        return 'CONFIGURED';
+      }
     } catch (err: any) {
       if (err.code === 'EACCES' || err.code === 'EPERM') {
         return 'ACCESS_DENIED';
       }
-      if (err.code === 'ENOENT') {
-        // config file is missing; check if baseDir itself is accessible or restricted
-        try {
-          fs.accessSync(baseDir, fs.constants.R_OK);
-        } catch (dirErr: any) {
-          if (dirErr.code === 'EACCES' || dirErr.code === 'EPERM') {
-            return 'ACCESS_DENIED';
-          }
-        }
-        return 'NOT_PAIRED';
+    }
+
+    // 3. Neither exists. Check if baseDir is accessible
+    try {
+      fs.accessSync(baseDir, fs.constants.R_OK);
+      return 'NOT_PAIRED';
+    } catch (dirErr: any) {
+      if (dirErr.code === 'EACCES' || dirErr.code === 'EPERM') {
+        return 'ACCESS_DENIED';
       }
       return 'NOT_PAIRED';
     }
   }
 
   public hasDeviceConfig(): boolean {
-    return fs.existsSync(this.getConfigFilePath());
+    return fs.existsSync(this.getConfigFilePath()) || fs.existsSync(this.getSanitizedConfigFilePath());
   }
 }
 

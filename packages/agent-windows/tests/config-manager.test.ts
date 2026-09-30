@@ -407,4 +407,142 @@ describe('SafeBrowse Windows ConfigManager & Endpoint Validator Tests', () => {
     // Verify config file was NOT created
     assert.strictEqual(fs.existsSync(aclFailManager.getConfigFilePath()), false);
   });
+
+  it('22. should construct secure ACL command for secure/ directory: SYSTEM & Administrators only, Users removed', () => {
+    const secureDir = manager.getSecureDir();
+    const cmd = manager.getWindowsSecureAclCommand(secureDir);
+
+    assert.ok(cmd.includes('/inheritance:r'), 'Must remove inherited permissions');
+    assert.ok(cmd.includes('"SYSTEM":(OI)(CI)F'), 'Must grant SYSTEM Full Control');
+    assert.ok(cmd.includes('Administrators":(OI)(CI)F'), 'Must grant BUILTIN\\Administrators Full Control');
+    assert.ok(cmd.includes('/remove:g "Users"'), 'Must explicitly remove Users group');
+    assert.strictEqual(cmd.includes('Users":(OI)(CI)RX'), false, 'Must NOT grant Users RX in secure/');
+  });
+
+  it('23. should construct state ACL command for state/ directory: Users RX, SYSTEM & Administrators Full Control', () => {
+    const stateDir = manager.getStateDir();
+    const cmd = manager.getWindowsStateAclCommand(stateDir);
+
+    assert.ok(cmd.includes('"SYSTEM":(OI)(CI)F'), 'Must grant SYSTEM Full Control');
+    assert.ok(cmd.includes('Administrators":(OI)(CI)F'), 'Must grant BUILTIN\\Administrators Full Control');
+    assert.ok(cmd.includes('"Users":(OI)(CI)RX'), 'Must grant Users Read and Execute');
+    assert.strictEqual(cmd.includes('/remove:g "Users"'), false, 'Must NOT remove Users from state/');
+  });
+
+  it('24. should construct root ACL command for base directory: Users RX, SYSTEM & Administrators Full Control', () => {
+    const baseDir = manager.getBaseDir();
+    const cmd = manager.getWindowsRootAclCommand(baseDir);
+
+    assert.ok(cmd.includes('"SYSTEM":(OI)(CI)F'), 'Must grant SYSTEM Full Control');
+    assert.ok(cmd.includes('Administrators":(OI)(CI)F'), 'Must grant BUILTIN\\Administrators Full Control');
+    assert.ok(cmd.includes('"Users":(OI)(CI)RX'), 'Must grant Users Read and Execute');
+  });
+
+  it('25. should execute hardenMachineDirectories applying root ACL to base, secure ACL to secure, state ACL to state and logs', () => {
+    const hardenTmpDir = path.join(os.tmpdir(), 'sb-harden-test-' + Date.now());
+    const hardenManager = new ConfigManager(hardenTmpDir);
+    const executedCmds: string[] = [];
+
+    hardenManager.setAclExecutorForTesting((cmd: string) => {
+      executedCmds.push(cmd);
+    });
+
+    hardenManager.hardenMachineDirectories();
+
+    assert.strictEqual(executedCmds.length, 4, 'Must execute exactly 4 ACL commands');
+    // 1. Root
+    assert.ok(executedCmds[0].includes(hardenManager.getBaseDir()));
+    assert.ok(executedCmds[0].includes('"Users":(OI)(CI)RX'));
+
+    // 2. Secure
+    assert.ok(executedCmds[1].includes(hardenManager.getSecureDir()));
+    assert.ok(executedCmds[1].includes('/inheritance:r'));
+    assert.ok(executedCmds[1].includes('/remove:g "Users"'));
+
+    // 3. State
+    assert.ok(executedCmds[2].includes(hardenManager.getStateDir()));
+    assert.ok(executedCmds[2].includes('"Users":(OI)(CI)RX'));
+
+    // 4. Logs
+    assert.ok(executedCmds[3].includes(hardenManager.getLogsDir()));
+    assert.ok(executedCmds[3].includes('"Users":(OI)(CI)RX'));
+  });
+
+  it('26. should saveDeviceConfig writing secure/device-config.json and state/sanitized-config.json with zero token exposure', async () => {
+    const splitDir = path.join(os.tmpdir(), 'sb-split-test-' + Date.now());
+    const splitManager = new ConfigManager(splitDir);
+
+    const config: DeviceConfig = {
+      deviceId: 'dev-split-1',
+      deviceToken: 'ultra-secret-token-never-expose',
+      childId: 'child-100',
+      parentId: 'parent-200',
+      deviceName: 'Shared Family Laptop',
+      backendUrl: 'http://100.88.17.16:11002',
+    };
+
+    await splitManager.saveDeviceConfig(config);
+
+    // 1. Verify secure file has encrypted token and no plaintext token
+    const securePath = splitManager.getConfigFilePath();
+    assert.strictEqual(fs.existsSync(securePath), true);
+    assert.ok(securePath.includes(path.join(splitDir, 'secure')));
+    const rawSecure = fs.readFileSync(securePath, 'utf8');
+    assert.strictEqual(rawSecure.includes('ultra-secret-token-never-expose'), false);
+    const parsedSecure = JSON.parse(rawSecure);
+    assert.strictEqual(parsedSecure.deviceToken, undefined);
+    assert.ok(parsedSecure.deviceTokenEncrypted);
+
+    // 2. Verify state file has sanitized config and zero tokens (encrypted or plaintext)
+    const sanitizedPath = splitManager.getSanitizedConfigFilePath();
+    assert.strictEqual(fs.existsSync(sanitizedPath), true);
+    assert.ok(sanitizedPath.includes(path.join(splitDir, 'state')));
+    const rawSanitized = fs.readFileSync(sanitizedPath, 'utf8');
+    assert.strictEqual(rawSanitized.includes('ultra-secret-token-never-expose'), false);
+    assert.strictEqual(rawSanitized.includes('deviceToken'), false);
+    assert.strictEqual(rawSanitized.includes('deviceTokenEncrypted'), false);
+
+    const parsedSanitized = JSON.parse(rawSanitized);
+    assert.strictEqual(parsedSanitized.deviceId, 'dev-split-1');
+    assert.strictEqual(parsedSanitized.deviceName, 'Shared Family Laptop');
+    assert.strictEqual(parsedSanitized.childId, 'child-100');
+    assert.strictEqual(parsedSanitized.parentId, 'parent-200');
+    assert.strictEqual(parsedSanitized.isPaired, true);
+  });
+
+  it('27. should loadSanitizedConfig successfully when secure directory is restricted/inaccessible', async () => {
+    const restrictDir = path.join(os.tmpdir(), 'sb-restrict-test-' + Date.now());
+    const restrictManager = new ConfigManager(restrictDir);
+
+    // Seed state directory with sanitized config
+    const stateDir = restrictManager.getStateDir();
+    fs.mkdirSync(stateDir, { recursive: true });
+    const sanitizedPath = restrictManager.getSanitizedConfigFilePath();
+    fs.writeFileSync(
+      sanitizedPath,
+      JSON.stringify({
+        deviceId: 'dev-unelevated-1',
+        deviceName: 'Unelevated Laptop',
+        childId: 'child-abc',
+        parentId: 'parent-xyz',
+        backendUrl: 'http://100.88.17.16:11002',
+        isPaired: true,
+      }),
+      'utf8'
+    );
+
+    // Simulate loadDeviceConfig failing (e.g. Access Denied on secure/)
+    restrictManager.loadDeviceConfig = async () => {
+      throw new Error('EACCES: permission denied, open secure/device-config.json');
+    };
+
+    const sanitized = await restrictManager.loadSanitizedConfig();
+    assert.ok(sanitized);
+    assert.strictEqual(sanitized.deviceId, 'dev-unelevated-1');
+    assert.strictEqual(sanitized.deviceName, 'Unelevated Laptop');
+    assert.strictEqual(sanitized.childId, 'child-abc');
+    assert.strictEqual(sanitized.isPaired, true);
+    assert.strictEqual((sanitized as any).deviceToken, undefined);
+    assert.strictEqual((sanitized as any).deviceTokenEncrypted, undefined);
+  });
 });

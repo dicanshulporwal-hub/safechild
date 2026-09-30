@@ -52,7 +52,7 @@ export class GuiServer {
         // API Routes
         if (pathname === '/api/status' && req.method === 'GET') {
           try {
-            const config = await this.configMgr.loadDeviceConfig();
+            const config = await this.configMgr.loadSanitizedConfig();
             const mappings = await this.accountMgr.loadProfileMappings();
             const activeSession = await this.accountMgr.getActiveConsoleSession();
             const activePolicy = await this.accountMgr.resolveUserPolicy(activeSession.sid, activeSession.username);
@@ -125,25 +125,58 @@ export class GuiServer {
 
         if (pathname === '/api/family-profiles' && req.method === 'GET') {
           try {
-            const config = await this.configMgr.loadDeviceConfig();
-            if (!config) {
+            const sanitized = await this.configMgr.loadSanitizedConfig();
+            if (!sanitized) {
               res.writeHead(400, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: 'Device is not yet paired.' }));
               return;
             }
 
-            const profileRes = await this.accountMgr.fetchFamilyProfilesWithResilience(
-              config.backendUrl,
-              config.deviceId,
-              config.deviceToken
-            );
+            let profileRes: any = null;
+            // 1. If elevated or credentials accessible, attempt live cloud fetch
+            try {
+              const fullConfig = await this.configMgr.loadDeviceConfig();
+              if (fullConfig && fullConfig.deviceToken) {
+                profileRes = await this.accountMgr.fetchFamilyProfilesWithResilience(
+                  fullConfig.backendUrl,
+                  fullConfig.deviceId,
+                  fullConfig.deviceToken
+                );
+              }
+            } catch (cloudErr: any) {
+              console.warn(`[SafeBrowse GUI] Cloud profile fetch note: ${cloudErr.message}`);
+            }
+
+            // 2. If cloud fetch unavailable or caller is unelevated, fallback seamlessly to local cache
+            if (!profileRes) {
+              const cached = await this.accountMgr.getCachedFamilyProfiles();
+              if (cached && Array.isArray(cached.profiles) && cached.profiles.length > 0) {
+                profileRes = {
+                  profiles: cached.profiles,
+                  fromCache: true,
+                  cachedAt: cached.cachedAt,
+                };
+              }
+            }
+
+            if (profileRes) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(
+                JSON.stringify({
+                  profiles: profileRes.profiles,
+                  fromCache: Boolean(profileRes.fromCache),
+                  cachedAt: profileRes.cachedAt,
+                })
+              );
+              return;
+            }
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(
               JSON.stringify({
-                profiles: profileRes.profiles,
-                fromCache: Boolean(profileRes.fromCache),
-                cachedAt: profileRes.cachedAt,
+                profiles: [],
+                fromCache: true,
+                error: 'No family profiles cached yet.',
               })
             );
           } catch (e: any) {
@@ -246,7 +279,7 @@ export class GuiServer {
             try {
               const data = JSON.parse(body);
               const mappings: WindowsProfileMapping[] = Array.isArray(data.mappings) ? data.mappings : [];
-              const config = await this.configMgr.loadDeviceConfig();
+              const config = await this.configMgr.loadSanitizedConfig();
               const deviceId = config?.deviceId || 'dev-local';
               const deviceName = config?.deviceName || 'Family Laptop';
 
@@ -264,16 +297,11 @@ export class GuiServer {
                 return;
               }
 
-              // Unelevated execution on Windows: invoke elevated helper via UAC
-              const tempReqFile = path.join(
-                os.tmpdir(),
-                `safebrowse-mappings-req-${Date.now()}-${process.pid}.json`
-              );
-
-              fs.writeFileSync(
-                tempReqFile,
-                JSON.stringify({ mappings, deviceId, deviceName }, null, 2),
-                'utf8'
+              // Unelevated execution on Windows: stage request and invoke elevated helper via UAC
+              const { nonce, reqPath } = await this.accountMgr.createMappingSaveRequest(
+                mappings,
+                deviceId,
+                deviceName
               );
 
               const psPath = this.configMgr.getPowerShellPath();
@@ -281,8 +309,8 @@ export class GuiServer {
               const isNode = exePath.toLowerCase().endsWith('node.exe') || exePath.toLowerCase().endsWith('node');
 
               const psCmd = isNode
-                ? `Start-Process -FilePath "${exePath}" -ArgumentList "${process.argv[1]} --apply-mappings \\"${tempReqFile}\\"" -Verb RunAs -Wait -PassThru`
-                : `Start-Process -FilePath "${exePath}" -ArgumentList "--apply-mappings \\"${tempReqFile}\\"" -Verb RunAs -Wait -PassThru`;
+                ? `Start-Process -FilePath "${exePath}" -ArgumentList "${process.argv[1]} --apply-mappings-req ${nonce}" -Verb RunAs -Wait -PassThru`
+                : `Start-Process -FilePath "${exePath}" -ArgumentList "--apply-mappings-req ${nonce}" -Verb RunAs -Wait -PassThru`;
 
               try {
                 await execFileAsync(psPath, [
@@ -310,7 +338,7 @@ export class GuiServer {
                   })
                 );
               } catch (uacErr: any) {
-                try { if (fs.existsSync(tempReqFile)) fs.unlinkSync(tempReqFile); } catch {}
+                try { if (fs.existsSync(reqPath)) fs.unlinkSync(reqPath); } catch {}
                 res.writeHead(403, { 'Content-Type': 'application/json' });
                 res.end(
                   JSON.stringify({

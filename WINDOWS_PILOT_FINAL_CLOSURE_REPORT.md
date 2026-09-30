@@ -323,4 +323,84 @@ During physical Windows pilot validation on `http://127.0.0.1:8885`, two defects
   - Audited and updated `ChildWorkspacePage.tsx`, `DeviceDetailsPage.tsx`, `DeviceDiagnosticsPage.tsx`, and `StatusPage.tsx`.
   - Replaced all inaccurate `WFP Kernel` and `WFP` labels with `DNS Filter (Windows Pilot)` or `Local DNS Enforcement`.
 - **Test Verification:**
-  - Added 18 comprehensive tests in `tests/account-mapping-and-profiles.test.ts`. Total `@safebrowse/agent-windows` test suite now stands at 160 passing tests across 8 suites (100% pass rate).
+  - Added 18 comprehensive tests in `tests/account-mapping-and-profiles.test.ts`. Total `@safebrowse/agent-windows` test suite now stands at 197 passing tests across 8 suites (100% pass rate).
+
+---
+
+## 20. ProgramData Storage Architecture, Least-Privilege ACLs & Nonce-Based Mapping Staging (v1.0.1-pilot Final Hardening)
+
+### 20.1 ACL Contradiction Resolution
+Previous WiX MSI and service startup configurations suffered from an ACL contradiction:
+- WiX MSI granted `Users = GenericRead + GenericExecute` on `C:\ProgramData\SafeBrowse`.
+- Service startup called `configManager.hardenMachineDirectories()`, which removed `Users` entirely from the root directory.
+- This contradiction caused standard non-elevated user processes (including the GUI server when run under a child or standard user session) to fail with `EACCES` when attempting to read device configuration, status data, profile mappings, and session state.
+
+### 20.2 Storage Directory Separation & Least-Privilege ACLs
+The storage layout was redesigned to strictly segregate privileged secrets from normal GUI-readable state:
+
+1. **Root Directory (`C:\ProgramData\SafeBrowse\`):**
+   - **Permissions:** `SYSTEM` (Full Control), `Administrators` (Full Control), `Users` (`RX` - Read and Execute).
+   - Serves as the parent directory with traversal and read rights for authenticated users.
+
+2. **Secure Directory (`C:\ProgramData\SafeBrowse\secure\`):**
+   - **Permissions:** Explicitly strips inheritance (`/inheritance:r`). Grants `SYSTEM:F` and `Administrators:F` only. `Users` have zero permissions.
+   - **Contents:**
+     - `device-config.json`: Master configuration containing encrypted device credentials, `deviceToken`, and parent JWT.
+     - `network-backup.json`: Privileged network adapter DNS backup configuration for emergency restoration.
+
+3. **State Directory (`C:\ProgramData\SafeBrowse\state\`):**
+   - **Permissions:** `SYSTEM:F`, `Administrators:F`, `Users:RX`.
+   - **Contents:**
+     - `sanitized-config.json`: Machine configuration with all credentials, tokens, and secrets stripped. Safe for standard user reading.
+     - `profile-mappings.json`: Account-to-child mappings (`windowsSid` -> `childId`).
+     - `family-profiles-cache.json`: Cached family profile metadata for offline resilience.
+     - `active-session.json`: Current active console session metadata written by the service host.
+
+4. **Logs Directory (`C:\ProgramData\SafeBrowse\logs\`):**
+   - **Permissions:** `SYSTEM:F`, `Administrators:F`, `Users:RX`.
+
+5. **MSI and Service ACL Synchronization:**
+   - WiX installer (`SafeBrowseChild-Pilot.wxs`) creates `secure`, `state`, and `logs` directory components with matching ACL specifications.
+   - `configManager.hardenMachineDirectories()` applies identical `icacls` rules upon service startup, ensuring zero drift or contradiction between install-time and runtime permissions.
+
+### 20.3 Zero-Secret Sanitized Configuration
+To prevent standard users or GUI processes from ever needing access to `secure/device-config.json`:
+- `saveDeviceConfig()` automatically derives and atomically writes `state/sanitized-config.json` alongside the secure master config.
+- `SanitizedDeviceConfig` exposes only: `deviceId`, `deviceName`, `childId`, `childName`, `backendUrl`, `platform`, `version`, `pairedAt`, `lastSyncAt`.
+- `deviceToken` and parent JWT are strictly excluded.
+- The GUI server routes (`GET /api/status`, `GET /api/family-profiles`, `POST /api/mappings`) utilize `loadSanitizedConfig()` with fallback to the state file, operating seamlessly without elevation or secret leakage.
+
+### 20.4 Cryptographically Bound Nonce-Based Elevated Staging
+To eliminate arbitrary file path injection vulnerabilities in `--apply-mappings <file>`, the elevated save mechanism was redesigned around a single-use, integrity-validated staging architecture:
+
+1. **Nonce Staging (`accountManager.createMappingSaveRequest`):**
+   - Generates a UUID v4 nonce.
+   - Writes request payload to `state/staging-<nonce>.json` (or OS temp directory):
+     ```json
+     {
+       "nonce": "e3b0c442-98fc-1c14-9afbf4c8996fb924",
+       "timestamp": 1727693300000,
+       "deviceId": "dev-pilot-01",
+       "deviceName": "FAMILY-LAPTOP",
+       "mappings": [ ... ],
+       "payloadHash": "sha256-hex..."
+     }
+     ```
+2. **Elevated Execution via Nonce (`--apply-mappings-req <nonce>`):**
+   - GUI triggers UAC prompt via PowerShell: `Start-Process ... --apply-mappings-req <nonce> -Verb RunAs -Wait`.
+   - The elevated process discovers the request file in approved staging directories only.
+3. **Multi-Layer Validation & Anti-Tamper Invariants:**
+   - **UUID Format Enforcement:** Nonce must match `/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i`.
+   - **Immediate File Unlinking (Replay Prevention):** File is unlinked synchronously immediately upon reading. Any replay attempt fails with `STAGING_NOT_FOUND`.
+   - **Freshness Window:** Timestamp must be within 60 seconds (`Date.now() - timestamp <= 60000`). Stale requests are rejected.
+   - **Device Identity Binding:** Request `deviceId` must match the active device config.
+   - **Cryptographic Payload Integrity:** `payloadHash` is recomputed from canonicalized mappings and compared against the stored hash using `crypto.timingSafeEqual`.
+   - **SID Authenticity:** Each SID is validated for syntax, duplicate detection, and verified against discovered machine accounts.
+   - **Child Profile Authenticity:** Each `childId` is validated against synchronized family profiles.
+   - **Atomic Commit:** Mappings are committed via atomic write (`temp -> fsync -> rename`) with verified ACLs and session notification.
+
+### 20.5 Test Matrix Expansion
+- Added tests 22–27 to `tests/config-manager.test.ts` covering directory ACL generation, sanitized config creation, token exclusion, and legacy migration.
+- Added tests 19–29 to `tests/account-mapping-and-profiles.test.ts` covering nonce staging, replay prevention, freshness enforcement, hash integrity verification, duplicate SID rejection, and unelevated GUI status handling.
+- Full test suite passes 100% across all 197 agent tests.
+
