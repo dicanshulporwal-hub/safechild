@@ -534,6 +534,13 @@ To enforce strict privilege separation and protect one-time pairing codes:
 - **Release Tag:** `v1.0.2-pilot`
 - **WiX Product Version:** `1.0.2.0`
 - **Agent Package Version:** `1.0.2`
+- **GitHub Release URL:** [https://github.com/dicanshulporwal-hub/safechild/releases/tag/v1.0.2-pilot](https://github.com/dicanshulporwal-hub/safechild/releases/tag/v1.0.2-pilot)
+- **GitHub Actions Packaging Workflow:** [Workflow Run #36717635260](https://github.com/dicanshulporwal-hub/safechild/actions/runs/36717635260)
+- **Published Artifacts & SHA-256 Checksums:**
+  - `SafeBrowseChild-Pilot.msi` (22.36 MiB): `aea9cb9c0c56e03b5fb7fa9b9efc729e0b8548b29e805b8e8746382ba644921c`
+  - `SafeBrowseChild-Pilot.exe` (69.70 MiB): `6840a77962450a9bee45691c171763d461bbe5ce572402c960d1df13773a448a`
+  - `SafeBrowseServiceHost.exe` (37.00 KiB): `f6ad6914d96690f7b431f44857fa2e62527efdc0959487921198943a1ea17c15`
+  - `SHA256SUMS.txt` (481 B): `71d5b9c8b365ef3f75a1f55716df798363717dfb119e07cf9651a24d081f9b33`
 
 
 
