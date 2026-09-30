@@ -278,7 +278,7 @@ export class GuiServer {
             const isNode = exePath.toLowerCase().endsWith('node.exe') || exePath.toLowerCase().endsWith('node');
             const psPath = this.configMgr.getPowerShellPath();
 
-            if (process.platform === 'win32') {
+            if (process.platform === 'win32' && process.env.NODE_ENV !== 'test') {
               const args = isNode
                 ? `"${process.argv[1]}" --configure-accounts`
                 : `--configure-accounts`;
