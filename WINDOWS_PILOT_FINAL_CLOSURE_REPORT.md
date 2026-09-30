@@ -201,10 +201,10 @@ Heartbeat payload transmitted every 60s:
 3. **`SafeBrowseServiceHost.exe`**: C# .NET Windows Service host wrapper handling SCM lifecycle, session transitions, and background process supervision.
 4. **`SHA256SUMS.txt`**: Cryptographic checksum manifest.
 
-### SHA-256 Checksums
-- `SafeBrowseChild-Pilot.msi`: `dbc2ecb3237c215e3c7613a40e895ace8d969d6854c0eca32c441ba0d185291e`
-- `SafeBrowseChild-Pilot.exe`: `3259e9141b91ab982a280ba9c490db5b717321d6424ae207f13615cb0df41ff5`
-- `SafeBrowseServiceHost.exe`: `7e64b713aded0e3daa6a5bc0718d346c8dd13e4d477c5f0e40a1b1c111aab4e8`
+### SHA-256 Checksums (v1.0.1-pilot Release Build)
+- `SafeBrowseChild-Pilot.msi`: `0bfc9aa437d19c84f3f9328085f178536391a4d6e8fc8bd16c2b6354c893dd98`
+- `SafeBrowseChild-Pilot.exe`: `73580894bac2707c839313b3ceb3679844fe6cc38a171d58c3c3f0df95d88be1`
+- `SafeBrowseServiceHost.exe`: `9b28e9b96d6c6b40171098961289872c92391f983f08900a0bc509d632ced345`
 - `SafeBrowse-Pair.cmd`: `a2d08c8854f12e6cd00ce3048a1c97a5f6e80b2a76f68593498a44d0361250cf`
 
 ---
@@ -450,5 +450,16 @@ The `%TEMP%` / nonce mapping-save staging mechanism is retired from the producti
   - `@safebrowse/backend`: 192 passing tests across 37 test suites.
   - `@safebrowse/shared`: 9 passing tests across 2 test suites.
   - `@safebrowse/parent-web`: Production build succeeds cleanly.
+
+### 21.6 Official Release Publication (v1.0.1-pilot)
+- **Release Tag:** `v1.0.1-pilot`
+- **GitHub Release URL:** [https://github.com/dicanshulporwal-hub/safechild/releases/tag/v1.0.1-pilot](https://github.com/dicanshulporwal-hub/safechild/releases/tag/v1.0.1-pilot)
+- **GitHub Actions Packaging Workflow:** [Workflow Run #36708775481](https://github.com/dicanshulporwal-hub/safechild/actions/runs/36708775481)
+- **Published Artifacts & SHA-256 Checksums:**
+  - `SafeBrowseChild-Pilot.msi` (22.35 MiB): `0bfc9aa437d19c84f3f9328085f178536391a4d6e8fc8bd16c2b6354c893dd98`
+  - `SafeBrowseChild-Pilot.exe` (69.67 MiB): `73580894bac2707c839313b3ceb3679844fe6cc38a171d58c3c3f0df95d88be1`
+  - `SafeBrowseServiceHost.exe` (37.00 KiB): `9b28e9b96d6c6b40171098961289872c92391f983f08900a0bc509d632ced345`
+  - `SHA256SUMS.txt` (481 B): `a8d13c67d77cc95cf35fbb805626da4ae88950d4812328ba8beff85392efef54`
+
 
 
