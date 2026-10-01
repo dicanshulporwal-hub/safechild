@@ -1,10 +1,18 @@
 # SafeBrowse Windows Pilot v1.0 — Device & Account Manual Verification Protocol
 
 **Version:** 1.0.3-pilot (P0 Hotfix: OS Stability Guard for Dinner Time & Bedtime)  
-**Classification:** Pilot Ready for Single-Active-User Deployment  
+**Classification:** IMPLEMENTED — AWAITING PHYSICAL WINDOWS VALIDATION  
 **Repository:** `dicanshulporwal-hub/safechild`  
 **Branch:** `feature/stage11-step4-device-enforcement`  
 **Target Platform:** Windows 10 / 11 (x64)  
+**Official Release:** [v1.0.3-pilot](https://github.com/dicanshulporwal-hub/safechild/releases/tag/v1.0.3-pilot)  
+**Release Commit:** `bd34b9e`  
+**GitHub Actions Build Run:** [Run 36818158480](https://github.com/dicanshulporwal-hub/safechild/actions/runs/36818158480)  
+
+### Released Artifacts & Cryptographic Checksums (SHA-256)
+- **`SafeBrowseChild-Pilot.msi`**: `315f84ac59a863e0728216a3d5c9ab73fbabfcf4a89a3cd624e07de6049a2db7`
+- **`SafeBrowseChild-Pilot.exe`**: `e239692fc0e91a86ccf6368781f7aa91908e20abd3ae5014a9d04fc4aa231909`
+- **`SafeBrowseServiceHost.exe`**: `7b045c4ba41b26ef775549a48d7aae330c624989f09ea2f731e9b9d28f10fbff`
 
 ---
 
