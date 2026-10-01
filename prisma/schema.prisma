@@ -158,6 +158,7 @@ model Family {
   owner        User               @relation("FamilyOwner", fields: [ownerUserId], references: [id], onDelete: Restrict)
   requireMfa   Boolean            @default(false)
   approvalRule FamilyApprovalRule @default(OWNER_OR_PARENT)
+  timezone     String             @default("Asia/Kolkata")
   createdAt    DateTime           @default(now())
   updatedAt    DateTime           @updatedAt
 
@@ -170,6 +171,7 @@ model Family {
   accessRequests    AccessRequest[]
   childUsageRecords ChildUsageRecord[]
   activityEvents    ActivityEvent[]
+  timelineEvents    TimelineEvent[]
   auditLogs         FamilyAuditLog[]
 
   @@index([ownerUserId])
@@ -225,6 +227,7 @@ model Child {
   accessRequests    AccessRequest[]
   childUsageRecords ChildUsageRecord[]
   activityEvents    ActivityEvent[]
+  timelineEvents    TimelineEvent[]
 
   @@unique([familyId, id])
   @@index([familyId])
@@ -250,6 +253,21 @@ model Device {
   isRevoked       Boolean           @default(false)
   tokenHash       String?
   deviceToken     String?
+
+  // Runtime telemetry persisted fields
+  activePolicyVersion        Int?
+  enforcementActive          Boolean           @default(false)
+  protectionStatus           String?           @default("ACTIVE")
+  mappedAccountName          String?
+  hasMultipleSessions        Boolean           @default(false)
+  capabilities               Json?
+  activityTelemetryAvailable  Boolean           @default(false)
+  appUsageAvailable          Boolean           @default(false)
+  domainUsageAvailable       Boolean           @default(false)
+  categoryUsageAvailable     Boolean           @default(false)
+  safeDinnerTimeSupported    Boolean           @default(false)
+  safeBedtimeSupported       Boolean           @default(false)
+
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
 
@@ -336,15 +354,17 @@ model ChildUsageRecord {
   deviceId                String?
   device                  Device?  @relation(fields: [familyId, childId, deviceId], references: [familyId, childId, id], onDelete: Cascade)
   target                  String
+  targetType              String   @default("DOMAIN")
   date                    String
   consumedSeconds         Int      @default(0)
   limitSeconds            Int?
+  lastSyncId              String?
   lastCheckpointTimestamp DateTime @default(now())
   lastSyncAt              DateTime @default(now())
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
 
-  @@unique([childId, target, date])
+  @@unique([childId, targetType, target, date])
   @@index([familyId])
   @@index([familyId, deviceId])
   @@index([familyId, childId, deviceId])
@@ -358,6 +378,7 @@ model ActivityEvent {
   child         Child    @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
   deviceId      String?
   device        Device?  @relation(fields: [familyId, childId, deviceId], references: [familyId, childId, id], onDelete: Cascade)
+  clientEventId String?
   domain        String
   category      String
   action        String
@@ -368,6 +389,28 @@ model ActivityEvent {
   @@index([childId])
   @@index([familyId, deviceId])
   @@index([familyId, childId, deviceId])
+  @@index([childId, clientEventId])
+}
+
+model TimelineEvent {
+  id        String   @id
+  familyId  String
+  family    Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  childId   String?
+  child     Child?   @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
+  deviceId  String?
+  eventType String
+  decision  String?
+  domain    String?
+  reason    String?
+  metadata  Json?
+  timestamp DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  @@index([familyId])
+  @@index([childId])
+  @@index([familyId, childId])
+  @@index([timestamp])
 }
 
 model FamilyAuditLog {

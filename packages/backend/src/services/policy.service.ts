@@ -10,6 +10,7 @@ import {
 } from '@safebrowse/shared';
 import { nanoid } from 'nanoid';
 import { wsManager } from './websocket.service';
+import { timelineService } from './timeline.service';
 
 export class PolicyService {
   public async getPolicyForChild(childId: string): Promise<Policy> {
@@ -258,6 +259,11 @@ export class PolicyService {
       where: { familyId },
     });
 
+    const eventType = isPaused ? 'DINNER_TIME_ENABLED' : 'DINNER_TIME_DISABLED';
+    const reason = isPaused
+      ? 'Dinner Time activated: Internet paused across all family devices'
+      : 'Dinner Time deactivated: Internet resumed';
+
     for (const ch of children) {
       await prisma.policy.updateMany({
         where: { childId: ch.id },
@@ -273,9 +279,57 @@ export class PolicyService {
         payload: updated,
         childId: ch.id,
       });
+
+      await timelineService.logEvent({
+        childId: ch.id,
+        eventType,
+        decision: isPaused ? 'BLOCKED' : 'ALLOWED',
+        domain: 'ALL_TRAFFIC',
+        reason,
+      });
     }
 
     return children as any;
+  }
+
+  /**
+   * Get real-time family pause status
+   */
+  public async getFamilyPauseStatus(familyId: string): Promise<{
+    isFamilyPaused: boolean;
+    pauseState: 'ALL_PAUSED' | 'PARTIALLY_PAUSED' | 'NONE_PAUSED';
+    pausedCount: number;
+    totalChildren: number;
+  }> {
+    const children = await prisma.child.findMany({
+      where: { familyId },
+      include: { policy: true },
+    });
+
+    if (children.length === 0) {
+      return {
+        isFamilyPaused: false,
+        pauseState: 'NONE_PAUSED',
+        pausedCount: 0,
+        totalChildren: 0,
+      };
+    }
+
+    const pausedCount = children.filter((c) => Boolean(c.policy?.isPaused)).length;
+    const isFamilyPaused = pausedCount > 0 && pausedCount === children.length;
+    const pauseState =
+      pausedCount === children.length
+        ? 'ALL_PAUSED'
+        : pausedCount > 0
+        ? 'PARTIALLY_PAUSED'
+        : 'NONE_PAUSED';
+
+    return {
+      isFamilyPaused,
+      pauseState,
+      pausedCount,
+      totalChildren: children.length,
+    };
   }
 
   /**

@@ -114,6 +114,7 @@ export interface Family {
   ownerUserId: string;
   requireMfa: boolean;
   approvalRule: FamilyApprovalRule;
+  timezone?: string;
   createdAt: string;
   updatedAt: string;
 }

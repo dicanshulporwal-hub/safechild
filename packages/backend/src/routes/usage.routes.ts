@@ -176,7 +176,7 @@ usageRouter.post(
 // POST /api/usage/sync -> Device reports active usage increment (Device auth required)
 usageRouter.post('/sync', deviceAuthMiddleware, async (req: AuthenticatedDeviceRequest, res: Response) => {
   try {
-    const { target, targetType, secondsIncrement, clientWallIso } = req.body;
+    const { target, targetType, secondsIncrement, clientWallIso, syncId } = req.body;
     if (!target || !targetType || secondsIncrement === undefined) {
       return res.status(400).json({ error: 'Missing required sync fields: target, targetType, secondsIncrement.' });
     }
@@ -211,7 +211,8 @@ usageRouter.post('/sync', deviceAuthMiddleware, async (req: AuthenticatedDeviceR
       target,
       cleanTargetType as any,
       increment,
-      clientWallIso
+      clientWallIso,
+      syncId
     );
     res.json(result);
   } catch (e: any) {
@@ -225,7 +226,7 @@ usageRouter.post('/sync', deviceAuthMiddleware, async (req: AuthenticatedDeviceR
 // POST /api/usage/session -> Windows agent process-limiter session usage report (Device auth required)
 usageRouter.post('/session', deviceAuthMiddleware, async (req: AuthenticatedDeviceRequest, res: Response) => {
   try {
-    const { appName, durationSeconds, clientWallIso } = req.body;
+    const { appName, durationSeconds, clientWallIso, syncId } = req.body;
     if (!appName || durationSeconds === undefined) {
       return res.status(400).json({ error: 'Missing required session fields: appName, durationSeconds.' });
     }
@@ -256,7 +257,8 @@ usageRouter.post('/session', deviceAuthMiddleware, async (req: AuthenticatedDevi
       appName,
       'APP',
       duration,
-      clientWallIso
+      clientWallIso,
+      syncId
     );
     res.json(result);
   } catch (e: any) {

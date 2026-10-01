@@ -7,7 +7,7 @@ export const downloadRouter = Router();
 const repoRootDir = path.resolve(__dirname, '../../../..');
 
 export const DEFAULT_WINDOWS_RELEASE_URL =
-  'https://github.com/dicanshulporwal-hub/safechild/releases/download/v1.0.0-pilot/SafeBrowseChild-Pilot.msi';
+  'https://github.com/dicanshulporwal-hub/safechild/releases/download/v1.0.3-pilot/SafeBrowseChild-Pilot.msi';
 
 function findExistingFile(candidatePaths: string[]): string | null {
   for (const candidate of candidatePaths) {
@@ -63,7 +63,7 @@ downloadRouter.get('/info', (req: Request, res: Response) => {
       filename: 'SafeBrowseChild-Pilot.msi',
       platform: 'Windows 10 / 11 (64-bit)',
       type: 'installer',
-      version: '1.0.0',
+      version: '1.0.3',
     },
   });
 });

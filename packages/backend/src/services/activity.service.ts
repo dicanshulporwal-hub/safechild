@@ -16,6 +16,7 @@ export class ActivityService {
       category?: string;
       reason?: string;
       timestamp?: string;
+      clientEventId?: string;
     }
   ): Promise<ActivityEvent> {
     const domain = normalizeDomain(rawDomain);
@@ -34,6 +35,28 @@ export class ActivityService {
     }
     if (device.familyId !== child.familyId) {
       throw new Error('Forbidden: Device and child do not belong to the same family.');
+    }
+
+    if (metadata?.clientEventId) {
+      const existing = await prisma.activityEvent.findFirst({
+        where: {
+          childId,
+          clientEventId: metadata.clientEventId,
+        },
+      });
+      if (existing) {
+        return {
+          id: existing.id,
+          childId: existing.childId,
+          deviceId: existing.deviceId || deviceId,
+          deviceName: device.name,
+          domain: existing.domain,
+          category: existing.category as any,
+          action: existing.action as any,
+          reason: existing.blockedReason || undefined,
+          timestamp: existing.timestamp.toISOString(),
+        };
+      }
     }
 
     const id = `act-${nanoid(8)}`;
@@ -55,7 +78,8 @@ export class ActivityService {
       }
     }
 
-    const category = (metadata?.category || 'GENERAL').toString().trim().slice(0, 64) || 'GENERAL';
+    const rawCategory = metadata?.category ? metadata.category.toString().trim().slice(0, 64) : '';
+    const category = rawCategory || 'UNCATEGORIZED';
     const blockedReason = metadata?.reason ? metadata.reason.toString().trim().slice(0, 512) : null;
 
     // The current relational schema can link a device only to its primary child.
@@ -72,6 +96,7 @@ export class ActivityService {
         action,
         category,
         blockedReason,
+        clientEventId: metadata?.clientEventId || null,
         timestamp: eventTimestamp,
       },
     });

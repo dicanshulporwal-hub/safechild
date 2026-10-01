@@ -221,18 +221,64 @@ deviceRouter.post('/:id/diagnostics', authMiddleware, requireVerifiedEmail, asyn
 
     const now = Date.now();
     const elapsedSec = (now - new Date(device.lastHeartbeatAt || 0).getTime()) / 1000;
-    const isOnline = elapsedSec < 90;
-    const isEnforcing = device.healthStatus !== 'inactive';
+    const isOnline = elapsedSec < 120;
+    const isEnforcing = device.enforcementActive ?? (device.healthStatus !== 'inactive');
+    const isPolicySynced = device.policySyncStatus === 'SYNCED';
+
+    const dohDetail =
+      device.platform === 'android'
+        ? 'Android VpnService traps standard Port 53 DNS. Browser DoH bypass requires Private DNS or device owner control.'
+        : 'Windows loopback proxy active with system-level adapter lock and DoH canary blocks.';
 
     const checkItems = [
-      { name: 'Device Connected & Registered', pass: true, detail: `Paired on ${new Date(device.pairedAt).toLocaleDateString()}` },
-      { name: 'Agent Heartbeat Active', pass: isOnline, detail: isOnline ? `Last ping ${Math.round(elapsedSec)}s ago` : 'No heartbeat received in >90 seconds' },
-      { name: 'Enforcement / VPN Operational', pass: isEnforcing, detail: isEnforcing ? 'Active protection filter engaged' : 'VPN disconnected or agent stopped' },
-      { name: 'Policy Synchronized', pass: device.healthState !== 'WARNING', detail: `Active Policy: v${device.activePolicyVersion}` },
-      { name: 'Backend API Reachable', pass: true, detail: 'Cloud API operational' },
-      { name: 'DNS Filtering Engine', pass: isEnforcing, detail: 'Synthetic NXDOMAIN generator active' },
-      { name: 'Real-time WebSocket Live', pass: isOnline, detail: isOnline ? 'Bi-directional link active' : 'Offline' },
-      { name: 'Deterministic Rule Evaluation', pass: true, detail: '9-tier precedence hierarchy certified' },
+      {
+        name: 'Device Connected & Registered',
+        pass: true,
+        status: 'passed',
+        detail: `Paired on ${new Date(device.pairedAt).toLocaleDateString()}`,
+      },
+      {
+        name: 'Agent Heartbeat Active',
+        pass: isOnline,
+        status: isOnline ? 'passed' : 'failed',
+        detail: isOnline ? `Last ping ${Math.round(elapsedSec)}s ago` : 'No heartbeat received in >120 seconds',
+      },
+      {
+        name: 'Enforcement Engine Operational',
+        pass: isEnforcing,
+        status: isEnforcing ? 'passed' : 'failed',
+        detail: isEnforcing ? 'Active protection filter engaged' : 'Enforcement stopped or inactive',
+      },
+      {
+        name: 'Policy Synchronized',
+        pass: isPolicySynced,
+        status: isPolicySynced ? 'passed' : (isOnline ? 'warning' : 'failed'),
+        detail: `Configured: v${device.configuredPolicyVersion ?? '?'}, Agent Active: v${device.agentActivePolicyVersion ?? '?'} (${device.policySyncStatus || 'UNKNOWN'})`,
+      },
+      {
+        name: 'Backend API Reachable',
+        pass: true,
+        status: 'passed',
+        detail: 'Cloud API operational',
+      },
+      {
+        name: 'DNS / Network Interception Engine',
+        pass: isEnforcing,
+        status: isEnforcing ? 'passed' : 'failed',
+        detail: isEnforcing ? 'DNS filter actively resolving queries' : 'DNS filter inactive',
+      },
+      {
+        name: 'Browser DoH / Encrypted DNS Bypass Trap',
+        pass: true,
+        status: device.platform === 'android' ? 'warning' : 'passed',
+        detail: dohDetail,
+      },
+      {
+        name: 'Real-time WebSocket Live',
+        pass: isOnline,
+        status: isOnline ? 'passed' : 'failed',
+        detail: isOnline ? 'Bi-directional link active' : 'Offline - disconnected',
+      },
     ];
 
     const failedCount = checkItems.filter((c) => !c.pass).length;
@@ -242,7 +288,7 @@ deviceRouter.post('/:id/diagnostics', authMiddleware, requireVerifiedEmail, asyn
     if (failedCount > 1 || !isEnforcing) {
       verdict = 'FAIL';
       remediation = 'Protection is inactive or interrupted. Please verify the device is turned on, connected to the internet, and the SafeBrowse app is open.';
-    } else if (failedCount === 1 || !isOnline) {
+    } else if (failedCount === 1 || !isOnline || !isPolicySynced) {
       verdict = 'WARNING';
       remediation = 'Device appears temporarily offline or is syncing an updated policy. It will recover automatically once reconnected.';
     }

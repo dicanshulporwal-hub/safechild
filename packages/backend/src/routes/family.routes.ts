@@ -23,7 +23,7 @@ router.get('/', async (req: AuthenticatedRequest, res: Response) => {
 // PATCH /api/family - Update family settings
 router.patch('/', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { familyId, name, requireMfa, approvalRule } = req.body;
+    const { familyId, name, requireMfa, approvalRule, timezone } = req.body;
     if (!familyId) {
       return res.status(400).json({ error: 'familyId is required.' });
     }
@@ -31,6 +31,7 @@ router.patch('/', async (req: AuthenticatedRequest, res: Response) => {
       name,
       requireMfa,
       approvalRule,
+      timezone,
     });
     res.json({ success: true, family: updated });
   } catch (e: any) {

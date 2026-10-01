@@ -7,21 +7,20 @@ import {
   ArrowLeft,
   RefreshCw,
   CheckCircle,
-  BatteryCharging,
-  Wifi,
-  Cpu,
-  Globe,
+  AlertTriangle,
+  AlertOctagon,
+  Laptop,
   Radio,
-  HardDrive,
+  FileCheck,
   Lock,
 } from 'lucide-react';
 import { DnsBenchmarkCard } from '../components/DnsBenchmarkCard';
 
-interface DiagnosticStep {
+interface DiagnosticCheck {
   name: string;
-  status: 'passed' | 'warning' | 'failed' | 'pending';
+  pass: boolean;
+  status?: 'passed' | 'warning' | 'failed';
   detail: string;
-  latencyMs?: number;
 }
 
 export const DeviceDiagnosticsPage: React.FC = () => {
@@ -31,8 +30,9 @@ export const DeviceDiagnosticsPage: React.FC = () => {
 
   const [device, setDevice] = useState<Device | null>(null);
   const [running, setRunning] = useState(false);
-  const [steps, setSteps] = useState<DiagnosticStep[]>([]);
-  const [overallHealth, setOverallHealth] = useState<'PROTECTED' | 'DEGRADED' | 'OFFLINE'>('PROTECTED');
+  const [checks, setChecks] = useState<DiagnosticCheck[]>([]);
+  const [verdict, setVerdict] = useState<'PASS' | 'WARNING' | 'FAIL'>('PASS');
+  const [remediation, setRemediation] = useState<string>('');
 
   useEffect(() => {
     if (deviceId) {
@@ -43,26 +43,28 @@ export const DeviceDiagnosticsPage: React.FC = () => {
   const fetchDeviceAndRunDiagnostics = async (dId: string) => {
     setRunning(true);
     try {
-      const d = await api.getDeviceHealth(dId);
-      setDevice(d);
-    } catch (e) {
-      console.error('Error fetching device health:', e);
+      const [d, diag] = await Promise.all([
+        api.getDeviceDetails(dId).catch(() => null),
+        api.runDeviceDiagnostics(dId).catch((err) => {
+          showToast(err.message || 'Failed to run diagnostics', 'error');
+          return null;
+        }),
+      ]);
+
+      if (d) {
+        setDevice((d as any).device || d);
+      }
+
+      if (diag) {
+        setChecks(diag.checks || []);
+        setVerdict(diag.verdict || 'PASS');
+        setRemediation(diag.remediation || '');
+      }
+    } catch (e: any) {
+      console.error('Error in diagnostics:', e);
+    } finally {
+      setRunning(false);
     }
-
-    // Run 7-point self-diagnostic sequence
-    const diagnosticSequence: DiagnosticStep[] = [
-      { name: '1. Background Agent Service Integrity', status: 'passed', detail: 'Agent daemon PID active, responsive to RPC', latencyMs: 1.2 },
-      { name: '2. Network Interception Engine (Local DNS / VpnService)', status: 'passed', detail: 'DNS proxy active on loopback (IPv4 & IPv6)', latencyMs: 0.8 },
-      { name: '3. Browser DoH / Encrypted DNS Bypass Trap', status: 'passed', detail: 'Bootstrap blocks active against DoH canary domains', latencyMs: 2.1 },
-      { name: '4. Local Policy Cache & Offline Enforcement', status: 'passed', detail: 'SQLite cache synchronized to latest policy', latencyMs: 0.4 },
-      { name: '5. Backend Cloud Telemetry & Heartbeat Sync', status: 'passed', detail: 'WebSocket tunnel healthy, RTT 18ms', latencyMs: 18.0 },
-      { name: '6. Anti-Tamper Protection & Auto-Recovery', status: 'passed', detail: 'Service auto-restart configured upon crash/termination', latencyMs: 0.3 },
-      { name: '7. Policy Conflict & Precedence Resolution', status: 'passed', detail: 'Zero rule collisions detected in active child policy', latencyMs: 0.2 },
-    ];
-
-    setSteps(diagnosticSequence);
-    setOverallHealth('PROTECTED');
-    setRunning(false);
   };
 
   return (
@@ -70,7 +72,7 @@ export const DeviceDiagnosticsPage: React.FC = () => {
       {/* Back Link */}
       <button
         onClick={() => navigate(-1)}
-        className="flex items-center gap-1.5 text-xs font-semibold text-slate-400 hover:text-white transition"
+        className="flex items-center gap-1.5 text-xs font-semibold text-slate-400 hover:text-white transition cursor-pointer"
       >
         <ArrowLeft className="w-4 h-4" />
         <span>Back to Child Workspace</span>
@@ -81,14 +83,14 @@ export const DeviceDiagnosticsPage: React.FC = () => {
         <div>
           <h1 className="text-2xl font-extrabold text-white tracking-tight">Protection Self-Diagnostics</h1>
           <p className="text-xs text-slate-400">
-            Real-time 7-point integrity check for {device?.name || 'Device'} ({device?.platform || 'OS'})
+            Real-time security integrity verification for {device?.name || 'Device'} ({device?.platform ? device.platform.toUpperCase() : 'UNKNOWN'})
           </p>
         </div>
 
         <button
           onClick={() => deviceId && fetchDeviceAndRunDiagnostics(deviceId)}
           disabled={running}
-          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl transition flex items-center gap-2 shadow disabled:opacity-50"
+          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl transition flex items-center gap-2 shadow disabled:opacity-50 cursor-pointer"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${running ? 'animate-spin' : ''}`} />
           <span>{running ? 'Diagnosing...' : 'Re-Run Diagnostics'}</span>
@@ -96,67 +98,95 @@ export const DeviceDiagnosticsPage: React.FC = () => {
       </div>
 
       {/* Overall Health Card */}
-      <div className="bg-slate-900 border border-emerald-500/30 rounded-2xl p-6 shadow-xl flex items-center justify-between">
+      <div className={`border rounded-2xl p-6 shadow-xl flex items-center justify-between ${
+        verdict === 'PASS'
+          ? 'bg-slate-900 border-emerald-500/30'
+          : verdict === 'WARNING'
+          ? 'bg-slate-900 border-amber-500/30'
+          : 'bg-slate-900 border-rose-500/30'
+      }`}>
         <div className="flex items-center gap-4">
-          <div className="w-12 h-12 rounded-xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 text-2xl font-bold">
+          <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-2xl font-bold ${
+            verdict === 'PASS'
+              ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+              : verdict === 'WARNING'
+              ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+              : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+          }`}>
             🛡️
           </div>
           <div>
             <div className="text-base font-bold text-white flex items-center gap-2">
-              <span>Overall Protection Health:</span>
-              <span className="text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2.5 py-0.5 rounded-full font-mono font-bold">
-                {overallHealth}
+              <span>Overall Protection Verdict:</span>
+              <span className={`text-xs px-2.5 py-0.5 rounded-full font-mono font-bold border ${
+                verdict === 'PASS'
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                  : verdict === 'WARNING'
+                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                  : 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+              }`}>
+                {verdict}
               </span>
             </div>
-            <p className="text-xs text-slate-400 mt-0.5">All 7 network security layers operating normally with zero bypass paths detected.</p>
+            <p className="text-xs text-slate-400 mt-1">
+              {remediation || (running ? 'Executing automated verification checks...' : 'No diagnostic findings.')}
+            </p>
           </div>
         </div>
       </div>
 
-      {/* Device Hardware & Network Telemetry Grid */}
+      {/* Device Runtime State Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="p-4 bg-slate-900 border border-slate-800 rounded-xl space-y-1.5">
           <div className="flex items-center justify-between text-slate-400 text-xs">
             <span className="flex items-center gap-1.5 font-medium">
-              <BatteryCharging className="w-4 h-4 text-emerald-400" /> Battery Status
+              <Laptop className="w-4 h-4 text-emerald-400" /> Platform & OS
             </span>
-            <span className="text-[10px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded">Charging</span>
           </div>
-          <div className="text-xl font-extrabold text-white">88%</div>
-          <p className="text-[11px] text-slate-500">Power health: Normal (4.1V)</p>
+          <div className="text-xl font-extrabold text-white capitalize">{device?.platform || 'Unknown'}</div>
+          <p className="text-[11px] text-slate-500 font-mono">
+            {device?.mappedAccountName ? `Account: ${device.mappedAccountName}` : 'No account mapping'}
+          </p>
         </div>
 
         <div className="p-4 bg-slate-900 border border-slate-800 rounded-xl space-y-1.5">
           <div className="flex items-center justify-between text-slate-400 text-xs">
             <span className="flex items-center gap-1.5 font-medium">
-              <Wifi className="w-4 h-4 text-cyan-400" /> Wi-Fi Network
+              <Radio className="w-4 h-4 text-cyan-400" /> Policy Sync State
             </span>
-            <span className="text-[10px] bg-cyan-500/10 text-cyan-400 px-1.5 py-0.5 rounded">5 GHz</span>
           </div>
-          <div className="text-xl font-extrabold text-white truncate">Home-Mesh-5G</div>
-          <p className="text-[11px] text-slate-500">Signal: 94% (-48 dBm)</p>
+          <div className="text-xl font-extrabold text-white">{device?.policySyncStatus || 'UNKNOWN'}</div>
+          <p className="text-[11px] text-slate-500">
+            Active: v{device?.agentActivePolicyVersion ?? device?.activePolicyVersion ?? '?'}
+          </p>
         </div>
 
         <div className="p-4 bg-slate-900 border border-slate-800 rounded-xl space-y-1.5">
           <div className="flex items-center justify-between text-slate-400 text-xs">
             <span className="flex items-center gap-1.5 font-medium">
-              <Globe className="w-4 h-4 text-indigo-400" /> IP & Adapter
+              <FileCheck className="w-4 h-4 text-indigo-400" /> Protection State
             </span>
-            <span className="text-[10px] bg-indigo-500/10 text-indigo-400 px-1.5 py-0.5 rounded">DHCP</span>
           </div>
-          <div className="text-sm font-bold text-white font-mono truncate">192.168.1.145</div>
-          <p className="text-[11px] text-slate-500 font-mono">Loopback: 127.0.0.1:53</p>
+          <div className="text-sm font-bold text-white font-mono mt-1">
+            {device?.protectionStatus || (device?.enforcementActive ? 'ACTIVE' : 'INACTIVE')}
+          </div>
+          <p className="text-[11px] text-slate-500">
+            {device?.enforcementActive ? 'Enforcement engaged' : 'Enforcement stopped'}
+          </p>
         </div>
 
         <div className="p-4 bg-slate-900 border border-slate-800 rounded-xl space-y-1.5">
           <div className="flex items-center justify-between text-slate-400 text-xs">
             <span className="flex items-center gap-1.5 font-medium">
-              <Lock className="w-4 h-4 text-amber-400" /> Agent Security
+              <Lock className="w-4 h-4 text-amber-400" /> Agent Version
             </span>
-            <span className="text-[10px] bg-amber-500/10 text-amber-400 px-1.5 py-0.5 rounded">Enforced</span>
           </div>
-          <div className="text-xl font-extrabold text-white">v{device?.agentVersion || '1.1.0'}</div>
-          <p className="text-[11px] text-slate-500">Tamper watchdog locked</p>
+          <div className="text-xl font-extrabold text-white">
+            {device?.agentVersion ? `v${device.agentVersion}` : 'Unknown'}
+          </div>
+          <p className="text-[11px] text-slate-500">
+            {device?.lastHeartbeatAt ? `Last ping: ${new Date(device.lastHeartbeatAt).toLocaleTimeString()}` : 'No heartbeat yet'}
+          </p>
         </div>
       </div>
 
@@ -164,25 +194,42 @@ export const DeviceDiagnosticsPage: React.FC = () => {
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-3">
         <h2 className="text-sm font-bold text-white uppercase tracking-wider mb-2">Automated Check Results</h2>
 
-        <div className="space-y-2.5">
-          {steps.map((step, idx) => (
-            <div key={idx} className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 flex items-start justify-between gap-4">
-              <div className="flex items-start gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-400 mt-0.5 shrink-0" />
-                <div>
-                  <div className="text-sm font-bold text-white">{step.name}</div>
-                  <div className="text-xs text-slate-400 mt-0.5">{step.detail}</div>
+        {running ? (
+          <div className="py-12 text-center text-xs font-bold text-slate-400">
+            Running security checks...
+          </div>
+        ) : checks.length === 0 ? (
+          <div className="py-8 text-center text-xs text-slate-500 italic">
+            No diagnostic checks available. Click "Re-Run Diagnostics" to execute.
+          </div>
+        ) : (
+          <div className="space-y-2.5">
+            {checks.map((step, idx) => (
+              <div key={idx} className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 flex items-start justify-between gap-4">
+                <div className="flex items-start gap-3">
+                  {step.status === 'passed' || (step.pass && step.status !== 'warning') ? (
+                    <CheckCircle className="w-5 h-5 text-emerald-400 mt-0.5 shrink-0" />
+                  ) : step.status === 'warning' ? (
+                    <AlertTriangle className="w-5 h-5 text-amber-400 mt-0.5 shrink-0" />
+                  ) : (
+                    <AlertOctagon className="w-5 h-5 text-rose-400 mt-0.5 shrink-0" />
+                  )}
+                  <div>
+                    <div className="text-sm font-bold text-white flex items-center gap-2">
+                      <span>{step.name}</span>
+                      {step.status === 'warning' && (
+                        <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1.5 py-0.5 rounded font-mono">
+                          NOTICE
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-slate-400 mt-0.5">{step.detail}</div>
+                  </div>
                 </div>
               </div>
-
-              {step.latencyMs !== undefined && (
-                <span className="text-xs text-slate-500 font-mono shrink-0">
-                  {step.latencyMs.toFixed(1)} ms
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Real-time Resolver Speed & Latency Benchmark */}

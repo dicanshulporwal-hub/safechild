@@ -2,17 +2,9 @@ import React, { useState, useEffect } from 'react';
 import {
   Brain,
   ShieldCheck,
-  AlertTriangle,
   Sparkles,
   HeartHandshake,
-  MessageCircle,
-  Eye,
   CheckCircle2,
-  HelpCircle,
-  ArrowRight,
-  TrendingUp,
-  Info,
-  Activity,
 } from 'lucide-react';
 import { api, ActivityEvent } from '../api/client';
 
@@ -35,10 +27,10 @@ export const AiSafetyWatchdog: React.FC<{ childId?: string; childName?: string }
   const [selectedItem, setSelectedItem] = useState<AiRiskItem | null>(null);
   const [items, setItems] = useState<AiRiskItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [safetyScore, setSafetyScore] = useState(98);
+  const [safetyScore, setSafetyScore] = useState(100);
   const [riskStats, setRiskStats] = useState({
-    mentalHealth: '100% Clean',
-    cyberbullying: '100% Clean',
+    mentalHealth: '0 Intercepts',
+    cyberbullying: '0 Intercepts',
     explicitContent: '0 Intercepts',
     circumvention: '0 Attempts',
   });
@@ -52,75 +44,59 @@ export const AiSafetyWatchdog: React.FC<{ childId?: string; childName?: string }
       setLoading(true);
       const acts: ActivityEvent[] = childId ? await api.getActivity(childId).catch(() => []) : [];
 
-      // Default baseline intelligent insights
-      const baseInsights: AiRiskItem[] = [
-        {
-          id: 'risk-1',
-          category: 'CIRCUMVENTION',
-          severity: 'MEDIUM',
-          queryOrContext: 'how to change dns to bypass wifi restrictions on windows 11',
-          detectedAt: '2 hours ago',
-          actionTaken: 'Blocked & Logged • DNS Adapter Lock Enforced',
-          aiExplanation:
-            'The child conducted search queries exploring how to modify network DNS settings to bypass filtering.',
-          parentAdvice:
-            'Have a non-punitive conversation. Acknowledge their technical curiosity, explain the safety reasons for parental filters, and set clear expectations regarding device tampering.',
-          reviewed: false,
-        },
-        {
-          id: 'risk-2',
-          category: 'CONTENT_RISK',
-          severity: 'LOW',
-          queryOrContext: 'free roblox robux generator no human verification 2026',
-          detectedAt: 'Yesterday at 4:15 PM',
-          actionTaken: 'Interpreted as Phishing Scam • Access Denied',
-          aiExplanation:
-            'Robux scam portals often attempt credential harvesting and install malicious browser extensions.',
-          parentAdvice:
-            'Remind your child that third-party "free in-game currency" websites are common online scams and that legitimate currency is only acquired inside the official app.',
-          reviewed: true,
-        },
-        {
-          id: 'risk-3',
-          category: 'CYBERBULLYING',
-          severity: 'LOW',
-          queryOrContext: 'discord.gg/gaming-squad-invite',
-          detectedAt: '2 days ago',
-          actionTaken: 'Social Media Filter Triggered',
-          aiExplanation:
-            'Child attempted to join an unverified public Discord server. Filter protected access during bedtime hours.',
-          parentAdvice:
-            'Encourage child to discuss who their online gaming friends are and verify server safety before joining new communities.',
-          reviewed: true,
-        },
-      ];
-
-      // Convert any blocked real activities into dynamic AI risk items
+      // Convert only genuine blocked activities into risk items
       const dynamicInsights: AiRiskItem[] = [];
-      const blockedActs = acts.filter((a) => a.action === 'BLOCKED');
+      const blockedActs = (Array.isArray(acts) ? acts : []).filter((a) => a.action === 'BLOCKED');
+
+      let mentalCount = 0;
+      let cyberbullyingCount = 0;
+      let explicitCount = 0;
+      let circumventionCount = 0;
 
       blockedActs.forEach((act, idx) => {
-        const dom = act.domain.toLowerCase();
+        const dom = (act.domain || '').toLowerCase();
+        const rawCategory = ((act as any).category || '').toUpperCase();
         let cat: AiRiskItem['category'] = 'CONTENT_RISK';
         let sev: AiRiskItem['severity'] = 'LOW';
-        let explanation = `Access to ${act.domain} was blocked by the parental web policy filter.`;
-        let advice = `Review whether ${childName} requires access to ${act.domain} for school or creative hobbies.`;
+        let explanation = `Access to blocked domain ${act.domain} was intercepted by parental policy.`;
+        let advice = `Review whether ${childName} requires access to ${act.domain} for school or family activities.`;
 
-        if (dom.includes('tiktok') || dom.includes('discord') || dom.includes('instagram') || dom.includes('chat')) {
-          cat = 'CYBERBULLYING';
-          sev = 'MEDIUM';
-          explanation = `Unrestricted communication on ${act.domain} can expose children to unmonitored group chats.`;
-          advice = `Ask ${childName} who invited them to ${act.domain} and discuss healthy social boundaries.`;
-        } else if (dom.includes('vpn') || dom.includes('proxy') || dom.includes('bypass') || dom.includes('dns')) {
+        if (
+          rawCategory === 'CIRCUMVENTION' ||
+          dom.includes('vpn') ||
+          dom.includes('proxy') ||
+          dom.includes('bypass') ||
+          dom.includes('dns-over-https')
+        ) {
           cat = 'CIRCUMVENTION';
           sev = 'HIGH';
-          explanation = `Child navigated to ${act.domain}, which is categorized as a proxy or filter circumvention tool.`;
-          advice = `Discuss why bypassing rules is unsafe and confirm device health in the Diagnostics tab.`;
-        } else if (dom.includes('free') || dom.includes('hack') || dom.includes('keygen') || dom.includes('scam')) {
-          cat = 'CONTENT_RISK';
+          circumventionCount++;
+          explanation = `Blocked domain ${act.domain} belongs to potential circumvention or proxy category.`;
+          advice = `Discuss why bypassing network protection is unsafe and check the Diagnostics tab.`;
+        } else if (
+          rawCategory === 'SOCIAL_MEDIA' ||
+          dom.includes('tiktok') ||
+          dom.includes('discord') ||
+          dom.includes('instagram') ||
+          dom.includes('chat')
+        ) {
+          cat = 'CYBERBULLYING';
           sev = 'MEDIUM';
-          explanation = `Child attempted to visit a high-risk download or scam site (${act.domain}).`;
-          advice = `Explain that unauthorized game downloads often bundle trojans and malware.`;
+          cyberbullyingCount++;
+          explanation = `Unrestricted communication on ${act.domain} was blocked under social media controls.`;
+          advice = `Ask ${childName} who invited them to ${act.domain} and discuss healthy online communication.`;
+        } else if (rawCategory === 'ADULT_CONTENT' || rawCategory === 'MALWARE_SECURITY') {
+          cat = 'CONTENT_RISK';
+          sev = 'HIGH';
+          explicitCount++;
+          explanation = `High-risk explicit content or security threat was intercepted at domain ${act.domain}.`;
+          advice = `Ensure the child understands that unexpected downloads or explicit links may contain malware.`;
+        } else {
+          cat = 'CONTENT_RISK';
+          sev = 'LOW';
+          explicitCount++;
+          explanation = `Access to blocked domain ${act.domain} was stopped by category or domain rules.`;
+          advice = `Review rule settings if access to this specific service is needed.`;
         }
 
         dynamicInsights.push({
@@ -129,7 +105,7 @@ export const AiSafetyWatchdog: React.FC<{ childId?: string; childName?: string }
           severity: sev,
           queryOrContext: act.domain,
           detectedAt: new Date(act.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          actionTaken: `Intercepted by SafeBrowse Engine • ${act.reason || 'Category Filter'}`,
+          actionTaken: `Intercepted by SafeBrowse Engine • ${act.reason || 'Blocked Domain Rule'}`,
           aiExplanation: explanation,
           parentAdvice: advice,
           reviewed: false,
@@ -138,15 +114,15 @@ export const AiSafetyWatchdog: React.FC<{ childId?: string; childName?: string }
 
       // Load reviewed state from localStorage
       const savedReviewed = JSON.parse(localStorage.getItem(`sb_watchdog_rev_${childId}`) || '[]');
-      const combined = [...dynamicInsights, ...baseInsights].map((item) => ({
+      const finalItems = dynamicInsights.map((item) => ({
         ...item,
-        reviewed: savedReviewed.includes(item.id) || item.reviewed,
+        reviewed: savedReviewed.includes(item.id),
       }));
 
       // Deduplicate by queryOrContext
       const seen = new Set<string>();
       const deduped: AiRiskItem[] = [];
-      for (const item of combined) {
+      for (const item of finalItems) {
         if (!seen.has(item.queryOrContext)) {
           seen.add(item.queryOrContext);
           deduped.push(item);
@@ -154,14 +130,13 @@ export const AiSafetyWatchdog: React.FC<{ childId?: string; childName?: string }
       }
 
       setItems(deduped);
-      const score = Math.max(90, Math.min(100, 100 - (blockedActs.length > 0 ? blockedActs.length * 2 : 2)));
+      const score = blockedActs.length === 0 ? 100 : Math.max(50, 100 - blockedActs.length * 5);
       setSafetyScore(score);
 
-      const circumventionCount = deduped.filter((d) => d.category === 'CIRCUMVENTION').length;
       setRiskStats({
-        mentalHealth: '100% Clean',
-        cyberbullying: '100% Clean',
-        explicitContent: '0 Intercepts',
+        mentalHealth: mentalCount > 0 ? `${mentalCount} Intercepts` : '0 Intercepts',
+        cyberbullying: cyberbullyingCount > 0 ? `${cyberbullyingCount} Intercepts` : '0 Intercepts',
+        explicitContent: explicitCount > 0 ? `${explicitCount} Intercepts` : '0 Intercepts',
         circumvention: circumventionCount > 0 ? `${circumventionCount} Neutralized` : '0 Attempts',
       });
     } catch (e) {
@@ -201,11 +176,11 @@ export const AiSafetyWatchdog: React.FC<{ childId?: string; childName?: string }
                   AI Safety & Sentiment Watchdog
                 </h2>
                 <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                  Bark-Grade AI Engine
+                  Behavioral Security Engine
                 </span>
               </div>
               <p className="text-xs text-slate-400 mt-1 max-w-xl leading-relaxed">
-                Autonomous safety neural net analyzing search context, high-risk intent, circumvention attempts, and cyberbullying patterns across {childName}'s devices.
+                Autonomous safety engine analyzing high-risk intent, potential circumvention attempts, and communication patterns across {childName}'s devices.
               </p>
             </div>
           </div>
@@ -220,8 +195,12 @@ export const AiSafetyWatchdog: React.FC<{ childId?: string; childName?: string }
               </div>
             </div>
             <div className="text-right border-l border-slate-800 pl-4">
-              <div className="text-[11px] font-bold text-emerald-300">Safe & Healthy</div>
-              <div className="text-[10px] text-slate-400">0 Critical Threats</div>
+              <div className="text-[11px] font-bold text-emerald-300">
+                {items.length === 0 ? 'Safe & Healthy' : `${items.length} Risk Events`}
+              </div>
+              <div className="text-[10px] text-slate-400">
+                {items.length === 0 ? '0 Critical Threats' : `${items.filter(i => i.severity === 'HIGH').length} High Severity`}
+              </div>
             </div>
           </div>
         </div>
@@ -231,7 +210,7 @@ export const AiSafetyWatchdog: React.FC<{ childId?: string; childName?: string }
           <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
             <div className="flex items-center justify-between text-[11px]">
               <span className="text-slate-400 font-medium">Mental Health</span>
-              <span className="text-emerald-400 font-bold">{riskStats.mentalHealth}</span>
+              <span className="text-slate-300 font-bold">{riskStats.mentalHealth}</span>
             </div>
             <div className="w-full bg-slate-800 rounded-full h-1.5">
               <div className="bg-emerald-500 h-1.5 rounded-full w-full" />
@@ -241,7 +220,7 @@ export const AiSafetyWatchdog: React.FC<{ childId?: string; childName?: string }
           <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
             <div className="flex items-center justify-between text-[11px]">
               <span className="text-slate-400 font-medium">Cyberbullying</span>
-              <span className="text-emerald-400 font-bold">{riskStats.cyberbullying}</span>
+              <span className="text-slate-300 font-bold">{riskStats.cyberbullying}</span>
             </div>
             <div className="w-full bg-slate-800 rounded-full h-1.5">
               <div className="bg-emerald-500 h-1.5 rounded-full w-full" />
@@ -251,7 +230,7 @@ export const AiSafetyWatchdog: React.FC<{ childId?: string; childName?: string }
           <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
             <div className="flex items-center justify-between text-[11px]">
               <span className="text-slate-400 font-medium">Explicit Content</span>
-              <span className="text-emerald-400 font-bold">{riskStats.explicitContent}</span>
+              <span className="text-slate-300 font-bold">{riskStats.explicitContent}</span>
             </div>
             <div className="w-full bg-slate-800 rounded-full h-1.5">
               <div className="bg-emerald-500 h-1.5 rounded-full w-full" />
@@ -281,65 +260,71 @@ export const AiSafetyWatchdog: React.FC<{ childId?: string; childName?: string }
             <span className="text-xs text-slate-400">{items.length} Events</span>
           </div>
 
-          <div className="space-y-2.5">
-            {items.map((item) => {
-              const isSelected = selectedItem?.id === item.id;
-              return (
-                <div
-                  key={item.id}
-                  onClick={() => setSelectedItem(item)}
-                  className={`p-4 rounded-2xl border cursor-pointer transition-all ${
-                    isSelected
-                      ? 'bg-slate-900 border-indigo-500/60 shadow-lg shadow-indigo-500/10'
-                      : 'bg-slate-900/60 hover:bg-slate-900 border-slate-800/80 hover:border-slate-700'
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${
-                          item.severity === 'HIGH'
-                            ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                            : item.severity === 'MEDIUM'
-                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                            : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
-                        }`}
-                      >
-                        {item.severity} Risk
-                      </span>
-                      <span className="text-[10px] font-semibold text-slate-400 font-mono">
-                        {item.category}
-                      </span>
+          {items.length === 0 ? (
+            <div className="p-8 text-center text-slate-500 text-xs italic bg-slate-900/40 rounded-2xl border border-slate-800/80">
+              No risk events recorded.
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {items.map((item) => {
+                const isSelected = selectedItem?.id === item.id;
+                return (
+                  <div
+                    key={item.id}
+                    onClick={() => setSelectedItem(item)}
+                    className={`p-4 rounded-2xl border cursor-pointer transition-all ${
+                      isSelected
+                        ? 'bg-slate-900 border-indigo-500/60 shadow-lg shadow-indigo-500/10'
+                        : 'bg-slate-900/60 hover:bg-slate-900 border-slate-800/80 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${
+                            item.severity === 'HIGH'
+                              ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                              : item.severity === 'MEDIUM'
+                              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                              : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                          }`}
+                        >
+                          {item.severity} Risk
+                        </span>
+                        <span className="text-[10px] font-semibold text-slate-400 font-mono">
+                          {item.category}
+                        </span>
+                      </div>
+
+                      <span className="text-[10px] text-slate-500">{item.detectedAt}</span>
                     </div>
 
-                    <span className="text-[10px] text-slate-500">{item.detectedAt}</span>
-                  </div>
-
-                  <div className="mt-2.5">
-                    <div className="text-xs font-bold text-white font-mono bg-slate-950/80 p-2 rounded-lg border border-slate-800/80 truncate">
-                      "{item.queryOrContext}"
+                    <div className="mt-2.5">
+                      <div className="text-xs font-bold text-white font-mono bg-slate-950/80 p-2 rounded-lg border border-slate-800/80 truncate">
+                        "{item.queryOrContext}"
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-2 line-clamp-2 leading-relaxed">
+                        {item.aiExplanation}
+                      </p>
                     </div>
-                    <p className="text-[11px] text-slate-400 mt-2 line-clamp-2 leading-relaxed">
-                      {item.aiExplanation}
-                    </p>
-                  </div>
 
-                  <div className="flex items-center justify-between mt-3 pt-2.5 border-t border-slate-800/60 text-[11px]">
-                    <span className="text-indigo-400 font-medium flex items-center gap-1">
-                      <Sparkles className="w-3 h-3" /> View Parent Guidance
-                    </span>
-                    {item.reviewed ? (
-                      <span className="text-emerald-400 flex items-center gap-1 text-[10px]">
-                        <CheckCircle2 className="w-3 h-3" /> Reviewed
+                    <div className="flex items-center justify-between mt-3 pt-2.5 border-t border-slate-800/60 text-[11px]">
+                      <span className="text-indigo-400 font-medium flex items-center gap-1">
+                        <Sparkles className="w-3 h-3" /> View Parent Guidance
                       </span>
-                    ) : (
-                      <span className="text-amber-400 text-[10px] font-semibold">● New Insight</span>
-                    )}
+                      {item.reviewed ? (
+                        <span className="text-emerald-400 flex items-center gap-1 text-[10px]">
+                          <CheckCircle2 className="w-3 h-3" /> Reviewed
+                        </span>
+                      ) : (
+                        <span className="text-amber-400 text-[10px] font-semibold">● New Insight</span>
+                      )}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Right Detail Pane */}
@@ -407,9 +392,13 @@ export const AiSafetyWatchdog: React.FC<{ childId?: string; childName?: string }
               <div className="w-12 h-12 rounded-2xl bg-slate-800/80 text-slate-400 flex items-center justify-center">
                 <Brain className="w-6 h-6" />
               </div>
-              <h4 className="text-sm font-bold text-white">Select a flagged insight</h4>
+              <h4 className="text-sm font-bold text-white">
+                {items.length === 0 ? 'No risk events recorded' : 'Select a flagged insight'}
+              </h4>
               <p className="text-xs text-slate-400 max-w-xs leading-relaxed">
-                Click on any flagged search query or activity card on the left to review the AI analysis and age-appropriate talking points.
+                {items.length === 0
+                  ? 'All evaluated network requests comply with safety rules.'
+                  : 'Click on any flagged search query or activity card on the left to review the AI analysis and age-appropriate talking points.'}
               </p>
             </div>
           )}

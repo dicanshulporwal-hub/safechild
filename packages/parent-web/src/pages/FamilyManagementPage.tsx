@@ -158,7 +158,7 @@ export const FamilyManagementPage: React.FC = () => {
             <p className="text-xs text-slate-400">Co-parents and viewers who have access to family children</p>
           </div>
           <span className="text-xs bg-slate-800 text-slate-300 px-3 py-1 rounded-full font-bold">
-            {familyData?.members?.length || 1} Member{familyData?.members?.length > 1 ? 's' : ''}
+            {(familyData?.members?.length ?? 0)} Member{(familyData?.members?.length ?? 0) === 1 ? '' : 's'}
           </span>
         </div>
 

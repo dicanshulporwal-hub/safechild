@@ -161,16 +161,73 @@ export interface NotificationItem {
   read: boolean;
 }
 
+export type PolicySyncStatus = 'SYNCED' | 'SYNC_PENDING' | 'VERSION_MISMATCH' | 'UNKNOWN';
+
+export interface DeviceCapabilities {
+  activityTelemetryAvailable: boolean;
+  appUsageAvailable: boolean;
+  domainUsageAvailable: boolean;
+  categoryUsageAvailable: boolean;
+  safeDinnerTimeSupported: boolean;
+  safeBedtimeSupported: boolean;
+  dnsFilteringSupported: boolean;
+}
+
+export interface DeviceRuntimeTelemetry {
+  deviceId: string;
+  agentVersion: string;
+  configuredPolicyVersion: number;
+  agentActivePolicyVersion: number | null;
+  policySyncStatus: PolicySyncStatus;
+  enforcementActive: boolean;
+  protectionStatus: string;
+  mappedAccountName: string | null;
+  hasMultipleSessions: boolean;
+  isOnline: boolean;
+  lastHeartbeatAt: string;
+  capabilities: DeviceCapabilities;
+}
+
+export interface DataAvailability<T> {
+  dataAvailable: boolean;
+  value: T | null;
+  status: 'AVAILABLE' | 'NOT_AVAILABLE' | 'UNKNOWN';
+  reason?: string;
+}
+
 export interface TimelineEvent {
   id: string;
-  childId: string;
-  deviceId: string;
-  deviceName: string;
+  familyId?: string;
+  childId?: string;
+  deviceId?: string;
+  deviceName?: string;
   domain?: string;
-  eventType: 'BLOCKED' | 'ALLOWED' | 'POLICY_APPLIED' | 'TEMP_GRANT' | 'GRANT_EXPIRED' | 'PROTECTION_RESTARTED' | 'NETWORK_SWITCH';
-  decision?: 'BLOCK' | 'ALLOW';
-  reason: string;
-  policyVersion: number;
+  eventType:
+    | 'BLOCKED'
+    | 'ALLOWED'
+    | 'POLICY_APPLIED'
+    | 'TEMP_GRANT'
+    | 'GRANT_EXPIRED'
+    | 'PROTECTION_RESTARTED'
+    | 'NETWORK_SWITCH'
+    | 'DEVICE_PAIRED'
+    | 'DEVICE_UNPAIRED'
+    | 'DEVICE_PROTECTION_DEGRADED'
+    | 'DEVICE_PROTECTION_RECOVERED'
+    | 'POLICY_UPDATED'
+    | 'POLICY_SYNCED'
+    | 'DINNER_TIME_ENABLED'
+    | 'DINNER_TIME_DISABLED'
+    | 'BEDTIME_STATE_CHANGED'
+    | 'WEBSITE_BLOCKED'
+    | 'ASK_PARENT_CREATED'
+    | 'ASK_PARENT_APPROVED'
+    | 'ASK_PARENT_DENIED'
+    | string;
+  decision?: 'BLOCK' | 'ALLOW' | string;
+  reason?: string;
+  metadata?: Record<string, any>;
+  policyVersion?: number;
   timestamp: string;
 }
 

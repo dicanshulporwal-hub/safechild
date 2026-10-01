@@ -21,13 +21,21 @@ operationsRouter.get(
     const familiesCount = await prisma.family.count();
     const usersCount = await prisma.user.count();
     const childrenCount = await prisma.child.count();
-    const allDevices = await prisma.device.findMany();
+    const allDevices = await prisma.device.findMany({
+      include: {
+        child: {
+          select: { policy: { select: { version: true } } },
+        },
+      },
+    });
     const devicesCount = allDevices.length;
 
     let protectedCount = 0;
     let warningCount = 0;
     let inactiveCount = 0;
     let offlineCount = 0;
+    let syncedDevicesCount = 0;
+    let policyEligibleCount = 0;
 
     const now = Date.now();
 
@@ -35,14 +43,26 @@ operationsRouter.get(
       const elapsedSec = (now - new Date(dev.lastHeartbeatAt).getTime()) / 1000;
       if (dev.isRevoked || !dev.healthStatus || dev.healthStatus === 'inactive') {
         inactiveCount++;
-      } else if (elapsedSec > 90) {
+      } else if (elapsedSec > 120) {
         offlineCount++;
       } else if (dev.healthState === 'WARNING' || dev.healthStatus === 'syncing') {
         warningCount++;
       } else {
         protectedCount++;
       }
+
+      if (!dev.isRevoked && elapsedSec <= 120) {
+        policyEligibleCount++;
+        const configuredVersion = dev.child?.policy?.version ?? 1;
+        if (dev.activePolicyVersion === configuredVersion) {
+          syncedDevicesCount++;
+        }
+      }
     });
+
+    const policySyncSuccessRate = policyEligibleCount > 0
+      ? `${((syncedDevicesCount / policyEligibleCount) * 100).toFixed(1)}%`
+      : null;
 
     res.json({
       familiesCount,
@@ -55,8 +75,10 @@ operationsRouter.get(
         inactive: inactiveCount,
         offline: offlineCount,
       },
-      policySyncSuccessRate: '99.4%',
-      agentCrashRate: '0.1%',
+      policySyncSuccessRate,
+      policySyncSuccessRateAvailable: policyEligibleCount > 0,
+      agentCrashRate: null,
+      agentCrashRateAvailable: false,
     });
   }
 );
@@ -86,7 +108,7 @@ operationsRouter.get(
       return res.status(403).json({ error: 'Forbidden: Insufficient family permissions.' });
     }
 
-    const list = timelineService.getEventsForChild(req.params.childId);
+    const list = await timelineService.getEventsForChild(req.params.childId);
     res.json(list);
   }
 );
@@ -125,16 +147,16 @@ operationsRouter.post(
 // Public Service Status Page (status.safebrowse.io API)
 operationsRouter.get('/status', (req, res) => {
   res.json({
-    status: 'ALL_SYSTEMS_OPERATIONAL',
+    status: 'OPERATIONAL',
     timestamp: new Date().toISOString(),
-    uptime: '99.98%',
+    uptime: null,
+    uptimeAvailable: false,
     services: [
-      { name: 'Parent Web App & API', status: 'OPERATIONAL', latencyMs: 12 },
-      { name: 'Real-time WebSocket Gateway', status: 'OPERATIONAL', activeConnections: 18 },
-      { name: 'Policy Synchronization Engine', status: 'OPERATIONAL', syncRate: '99.92%' },
-      { name: 'DNS Filtering Engine', status: 'OPERATIONAL', avgLookupMs: 0.04 },
-      { name: 'High-Value Alerting Service', status: 'OPERATIONAL', queueSize: 0 },
-      { name: 'Admin Fleet & Operations Gateway', status: 'OPERATIONAL', targetRelease: '1.1.0' },
+      { name: 'Core Policy Evaluation Engine', status: 'OPERATIONAL' },
+      { name: 'DNS Filtering Engine', status: 'OPERATIONAL' },
+      { name: 'Real-time WebSocket Gateway', status: 'OPERATIONAL' },
+      { name: 'Backend REST API & Identity Service', status: 'OPERATIONAL' },
+      { name: 'Ask Parent Cloud Notification Broker', status: 'OPERATIONAL' },
     ],
   });
 });

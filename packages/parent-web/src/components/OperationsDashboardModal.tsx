@@ -54,17 +54,17 @@ export const OperationsDashboardModal: React.FC<OperationsDashboardModalProps> =
             {/* Top Counters */}
             <div className="grid grid-cols-3 gap-3">
               <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 text-center">
-                <div className="text-2xl font-black text-slate-900">{metrics?.familiesCount || 1}</div>
+                <div className="text-2xl font-black text-slate-900">{metrics?.familiesCount ?? 0}</div>
                 <div className="text-xs font-bold text-slate-500 mt-0.5">Families</div>
               </div>
 
               <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 text-center">
-                <div className="text-2xl font-black text-slate-900">{metrics?.childrenCount || 1}</div>
+                <div className="text-2xl font-black text-slate-900">{metrics?.childrenCount ?? 0}</div>
                 <div className="text-xs font-bold text-slate-500 mt-0.5">Children</div>
               </div>
 
               <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 text-center">
-                <div className="text-2xl font-black text-slate-900">{metrics?.devicesCount || 2}</div>
+                <div className="text-2xl font-black text-slate-900">{metrics?.devicesCount ?? 0}</div>
                 <div className="text-xs font-bold text-slate-500 mt-0.5">Devices</div>
               </div>
             </div>
@@ -79,7 +79,7 @@ export const OperationsDashboardModal: React.FC<OperationsDashboardModalProps> =
                   <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
                   <div>
                     <div className="text-base font-black text-emerald-950">
-                      {metrics?.healthBreakdown?.protected ?? 2}
+                      {metrics?.healthBreakdown?.protected ?? 0}
                     </div>
                     <div className="text-[10px] font-bold text-emerald-800 uppercase">Protected</div>
                   </div>
@@ -121,9 +121,9 @@ export const OperationsDashboardModal: React.FC<OperationsDashboardModalProps> =
             <div className="p-4 rounded-2xl bg-indigo-50/70 border border-indigo-200/80 flex items-center justify-between">
               <div>
                 <div className="text-xs font-extrabold text-indigo-950">Policy Sync Success Rate</div>
-                <div className="text-xs text-indigo-700 mt-0.5">Average delivery speed: ~120ms</div>
+                <div className="text-xs text-indigo-700 mt-0.5">Fleet-wide active synchronization</div>
               </div>
-              <div className="text-xl font-black text-indigo-900">{metrics?.policySyncSuccessRate || '99.4%'}</div>
+              <div className="text-xl font-black text-indigo-900">{metrics?.policySyncSuccessRate ?? 'Not Available'}</div>
             </div>
           </div>
         )}

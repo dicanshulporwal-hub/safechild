@@ -336,13 +336,15 @@ export const DeviceDetailsPage: React.FC<DeviceDetailsPageProps> = ({ childrenLi
             <div className="flex items-center justify-between">
               <span className="text-slate-400">SafeBrowse Agent:</span>
               <span className="font-mono text-indigo-300">
-                {device.agentVersion || '1.0.0-pilot'}
+                {device.agentVersion || 'Unknown'}
               </span>
             </div>
 
             <div className="flex items-center justify-between">
               <span className="text-slate-400">Active Policy Version:</span>
-              <span className="font-mono text-emerald-400">v{device.activePolicyVersion || 1}</span>
+              <span className="font-mono text-emerald-400">
+                v{device.agentActivePolicyVersion ?? device.activePolicyVersion ?? '?'}
+              </span>
             </div>
           </div>
         </div>
@@ -367,7 +369,9 @@ export const DeviceDetailsPage: React.FC<DeviceDetailsPageProps> = ({ childrenLi
 
             <div className="flex items-center justify-between">
               <span className="text-slate-400">Child Policy:</span>
-              <span className="font-mono text-emerald-400">v{device.activePolicyVersion || policy?.version || 1} configured</span>
+              <span className="font-mono text-emerald-400">
+                v{device.configuredPolicyVersion ?? policy?.version ?? '?'} configured
+              </span>
             </div>
 
             <div className="flex items-center justify-between">

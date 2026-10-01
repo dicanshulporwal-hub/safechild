@@ -249,3 +249,28 @@ policyRouter.post(
     }
   }
 );
+
+// Get family pause status (Dinner Time state)
+policyRouter.get(
+  '/family/pause-status',
+  authMiddleware,
+  requireVerifiedEmail,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: req.userId },
+        include: { memberships: true },
+      });
+
+      if (!user || user.memberships.length === 0) {
+        return res.status(404).json({ error: 'Family not found.' });
+      }
+
+      const familyId = (req.query.familyId as string) || user.memberships[0].familyId;
+      const status = await policyService.getFamilyPauseStatus(familyId);
+      res.json(status);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  }
+);

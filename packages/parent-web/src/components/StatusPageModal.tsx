@@ -54,7 +54,7 @@ export const StatusPageModal: React.FC<StatusPageModalProps> = ({ onClose }) => 
                 </span>
               </div>
               <span className="text-xs font-black text-emerald-800 bg-white/80 px-2.5 py-0.5 rounded-lg border border-emerald-200">
-                Uptime: {statusData?.uptime || '99.98%'}
+                Uptime: {statusData?.uptimeAvailable && statusData?.uptime ? statusData.uptime : 'Not Available'}
               </span>
             </div>
 

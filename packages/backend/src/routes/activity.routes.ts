@@ -66,6 +66,7 @@ activityRouter.post('/', deviceAuthMiddleware, async (req: AuthenticatedDeviceRe
               category: ev.category,
               reason: ev.reason,
               timestamp: ev.timestamp,
+              clientEventId: ev.clientEventId || ev.id,
             }
           );
           results.push(recorded);
@@ -118,6 +119,7 @@ activityRouter.post('/', deviceAuthMiddleware, async (req: AuthenticatedDeviceRe
         category: req.body.category,
         reason: req.body.reason,
         timestamp: req.body.timestamp,
+        clientEventId: req.body.clientEventId || req.body.id,
       }
     );
     res.json(event);

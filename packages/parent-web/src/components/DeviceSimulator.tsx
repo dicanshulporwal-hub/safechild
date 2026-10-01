@@ -61,10 +61,10 @@ export const DeviceSimulator: React.FC<DeviceSimulatorProps> = ({
           body: JSON.stringify({
             deviceId: currentDevice.id,
             deviceToken: currentDevice.deviceToken,
-            activePolicyVersion: policy?.version || 1,
+            activePolicyVersion: policy?.version ?? 1,
             enforcementActive: true,
             platform: currentDevice.platform,
-            agentVersion: '1.0.0',
+            agentVersion: '1.0.3-pilot',
           }),
         });
       } catch (e) {
@@ -259,7 +259,7 @@ export const DeviceSimulator: React.FC<DeviceSimulatorProps> = ({
 
               <div className="text-[11px] font-bold text-slate-400 flex items-center gap-1">
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                <span>Enforcing Local Policy v{policy?.version || 1}</span>
+                <span>Enforcing Local Policy v{policy?.version ?? 1}</span>
               </div>
             </div>
 

@@ -39,7 +39,7 @@ export const QuickControls: React.FC<QuickControlsProps> = ({
                 Protected
               </span>
               <span className="text-xs font-semibold px-2 py-0.5 bg-slate-100 text-slate-600 rounded-md">
-                Policy v{policy?.version || 1}
+                Policy v{policy?.version ?? '?'}
               </span>
             </div>
             <p className="text-xs text-slate-500 mt-1 font-medium">

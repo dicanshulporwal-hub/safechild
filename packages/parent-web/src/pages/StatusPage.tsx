@@ -1,27 +1,27 @@
 import React, { useState, useEffect } from 'react';
-import { api } from '../api/client';
 import { CheckCircle } from 'lucide-react';
 
 export const StatusPage: React.FC = () => {
-  const [status, setStatus] = useState<any>(null);
+  const [statusData, setStatusData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api.getHealth()
+    fetch('/api/operations/status')
+      .then((res) => res.json())
       .then((data) => {
-        setStatus(data);
+        setStatusData(data);
         setLoading(false);
       })
       .catch(() => setLoading(false));
   }, []);
 
-  const services = [
-    { name: 'Core Policy Evaluation Engine', status: 'Operational', latency: '0.03ms' },
-    { name: 'DNS Interception & Filtering (Local DNS & VPN)', status: 'Operational', latency: '0.8ms' },
-    { name: 'Real-time WebSocket Push Telemetry', status: 'Operational', latency: '18ms' },
-    { name: 'Backend REST API & Identity Service', status: 'Operational', latency: '12ms' },
-    { name: 'Ask Parent Cloud Notification Broker', status: 'Operational', latency: '24ms' },
-    { name: 'Local SQLite Policy Cache & Fallback Layer', status: 'Operational', latency: '0.4ms' },
+  const services = statusData?.services || [
+    { name: 'Core Policy Evaluation Engine', status: 'Operational' },
+    { name: 'DNS Interception & Filtering (Local DNS & VPN)', status: 'Operational' },
+    { name: 'Real-time WebSocket Push Telemetry', status: 'Operational' },
+    { name: 'Backend REST API & Identity Service', status: 'Operational' },
+    { name: 'Ask Parent Cloud Notification Broker', status: 'Operational' },
+    { name: 'Local SQLite Policy Cache & Fallback Layer', status: 'Operational' },
   ];
 
   return (
@@ -38,12 +38,14 @@ export const StatusPage: React.FC = () => {
             <CheckCircle className="w-7 h-7" />
           </div>
           <div>
-            <div className="text-base font-bold text-white">All Systems Fully Operational</div>
-            <p className="text-xs text-slate-400 mt-0.5">Uptime: 99.98% • Active Incidents: 0</p>
+            <div className="text-base font-bold text-white">All Systems Operational</div>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Uptime: {statusData?.uptimeAvailable && statusData?.uptime ? statusData.uptime : 'Not Available'} • Active Incidents: 0
+            </p>
           </div>
         </div>
         <span className="text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-3 py-1 rounded-full font-mono font-bold">
-          100% HEALTHY
+          OPERATIONAL
         </span>
       </div>
 
@@ -51,14 +53,13 @@ export const StatusPage: React.FC = () => {
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-3">
         <h2 className="text-sm font-bold text-white uppercase tracking-wider mb-2">Platform Services</h2>
         <div className="space-y-2">
-          {services.map((s, idx) => (
+          {services.map((s: any, idx: number) => (
             <div key={idx} className="p-3.5 bg-slate-950/60 rounded-xl border border-slate-800 flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
                 <span className="text-xs font-bold text-white">{s.name}</span>
               </div>
               <div className="flex items-center gap-4">
-                <span className="text-xs text-slate-500 font-mono">{s.latency}</span>
                 <span className="text-xs font-semibold text-emerald-400">{s.status}</span>
               </div>
             </div>

@@ -51,6 +51,7 @@ export class FamilyService {
         ownerUserId: membership.family.ownerUserId,
         requireMfa: membership.family.requireMfa,
         approvalRule: membership.family.approvalRule as FamilyApprovalRule,
+        timezone: (membership.family as any).timezone || 'Asia/Kolkata',
         createdAt: membership.family.createdAt.toISOString(),
         updatedAt: membership.family.updatedAt.toISOString(),
       };
@@ -97,6 +98,7 @@ export class FamilyService {
         ownerUserId: createdFamily.ownerUserId,
         requireMfa: createdFamily.requireMfa,
         approvalRule: createdFamily.approvalRule as FamilyApprovalRule,
+        timezone: (createdFamily as any).timezone || 'Asia/Kolkata',
         createdAt: createdFamily.createdAt.toISOString(),
         updatedAt: createdFamily.updatedAt.toISOString(),
       };
@@ -117,6 +119,7 @@ export class FamilyService {
         ownerUserId: fam.ownerUserId,
         requireMfa: fam.requireMfa,
         approvalRule: fam.approvalRule as FamilyApprovalRule,
+        timezone: (fam as any).timezone || 'Asia/Kolkata',
         createdAt: fam.createdAt.toISOString(),
         updatedAt: fam.updatedAt.toISOString(),
       };
@@ -140,6 +143,7 @@ export class FamilyService {
           ownerUserId: membership.family.ownerUserId,
           requireMfa: membership.family.requireMfa,
           approvalRule: membership.family.approvalRule as FamilyApprovalRule,
+          timezone: (membership.family as any).timezone || 'Asia/Kolkata',
           createdAt: membership.family.createdAt.toISOString(),
           updatedAt: membership.family.updatedAt.toISOString(),
         };
@@ -208,7 +212,12 @@ export class FamilyService {
   public async updateFamily(
     familyId: string,
     actorUserId: string,
-    updates: { name?: string; requireMfa?: boolean; approvalRule?: 'OWNER_ONLY' | 'OWNER_OR_PARENT' }
+    updates: {
+      name?: string;
+      requireMfa?: boolean;
+      approvalRule?: 'OWNER_ONLY' | 'OWNER_OR_PARENT';
+      timezone?: string;
+    }
   ): Promise<Family> {
     const membership = await rbacService.getFamilyMembership(actorUserId, familyId);
     if (!membership) {
@@ -224,6 +233,15 @@ export class FamilyService {
       throw new Error('Forbidden. Only authorized family managers can edit family settings.');
     }
 
+    if (updates.timezone !== undefined) {
+      const tz = updates.timezone.trim();
+      try {
+        Intl.DateTimeFormat(undefined, { timeZone: tz });
+      } catch {
+        throw new Error(`Invalid IANA timezone: ${tz}`);
+      }
+    }
+
     const updated = await prisma.$transaction(async (tx) => {
       const fam = await tx.family.update({
         where: { id: familyId },
@@ -231,6 +249,7 @@ export class FamilyService {
           name: updates.name ? updates.name.trim() : undefined,
           requireMfa: updates.requireMfa !== undefined ? updates.requireMfa : undefined,
           approvalRule: updates.approvalRule ? (updates.approvalRule as any) : undefined,
+          timezone: updates.timezone ? updates.timezone.trim() : undefined,
         },
       });
 
@@ -255,6 +274,7 @@ export class FamilyService {
       ownerUserId: updated.ownerUserId,
       requireMfa: updated.requireMfa,
       approvalRule: updated.approvalRule as FamilyApprovalRule,
+      timezone: (updated as any).timezone || 'Asia/Kolkata',
       createdAt: updated.createdAt.toISOString(),
       updatedAt: updated.updatedAt.toISOString(),
     };

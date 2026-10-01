@@ -62,9 +62,14 @@ export interface Device {
   agentVersion?: string;
   isOnline?: boolean;
   isRevoked?: boolean;
+  enforcementActive?: boolean;
   windowsAccountName?: string;
+  mappedAccountName?: string;
   protectionStatus?: string;
   hasMultipleSessions?: boolean;
+  configuredPolicyVersion?: number;
+  agentActivePolicyVersion?: number | null;
+  policySyncStatus?: 'SYNCED' | 'SYNC_PENDING' | 'VERSION_MISMATCH' | 'UNKNOWN';
 }
 
 export interface DeviceDetails {
@@ -490,6 +495,18 @@ class ApiClient {
     return data;
   }
 
+  async getFamilyPauseStatus(familyId?: string): Promise<{
+    isFamilyPaused: boolean;
+    pauseState: 'ALL_PAUSED' | 'PARTIALLY_PAUSED' | 'NONE_PAUSED';
+    pausedCount: number;
+    totalChildren: number;
+  }> {
+    const url = familyId
+      ? `${API_BASE}/policies/family/pause-status?familyId=${familyId}`
+      : `${API_BASE}/policies/family/pause-status`;
+    return this.cachedGet(url, 3000);
+  }
+
   // --- Devices & Health ---
   async getDevices(childId: string, forceRefresh: boolean = false): Promise<Device[]> {
     return this.cachedGet<Device[]>(`${API_BASE}/devices/child/${childId}`, 8000, forceRefresh);
@@ -497,6 +514,16 @@ class ApiClient {
 
   async getDeviceHealth(deviceId: string) {
     return this.cachedGet(`${API_BASE}/devices/${deviceId}/health`, 6000);
+  }
+
+  async runDeviceDiagnostics(deviceId: string): Promise<any> {
+    const res = await fetch(`${API_BASE}/devices/${deviceId}/diagnostics`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+    });
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to run device diagnostics');
+    return data;
   }
 
   async createPairingCode(childId: string): Promise<{ code: string; expiresAt: string }> {

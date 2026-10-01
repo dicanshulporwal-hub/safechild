@@ -311,7 +311,7 @@ export const ChildWorkspacePage: React.FC<{ childrenList: Child[] }> = ({ childr
             <p className="text-xs text-slate-400 flex items-center gap-2 font-medium">
               <span>{devices.length} Connected Device{devices.length === 1 ? '' : 's'}</span>
               <span>•</span>
-              <span className="font-mono text-slate-300">Policy v{policy?.version || 1} Active</span>
+              <span className="font-mono text-slate-300">Policy v{policy?.version ?? '?'} Active</span>
             </p>
           </div>
         </div>
@@ -426,7 +426,7 @@ export const ChildWorkspacePage: React.FC<{ childrenList: Child[] }> = ({ childr
                         <span className="text-2xl">{dev.platform === 'android' ? '📱' : '💻'}</span>
                         <div>
                           <div className="text-xs font-bold text-white">{dev.name}</div>
-                          <div className="text-[10px] text-slate-400 font-mono">v{dev.agentVersion || '1.0.0'} • {dev.platform}</div>
+                          <div className="text-[10px] text-slate-400 font-mono">{dev.agentVersion ? `v${dev.agentVersion}` : 'Unknown'} • {dev.platform}</div>
                         </div>
                       </div>
                       <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full font-bold">
@@ -517,7 +517,7 @@ export const ChildWorkspacePage: React.FC<{ childrenList: Child[] }> = ({ childr
                       </div>
                       <div>
                         <h3 className="text-sm font-bold text-white">{dev.name}</h3>
-                        <div className="text-xs text-slate-400">{dev.platform.toUpperCase()} • Agent {dev.agentVersion || '1.0.0'}</div>
+                        <div className="text-xs text-slate-400">{dev.platform.toUpperCase()} • Agent {dev.agentVersion ? `v${dev.agentVersion}` : 'Unknown'}</div>
                       </div>
                     </div>
                     {dev.hasMultipleSessions ? (

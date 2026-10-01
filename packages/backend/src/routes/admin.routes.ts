@@ -19,13 +19,21 @@ adminRouter.get('/metrics', ...adminAuth, async (req: AuthenticatedRequest, res:
   const familiesCount = await prisma.family.count();
   const usersCount = await prisma.user.count();
   const childrenCount = await prisma.child.count();
-  const allDevices = await prisma.device.findMany();
+  const allDevices = await prisma.device.findMany({
+    include: {
+      child: {
+        select: { policy: { select: { version: true } } },
+      },
+    },
+  });
   const devicesCount = allDevices.length;
 
   let protectedCount = 0;
   let warningCount = 0;
   let inactiveCount = 0;
   let offlineCount = 0;
+  let syncedDevicesCount = 0;
+  let policyEligibleCount = 0;
 
   const now = Date.now();
 
@@ -33,14 +41,26 @@ adminRouter.get('/metrics', ...adminAuth, async (req: AuthenticatedRequest, res:
     const elapsedSec = (now - new Date(dev.lastHeartbeatAt).getTime()) / 1000;
     if (dev.isRevoked || !dev.healthStatus || dev.healthStatus === 'inactive') {
       inactiveCount++;
-    } else if (elapsedSec > 90) {
+    } else if (elapsedSec > 120) {
       offlineCount++;
     } else if (dev.healthState === 'WARNING' || dev.healthStatus === 'syncing') {
       warningCount++;
     } else {
       protectedCount++;
     }
+
+    if (!dev.isRevoked && elapsedSec <= 120) {
+      policyEligibleCount++;
+      const configuredVersion = dev.child?.policy?.version ?? 1;
+      if (dev.activePolicyVersion === configuredVersion) {
+        syncedDevicesCount++;
+      }
+    }
   });
+
+  const policySyncSuccessRate = policyEligibleCount > 0
+    ? `${((syncedDevicesCount / policyEligibleCount) * 100).toFixed(1)}%`
+    : null;
 
   res.json({
     familiesCount,
@@ -53,8 +73,10 @@ adminRouter.get('/metrics', ...adminAuth, async (req: AuthenticatedRequest, res:
       inactive: inactiveCount,
       offline: offlineCount,
     },
-    policySyncSuccessRate: '99.4%',
-    agentCrashRate: '0.1%',
+    policySyncSuccessRate,
+    policySyncSuccessRateAvailable: policyEligibleCount > 0,
+    agentCrashRate: null,
+    agentCrashRateAvailable: false,
     status: 'ALL_SYSTEMS_OPERATIONAL',
     timestamp: new Date().toISOString(),
   });

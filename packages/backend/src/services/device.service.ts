@@ -13,22 +13,26 @@ import { wsManager } from './websocket.service';
 import { notificationService } from './notification.service';
 import { rbacService, FamilyPermission } from './rbac.service';
 
+export const DEVICE_OFFLINE_THRESHOLD_SECONDS = 120;
+
 export interface ExtendedDevice extends Device {
   isRevoked?: boolean;
   revokedAt?: string | null;
   healthState: HealthState;
   childName?: string;
   isOnline?: boolean;
+  enforcementActive?: boolean;
   windowsAccountName?: string;
   hasMultipleSessions?: boolean;
   protectionStatus?: string;
+  configuredPolicyVersion?: number;
+  agentActivePolicyVersion?: number | null;
+  policySyncStatus?: 'SYNCED' | 'SYNC_PENDING' | 'VERSION_MISMATCH' | 'UNKNOWN';
+  capabilities?: any;
 }
 
 export class DeviceService {
   private revokedTokenBlacklist: Set<string> = new Set();
-  private deviceAccountNames: Map<string, string> = new Map();
-  private deviceMultiSessionWarnings: Map<string, boolean> = new Map();
-  private deviceProtectionStatuses: Map<string, string> = new Map();
 
   /**
    * Generate cryptographically secure, high-entropy pairing code (e.g. "SB-K8X9-M2W7")
@@ -113,6 +117,9 @@ export class DeviceService {
           platform,
           deviceToken,
           agentVersion,
+          activePolicyVersion: policyVersion,
+          enforcementActive: true,
+          protectionStatus: 'ACTIVE',
           healthStatus: 'protected',
           healthState: 'PROTECTED',
           isRevoked: false,
@@ -136,10 +143,16 @@ export class DeviceService {
         lastSyncAt: deviceRecord.updatedAt.toISOString(),
         lastHeartbeatAt: deviceRecord.lastHeartbeatAt.toISOString(),
         activePolicyVersion: policyVersion,
+        configuredPolicyVersion: policyVersion,
+        agentActivePolicyVersion: policyVersion,
+        policySyncStatus: 'SYNCED',
         healthStatus: deviceRecord.healthStatus as any,
         healthState: 'PROTECTED',
         isRevoked: false,
         agentVersion: deviceRecord.agentVersion,
+        windowsAccountName: '',
+        hasMultipleSessions: false,
+        protectionStatus: 'ACTIVE',
       };
 
       wsManager.broadcast({
@@ -218,13 +231,10 @@ export class DeviceService {
       computedHealthStatus = 'syncing';
     }
 
-    if (payload.mappedAccountName) {
-      this.deviceAccountNames.set(device.id, payload.mappedAccountName);
-    }
-    this.deviceMultiSessionWarnings.set(device.id, Boolean(payload.hasMultipleSessions));
-    if (payload.protectionStatus) {
-      this.deviceProtectionStatuses.set(device.id, payload.protectionStatus);
-    }
+    const caps = (payload as any).capabilities;
+    const mappedAccount = payload.mappedAccountName !== undefined ? payload.mappedAccountName : device.mappedAccountName;
+    const multiSessions = payload.hasMultipleSessions !== undefined ? Boolean(payload.hasMultipleSessions) : device.hasMultipleSessions;
+    const protStatus = payload.protectionStatus || device.protectionStatus || (computedHealthState === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN');
 
     await prisma.device.update({
       where: { id: device.id },
@@ -232,8 +242,24 @@ export class DeviceService {
         lastHeartbeatAt: now,
         lastSeenAt: now,
         agentVersion: payload.agentVersion || device.agentVersion,
+        activePolicyVersion: payload.activePolicyVersion,
+        enforcementActive: Boolean(payload.enforcementActive),
         healthState: computedHealthState,
         healthStatus: computedHealthStatus,
+        mappedAccountName: mappedAccount,
+        hasMultipleSessions: multiSessions,
+        protectionStatus: protStatus,
+        ...(caps
+          ? {
+              activityTelemetryAvailable: caps.activityTelemetryAvailable !== undefined ? Boolean(caps.activityTelemetryAvailable) : device.activityTelemetryAvailable,
+              appUsageAvailable: caps.appUsageAvailable !== undefined ? Boolean(caps.appUsageAvailable) : device.appUsageAvailable,
+              domainUsageAvailable: caps.domainUsageAvailable !== undefined ? Boolean(caps.domainUsageAvailable) : device.domainUsageAvailable,
+              categoryUsageAvailable: caps.categoryUsageAvailable !== undefined ? Boolean(caps.categoryUsageAvailable) : device.categoryUsageAvailable,
+              safeDinnerTimeSupported: caps.safeDinnerTimeSupported !== undefined ? Boolean(caps.safeDinnerTimeSupported) : device.safeDinnerTimeSupported,
+              safeBedtimeSupported: caps.safeBedtimeSupported !== undefined ? Boolean(caps.safeBedtimeSupported) : device.safeBedtimeSupported,
+              capabilities: caps as any,
+            }
+          : {}),
       },
     });
 
@@ -327,11 +353,43 @@ export class DeviceService {
   }
 
   public async getDevice(deviceId: string): Promise<ExtendedDevice | null> {
-    const dev = await prisma.device.findUnique({ where: { id: deviceId } });
+    const dev = await prisma.device.findUnique({
+      where: { id: deviceId },
+      include: {
+        child: {
+          select: { name: true, policy: { select: { version: true } } },
+        },
+      },
+    });
     if (!dev) return null;
+
+    const now = Date.now();
+    const lastHb = dev.lastHeartbeatAt.getTime();
+    const elapsedSeconds = (now - lastHb) / 1000;
+    const isOnline = elapsedSeconds < DEVICE_OFFLINE_THRESHOLD_SECONDS && !dev.isRevoked;
+    let state: HealthState = (dev.healthState as any) || 'PROTECTED';
+    if (dev.isRevoked) {
+      state = 'INACTIVE';
+    } else if (!isOnline) {
+      state = 'OFFLINE';
+    }
+
+    const configuredVersion = dev.child?.policy?.version ?? 1;
+    let policySyncStatus: 'SYNCED' | 'SYNC_PENDING' | 'VERSION_MISMATCH' | 'UNKNOWN' = 'UNKNOWN';
+    if (dev.activePolicyVersion != null && configuredVersion != null) {
+      if (dev.activePolicyVersion === configuredVersion) {
+        policySyncStatus = 'SYNCED';
+      } else if (dev.activePolicyVersion < configuredVersion) {
+        policySyncStatus = 'SYNC_PENDING';
+      } else {
+        policySyncStatus = 'VERSION_MISMATCH';
+      }
+    }
+
     return {
       id: dev.id,
       childId: dev.childId,
+      childName: dev.child?.name,
       parentId: dev.parentId,
       familyId: dev.familyId,
       name: dev.name,
@@ -340,11 +398,29 @@ export class DeviceService {
       pairedAt: dev.createdAt.toISOString(),
       lastSyncAt: dev.updatedAt.toISOString(),
       lastHeartbeatAt: dev.lastHeartbeatAt.toISOString(),
-      activePolicyVersion: 1,
-      healthStatus: dev.healthStatus as any,
-      healthState: dev.healthState as any,
+      activePolicyVersion: dev.activePolicyVersion ?? configuredVersion,
+      configuredPolicyVersion: configuredVersion,
+      agentActivePolicyVersion: dev.activePolicyVersion ?? null,
+      policySyncStatus,
+      healthStatus: (state === 'OFFLINE' || state === 'INACTIVE' ? 'inactive' : dev.healthStatus) as any,
+      healthState: state,
+      isOnline,
+      enforcementActive: dev.enforcementActive,
       isRevoked: dev.isRevoked,
       agentVersion: dev.agentVersion,
+      windowsAccountName: dev.mappedAccountName || '',
+      hasMultipleSessions: dev.hasMultipleSessions || false,
+      protectionStatus: dev.protectionStatus || (state === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN'),
+      capabilities: {
+        activityTelemetryAvailable: dev.activityTelemetryAvailable,
+        appUsageAvailable: dev.appUsageAvailable,
+        domainUsageAvailable: dev.domainUsageAvailable,
+        categoryUsageAvailable: dev.categoryUsageAvailable,
+        safeDinnerTimeSupported: dev.safeDinnerTimeSupported,
+        safeBedtimeSupported: dev.safeBedtimeSupported,
+        dnsFilteringSupported: true,
+        ...(dev.capabilities ? (dev.capabilities as object) : {}),
+      },
     };
   }
 
@@ -371,12 +447,24 @@ export class DeviceService {
     return list.map((dev: any) => {
       const lastHb = dev.lastHeartbeatAt.getTime();
       const elapsedSeconds = (now - lastHb) / 1000;
-      const isOnline = elapsedSeconds < 90 && !dev.isRevoked;
+      const isOnline = elapsedSeconds < DEVICE_OFFLINE_THRESHOLD_SECONDS && !dev.isRevoked;
       let state: HealthState = (dev.healthState as any) || 'PROTECTED';
       if (dev.isRevoked) {
         state = 'INACTIVE';
       } else if (!isOnline) {
         state = 'OFFLINE';
+      }
+
+      const configuredVersion = dev.child?.policy?.version ?? 1;
+      let policySyncStatus: 'SYNCED' | 'SYNC_PENDING' | 'VERSION_MISMATCH' | 'UNKNOWN' = 'UNKNOWN';
+      if (dev.activePolicyVersion != null && configuredVersion != null) {
+        if (dev.activePolicyVersion === configuredVersion) {
+          policySyncStatus = 'SYNCED';
+        } else if (dev.activePolicyVersion < configuredVersion) {
+          policySyncStatus = 'SYNC_PENDING';
+        } else {
+          policySyncStatus = 'VERSION_MISMATCH';
+        }
       }
 
       return {
@@ -391,12 +479,29 @@ export class DeviceService {
         pairedAt: dev.createdAt.toISOString(),
         lastSyncAt: dev.updatedAt.toISOString(),
         lastHeartbeatAt: dev.lastHeartbeatAt.toISOString(),
-        activePolicyVersion: dev.child?.policy?.version || 1,
+        activePolicyVersion: dev.activePolicyVersion ?? configuredVersion,
+        configuredPolicyVersion: configuredVersion,
+        agentActivePolicyVersion: dev.activePolicyVersion ?? null,
+        policySyncStatus,
         healthStatus: (state === 'OFFLINE' || state === 'INACTIVE' ? 'inactive' : dev.healthStatus) as any,
         healthState: state,
         isOnline,
+        enforcementActive: dev.enforcementActive,
         isRevoked: dev.isRevoked,
         agentVersion: dev.agentVersion,
+        windowsAccountName: dev.mappedAccountName || '',
+        hasMultipleSessions: dev.hasMultipleSessions || false,
+        protectionStatus: dev.protectionStatus || (state === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN'),
+        capabilities: {
+          activityTelemetryAvailable: dev.activityTelemetryAvailable,
+          appUsageAvailable: dev.appUsageAvailable,
+          domainUsageAvailable: dev.domainUsageAvailable,
+          categoryUsageAvailable: dev.categoryUsageAvailable,
+          safeDinnerTimeSupported: dev.safeDinnerTimeSupported,
+          safeBedtimeSupported: dev.safeBedtimeSupported,
+          dnsFilteringSupported: true,
+          ...(dev.capabilities ? (dev.capabilities as object) : {}),
+        },
       };
     });
   }
@@ -420,12 +525,24 @@ export class DeviceService {
     return list.map((dev: any) => {
       const lastHb = dev.lastHeartbeatAt.getTime();
       const elapsedSeconds = (now - lastHb) / 1000;
-      const isOnline = elapsedSeconds < 90 && !dev.isRevoked;
+      const isOnline = elapsedSeconds < DEVICE_OFFLINE_THRESHOLD_SECONDS && !dev.isRevoked;
       let state: HealthState = (dev.healthState as any) || 'PROTECTED';
       if (dev.isRevoked) {
         state = 'INACTIVE';
       } else if (!isOnline) {
         state = 'OFFLINE';
+      }
+
+      const configuredVersion = dev.child?.policy?.version ?? 1;
+      let policySyncStatus: 'SYNCED' | 'SYNC_PENDING' | 'VERSION_MISMATCH' | 'UNKNOWN' = 'UNKNOWN';
+      if (dev.activePolicyVersion != null && configuredVersion != null) {
+        if (dev.activePolicyVersion === configuredVersion) {
+          policySyncStatus = 'SYNCED';
+        } else if (dev.activePolicyVersion < configuredVersion) {
+          policySyncStatus = 'SYNC_PENDING';
+        } else {
+          policySyncStatus = 'VERSION_MISMATCH';
+        }
       }
 
       return {
@@ -440,15 +557,29 @@ export class DeviceService {
         pairedAt: dev.createdAt.toISOString(),
         lastSyncAt: dev.updatedAt.toISOString(),
         lastHeartbeatAt: dev.lastHeartbeatAt.toISOString(),
-        activePolicyVersion: dev.child?.policy?.version || 1,
+        activePolicyVersion: dev.activePolicyVersion ?? configuredVersion,
+        configuredPolicyVersion: configuredVersion,
+        agentActivePolicyVersion: dev.activePolicyVersion ?? null,
+        policySyncStatus,
         healthStatus: (state === 'OFFLINE' || state === 'INACTIVE' ? 'inactive' : dev.healthStatus) as any,
         healthState: state,
         isOnline,
+        enforcementActive: dev.enforcementActive,
         isRevoked: dev.isRevoked,
         agentVersion: dev.agentVersion,
-        windowsAccountName: this.deviceAccountNames.get(dev.id) || '',
-        hasMultipleSessions: this.deviceMultiSessionWarnings.get(dev.id) || false,
-        protectionStatus: this.deviceProtectionStatuses.get(dev.id) || (state === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN'),
+        windowsAccountName: dev.mappedAccountName || '',
+        hasMultipleSessions: dev.hasMultipleSessions || false,
+        protectionStatus: dev.protectionStatus || (state === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN'),
+        capabilities: {
+          activityTelemetryAvailable: dev.activityTelemetryAvailable,
+          appUsageAvailable: dev.appUsageAvailable,
+          domainUsageAvailable: dev.domainUsageAvailable,
+          categoryUsageAvailable: dev.categoryUsageAvailable,
+          safeDinnerTimeSupported: dev.safeDinnerTimeSupported,
+          safeBedtimeSupported: dev.safeBedtimeSupported,
+          dnsFilteringSupported: true,
+          ...(dev.capabilities ? (dev.capabilities as object) : {}),
+        },
       };
     });
   }
@@ -652,13 +783,25 @@ export class DeviceService {
 
     const now = Date.now();
     const elapsedSeconds = (now - device.lastHeartbeatAt.getTime()) / 1000;
-    const isOnline = elapsedSeconds < 90 && !device.isRevoked;
+    const isOnline = elapsedSeconds < DEVICE_OFFLINE_THRESHOLD_SECONDS && !device.isRevoked;
 
     let computedHealthState: HealthState = (device.healthState as any) || 'PROTECTED';
     if (device.isRevoked) {
       computedHealthState = 'INACTIVE';
     } else if (!isOnline) {
       computedHealthState = 'OFFLINE';
+    }
+
+    const configuredVersion = device.child.policy?.version ?? 1;
+    let policySyncStatus: 'SYNCED' | 'SYNC_PENDING' | 'VERSION_MISMATCH' | 'UNKNOWN' = 'UNKNOWN';
+    if (device.activePolicyVersion != null && configuredVersion != null) {
+      if (device.activePolicyVersion === configuredVersion) {
+        policySyncStatus = 'SYNCED';
+      } else if (device.activePolicyVersion < configuredVersion) {
+        policySyncStatus = 'SYNC_PENDING';
+      } else {
+        policySyncStatus = 'VERSION_MISMATCH';
+      }
     }
 
     return {
@@ -674,12 +817,26 @@ export class DeviceService {
         healthStatus: (computedHealthState === 'OFFLINE' || computedHealthState === 'INACTIVE') ? 'inactive' : device.healthStatus,
         healthState: computedHealthState,
         isOnline,
+        enforcementActive: device.enforcementActive,
         isRevoked: device.isRevoked,
         lastHeartbeatAt: device.lastHeartbeatAt.toISOString(),
         pairedAt: device.createdAt.toISOString(),
-        windowsAccountName: this.deviceAccountNames.get(device.id) || '',
-        hasMultipleSessions: this.deviceMultiSessionWarnings.get(device.id) || false,
-        protectionStatus: this.deviceProtectionStatuses.get(device.id) || (computedHealthState === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN'),
+        configuredPolicyVersion: configuredVersion,
+        agentActivePolicyVersion: device.activePolicyVersion ?? null,
+        policySyncStatus,
+        windowsAccountName: device.mappedAccountName || '',
+        hasMultipleSessions: device.hasMultipleSessions || false,
+        protectionStatus: device.protectionStatus || (computedHealthState === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN'),
+        capabilities: {
+          activityTelemetryAvailable: device.activityTelemetryAvailable,
+          appUsageAvailable: device.appUsageAvailable,
+          domainUsageAvailable: device.domainUsageAvailable,
+          categoryUsageAvailable: device.categoryUsageAvailable,
+          safeDinnerTimeSupported: device.safeDinnerTimeSupported,
+          safeBedtimeSupported: device.safeBedtimeSupported,
+          dnsFilteringSupported: true,
+          ...(device.capabilities ? (device.capabilities as object) : {}),
+        },
       },
       child: {
         id: device.child.id,

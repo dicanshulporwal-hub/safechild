@@ -386,14 +386,14 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
                         <div className="flex items-center gap-1.5">
                           <span className="text-slate-500">Agent:</span>
                           <span className="font-mono text-slate-300">
-                            {device.agentVersion || 'v1.0.0-pilot'}
+                            {device.agentVersion ? `v${device.agentVersion}` : 'Unknown'}
                           </span>
                         </div>
 
                         <div className="flex items-center gap-1.5">
                           <span className="text-slate-500">Policy:</span>
                           <span className="font-mono text-slate-300">
-                            v{device.activePolicyVersion || 1}
+                            v{device.agentActivePolicyVersion ?? device.activePolicyVersion ?? '?'}
                           </span>
                         </div>
                       </div>

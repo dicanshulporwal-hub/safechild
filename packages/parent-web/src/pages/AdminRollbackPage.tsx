@@ -113,14 +113,16 @@ export const AdminRollbackPage: React.FC = () => {
         <div className="bg-slate-900 border border-emerald-500/30 p-4 rounded-2xl">
           <div className="text-[10px] uppercase font-bold text-emerald-400">Policy Sync Rate</div>
           <div className="text-2xl font-black text-emerald-400 mt-1">
-            {fleetMetrics?.policySyncSuccessRate || '99.4%'}
+            {fleetMetrics?.policySyncSuccessRate ?? 'N/A'}
           </div>
         </div>
 
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl">
           <div className="text-[10px] uppercase font-bold text-slate-500">Agent Crash Rate</div>
-          <div className="text-2xl font-black text-indigo-400 mt-1">
-            {fleetMetrics?.agentCrashRate || '0.1%'}
+          <div className="text-2xl font-black text-slate-400 mt-1 text-sm font-semibold">
+            {fleetMetrics?.agentCrashRateAvailable && fleetMetrics?.agentCrashRate != null
+              ? fleetMetrics.agentCrashRate
+              : 'Not Available'}
           </div>
         </div>
       </div>

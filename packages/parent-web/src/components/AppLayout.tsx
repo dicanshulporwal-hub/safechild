@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { api, Child, Stats } from '../api/client';
 import {
@@ -49,6 +49,20 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
   const [isFamilyPaused, setIsFamilyPaused] = useState(false);
   const [childName, setChildName] = useState('');
   const [childAge, setChildAge] = useState('');
+
+  useEffect(() => {
+    let mounted = true;
+    api.getFamilyPauseStatus()
+      .then((status) => {
+        if (mounted && status) {
+          setIsFamilyPaused(Boolean(status.isFamilyPaused));
+        }
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const isSystemAdmin = api.getUserRole() === 'SYSTEM_ADMIN';
 

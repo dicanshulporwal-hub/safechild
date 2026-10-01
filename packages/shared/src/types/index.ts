@@ -66,7 +66,9 @@ export interface UsageBudget {
   target: string; // e.g. 'youtube.com', 'GAMING', 'com.zhiliaoapp.musically'
   dailyLimitSeconds: number; // e.g. 3600 for 60 min
   bonusSeconds?: number;
+  bonusDate?: string; // 'YYYY-MM-DD'
   unlimitedToday?: boolean;
+  unlimitedDate?: string; // 'YYYY-MM-DD'
   timezone: string;
   resetTime: string; // '00:00'
   enabled: boolean;
@@ -207,6 +209,15 @@ export interface HeartbeatPayload {
   mappedAccountName?: string;
   hasMultipleSessions?: boolean;
   protectionStatus?: string;
+  capabilities?: {
+    activityTelemetryAvailable?: boolean;
+    appUsageAvailable?: boolean;
+    domainUsageAvailable?: boolean;
+    categoryUsageAvailable?: boolean;
+    safeDinnerTimeSupported?: boolean;
+    safeBedtimeSupported?: boolean;
+    dnsFilteringSupported?: boolean;
+  };
 }
 
 export interface HeartbeatResponse {
