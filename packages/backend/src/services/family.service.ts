@@ -51,7 +51,7 @@ export class FamilyService {
         ownerUserId: membership.family.ownerUserId,
         requireMfa: membership.family.requireMfa,
         approvalRule: membership.family.approvalRule as FamilyApprovalRule,
-        timezone: (membership.family as any).timezone || 'Asia/Kolkata',
+        timezone: (membership.family as any).timezone || 'UTC',
         createdAt: membership.family.createdAt.toISOString(),
         updatedAt: membership.family.updatedAt.toISOString(),
       };
@@ -98,7 +98,7 @@ export class FamilyService {
         ownerUserId: createdFamily.ownerUserId,
         requireMfa: createdFamily.requireMfa,
         approvalRule: createdFamily.approvalRule as FamilyApprovalRule,
-        timezone: (createdFamily as any).timezone || 'Asia/Kolkata',
+        timezone: (createdFamily as any).timezone || 'UTC',
         createdAt: createdFamily.createdAt.toISOString(),
         updatedAt: createdFamily.updatedAt.toISOString(),
       };
@@ -119,7 +119,7 @@ export class FamilyService {
         ownerUserId: fam.ownerUserId,
         requireMfa: fam.requireMfa,
         approvalRule: fam.approvalRule as FamilyApprovalRule,
-        timezone: (fam as any).timezone || 'Asia/Kolkata',
+        timezone: (fam as any).timezone || 'UTC',
         createdAt: fam.createdAt.toISOString(),
         updatedAt: fam.updatedAt.toISOString(),
       };
@@ -143,7 +143,7 @@ export class FamilyService {
           ownerUserId: membership.family.ownerUserId,
           requireMfa: membership.family.requireMfa,
           approvalRule: membership.family.approvalRule as FamilyApprovalRule,
-          timezone: (membership.family as any).timezone || 'Asia/Kolkata',
+          timezone: (membership.family as any).timezone || 'UTC',
           createdAt: membership.family.createdAt.toISOString(),
           updatedAt: membership.family.updatedAt.toISOString(),
         };
@@ -274,7 +274,7 @@ export class FamilyService {
       ownerUserId: updated.ownerUserId,
       requireMfa: updated.requireMfa,
       approvalRule: updated.approvalRule as FamilyApprovalRule,
-      timezone: (updated as any).timezone || 'Asia/Kolkata',
+      timezone: (updated as any).timezone || 'UTC',
       createdAt: updated.createdAt.toISOString(),
       updatedAt: updated.updatedAt.toISOString(),
     };

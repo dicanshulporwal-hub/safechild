@@ -77,7 +77,8 @@ adminRouter.get('/metrics', ...adminAuth, async (req: AuthenticatedRequest, res:
     policySyncSuccessRateAvailable: policyEligibleCount > 0,
     agentCrashRate: null,
     agentCrashRateAvailable: false,
-    status: 'ALL_SYSTEMS_OPERATIONAL',
+    status: 'UNKNOWN',
+    dataAvailable: false,
     timestamp: new Date().toISOString(),
   });
 });

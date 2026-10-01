@@ -11,6 +11,7 @@ export interface LogTimelineEventInput {
   eventType: string;
   decision?: string;
   domain?: string;
+  category?: string;
   reason?: string;
   metadata?: Record<string, any>;
   policyVersion?: number;
@@ -64,8 +65,10 @@ export class TimelineService {
         eventType: event.eventType,
         decision: event.decision || null,
         domain: event.domain || null,
+        category: event.category || null,
         reason: event.reason || null,
         metadata: event.metadata ? (event.metadata as any) : undefined,
+        policyVersion: event.policyVersion ?? null,
         timestamp: eventTimestamp,
       },
     });
@@ -79,9 +82,10 @@ export class TimelineService {
       domain: created.domain || undefined,
       eventType: created.eventType as any,
       decision: created.decision || undefined,
+      category: created.category || undefined,
       reason: created.reason || '',
       metadata: created.metadata as any,
-      policyVersion: event.policyVersion || 1,
+      policyVersion: created.policyVersion ?? undefined,
       timestamp: created.timestamp.toISOString(),
     };
 
@@ -122,9 +126,10 @@ export class TimelineService {
       domain: e.domain || undefined,
       eventType: e.eventType as any,
       decision: e.decision || undefined,
+      category: e.category || undefined,
       reason: e.reason || '',
       metadata: e.metadata as any,
-      policyVersion: 1,
+      policyVersion: e.policyVersion ?? undefined,
       timestamp: e.timestamp.toISOString(),
     }));
   }
@@ -147,9 +152,10 @@ export class TimelineService {
       domain: e.domain || undefined,
       eventType: e.eventType as any,
       decision: e.decision || undefined,
+      category: e.category || undefined,
       reason: e.reason || '',
       metadata: e.metadata as any,
-      policyVersion: 1,
+      policyVersion: e.policyVersion ?? undefined,
       timestamp: e.timestamp.toISOString(),
     }));
   }

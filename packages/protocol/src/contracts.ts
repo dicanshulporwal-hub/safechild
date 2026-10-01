@@ -225,6 +225,7 @@ export interface TimelineEvent {
     | 'ASK_PARENT_DENIED'
     | string;
   decision?: 'BLOCK' | 'ALLOW' | string;
+  category?: string;
   reason?: string;
   metadata?: Record<string, any>;
   policyVersion?: number;

@@ -6,6 +6,7 @@ import { childService } from '../services/child.service';
 import { pairingRateLimiter } from '../middleware/rate-limiter';
 import { deviceAuthMiddleware, AuthenticatedDeviceRequest } from '../middleware/deviceAuth';
 import { rbacService, FamilyPermission } from '../services/rbac.service';
+import { wsManager } from '../services/websocket.service';
 
 export const deviceRouter = Router();
 
@@ -222,13 +223,11 @@ deviceRouter.post('/:id/diagnostics', authMiddleware, requireVerifiedEmail, asyn
     const now = Date.now();
     const elapsedSec = (now - new Date(device.lastHeartbeatAt || 0).getTime()) / 1000;
     const isOnline = elapsedSec < 120;
-    const isEnforcing = device.enforcementActive ?? (device.healthStatus !== 'inactive');
+    const isEnforcing = device.enforcementActive === true;
     const isPolicySynced = device.policySyncStatus === 'SYNCED';
+    const caps = (device.capabilities as any) || {};
 
-    const dohDetail =
-      device.platform === 'android'
-        ? 'Android VpnService traps standard Port 53 DNS. Browser DoH bypass requires Private DNS or device owner control.'
-        : 'Windows loopback proxy active with system-level adapter lock and DoH canary blocks.';
+    const isWsConnected = wsManager.isDeviceConnected(device.id);
 
     const checkItems = [
       {
@@ -245,7 +244,7 @@ deviceRouter.post('/:id/diagnostics', authMiddleware, requireVerifiedEmail, asyn
       },
       {
         name: 'Enforcement Engine Operational',
-        pass: isEnforcing,
+        pass: isEnforcing ? true : false,
         status: isEnforcing ? 'passed' : 'failed',
         detail: isEnforcing ? 'Active protection filter engaged' : 'Enforcement stopped or inactive',
       },
@@ -257,40 +256,52 @@ deviceRouter.post('/:id/diagnostics', authMiddleware, requireVerifiedEmail, asyn
       },
       {
         name: 'Backend API Reachable',
-        pass: true,
-        status: 'passed',
-        detail: 'Cloud API operational',
+        pass: caps.backendApiReachable === true ? true : (caps.backendApiReachable === false ? false : null),
+        status: caps.backendApiReachable === true ? 'passed' : (caps.backendApiReachable === false ? 'failed' : 'unknown'),
+        detail: caps.backendApiReachable === true
+          ? 'Agent verified cloud API reachability'
+          : (caps.backendApiReachable === false ? 'Agent failed cloud API probe' : 'Unmeasured: No agent-side API reachability probe reported'),
       },
       {
         name: 'DNS / Network Interception Engine',
-        pass: isEnforcing,
-        status: isEnforcing ? 'passed' : 'failed',
-        detail: isEnforcing ? 'DNS filter actively resolving queries' : 'DNS filter inactive',
+        pass: caps.dnsResolverHealthy === true ? true : (caps.dnsResolverHealthy === false ? false : null),
+        status: caps.dnsResolverHealthy === true ? 'passed' : (caps.dnsResolverHealthy === false ? 'failed' : 'unknown'),
+        detail: caps.dnsResolverHealthy === true
+          ? 'Local DNS proxy actively resolving queries'
+          : (caps.dnsResolverHealthy === false ? 'DNS filter failed liveness probe' : 'Unmeasured: Agent has not reported local DNS resolver diagnostic state'),
       },
       {
         name: 'Browser DoH / Encrypted DNS Bypass Trap',
-        pass: true,
-        status: device.platform === 'android' ? 'warning' : 'passed',
-        detail: dohDetail,
+        pass: device.platform === 'android' ? false : (caps.dohTrapActive === true ? true : (caps.dohTrapActive === false ? false : null)),
+        status: device.platform === 'android' ? 'warning' : (caps.dohTrapActive === true ? 'passed' : (caps.dohTrapActive === false ? 'failed' : 'unknown')),
+        detail: device.platform === 'android'
+          ? 'Android VpnService traps standard Port 53 DNS. Browser DoH bypass requires Private DNS or device owner control (LIMITED).'
+          : (caps.dohTrapActive === true ? 'Windows loopback proxy active with system-level adapter lock and DoH canary blocks' : (caps.dohTrapActive === false ? 'DoH protection inactive' : 'Unmeasured: No active DoH trap probe reported by device agent')),
       },
       {
         name: 'Real-time WebSocket Live',
-        pass: isOnline,
-        status: isOnline ? 'passed' : 'failed',
-        detail: isOnline ? 'Bi-directional link active' : 'Offline - disconnected',
+        pass: isWsConnected ? true : null,
+        status: isWsConnected ? 'passed' : 'unknown',
+        detail: isWsConnected ? 'Bi-directional authenticated WebSocket link active' : 'Unmeasured: No authenticated real-time WebSocket reported by agent',
       },
     ];
 
-    const failedCount = checkItems.filter((c) => !c.pass).length;
-    let verdict: 'PASS' | 'WARNING' | 'FAIL' = 'PASS';
-    let remediation: string = 'All security checks passed. Protection is working optimally.';
+    const failedCount = checkItems.filter((c) => c.status === 'failed').length;
+    const warningCount = checkItems.filter((c) => c.status === 'warning').length;
+    const unknownCount = checkItems.filter((c) => c.status === 'unknown').length;
 
-    if (failedCount > 1 || !isEnforcing) {
+    let verdict: 'PASS' | 'WARNING' | 'FAIL' | 'UNKNOWN' = 'PASS';
+    let remediation: string = 'All security checks measured and passed. Protection is working optimally.';
+
+    if (failedCount > 0 || !isEnforcing || !isOnline) {
       verdict = 'FAIL';
-      remediation = 'Protection is inactive or interrupted. Please verify the device is turned on, connected to the internet, and the SafeBrowse app is open.';
-    } else if (failedCount === 1 || !isOnline || !isPolicySynced) {
+      remediation = 'One or more security checks failed. Protection is inactive, degraded, or device is offline.';
+    } else if (warningCount > 0 || !isPolicySynced) {
       verdict = 'WARNING';
-      remediation = 'Device appears temporarily offline or is syncing an updated policy. It will recover automatically once reconnected.';
+      remediation = 'Device is online, but some checks require attention or have platform limitations.';
+    } else if (unknownCount > 0) {
+      verdict = 'UNKNOWN';
+      remediation = 'Basic connectivity verified, but deep agent probes (API, WebSocket, DNS, DoH) are unmeasured.';
     }
 
     res.json({

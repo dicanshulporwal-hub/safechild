@@ -506,7 +506,8 @@ describe('SafeBrowse Stage B: Telemetry Persistence, Dashboard Truthfulness & Da
     assert.ok(Array.isArray(winDiag.data.checks));
     const winDoh = winDiag.data.checks.find((c: any) => c.name.includes('DoH'));
     assert.ok(winDoh);
-    assert.strictEqual(winDoh.status, 'passed');
+    // Stage B.1 truthfulness: DoH is UNKNOWN unless directly measured by agent probe
+    assert.strictEqual(winDoh.status, 'unknown');
 
     // Create an android device and test diagnostics
     const deviceSvc = new DeviceService();

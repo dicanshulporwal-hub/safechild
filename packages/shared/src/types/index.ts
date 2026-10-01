@@ -69,7 +69,8 @@ export interface UsageBudget {
   bonusDate?: string; // 'YYYY-MM-DD'
   unlimitedToday?: boolean;
   unlimitedDate?: string; // 'YYYY-MM-DD'
-  timezone: string;
+  timezone?: string;
+  isCustomTimezone?: boolean;
   resetTime: string; // '00:00'
   enabled: boolean;
   policyVersion: number;

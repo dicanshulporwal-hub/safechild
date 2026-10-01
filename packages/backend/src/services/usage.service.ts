@@ -17,7 +17,7 @@ export interface BudgetUsageSummary {
 }
 
 export class UsageService {
-  public getTodayDateString(timezone: string = 'Asia/Kolkata'): string {
+  public getTodayDateString(timezone: string = 'UTC'): string {
     try {
       const now = new Date();
       return new Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format(now);
@@ -41,7 +41,18 @@ export class UsageService {
       });
       if (child?.family?.timezone) return child.family.timezone;
     }
-    return 'Asia/Kolkata';
+    return 'UTC';
+  }
+
+  public resolveEffectiveTimezone(budget: UsageBudget | undefined | null, familyTimezone: string): string {
+    if (budget?.isCustomTimezone && budget?.timezone) {
+      return budget.timezone;
+    }
+    if (budget?.timezone && budget.timezone !== 'UTC') {
+      return budget.timezone;
+    }
+    // If budget.timezone is 'UTC' without isCustomTimezone, treat it as the legacy default and follow familyTimezone
+    return familyTimezone || 'UTC';
   }
 
   /**
@@ -103,78 +114,147 @@ export class UsageService {
     );
 
     const familyTimezone = await this.getFamilyTimezone(child.familyId);
-    const todayDate = this.getTodayDateString(budget?.timezone || familyTimezone);
+    const effectiveTz = this.resolveEffectiveTimezone(budget, familyTimezone);
+    const todayDate = this.getTodayDateString(effectiveTz);
     const cleanIncrement = Math.round(secondsIncrement);
 
-    const existingUsage = await prisma.childUsageRecord.findUnique({
-      where: {
-        childId_targetType_target_date: {
-          childId,
-          targetType,
-          target: target.toLowerCase(),
-          date: todayDate,
+    // Durable Receipt-Level Idempotency Check
+    if (syncId) {
+      const existingReceipt = await prisma.usageSyncReceipt.findUnique({
+        where: {
+          deviceId_syncId: {
+            deviceId,
+            syncId,
+          },
         },
-      },
-    });
+      });
 
-    // Idempotency check: if syncId matches last recorded syncId, return existing state without duplicate addition
-    if (existingUsage && syncId && existingUsage.lastSyncId === syncId) {
-      let remSec = 999999;
-      let limitReached = false;
-      if (budget) {
-        const isUnlimited = Boolean(budget.unlimitedDate && budget.unlimitedDate === todayDate);
-        if (isUnlimited) {
-          remSec = 999999;
-          limitReached = false;
-        } else {
-          const effectiveBonus = (budget.bonusDate === todayDate) ? (budget.bonusSeconds || 0) : 0;
-          const totalAllowed = budget.dailyLimitSeconds + effectiveBonus;
-          remSec = Math.max(0, totalAllowed - existingUsage.consumedSeconds);
-          limitReached = existingUsage.consumedSeconds >= totalAllowed;
+      if (existingReceipt) {
+        const existingUsage = await prisma.childUsageRecord.findUnique({
+          where: {
+            childId_targetType_target_date: {
+              childId,
+              targetType,
+              target: target.toLowerCase(),
+              date: todayDate,
+            },
+          },
+        });
+        const consumed = existingUsage?.consumedSeconds || 0;
+        let remSec = 999999;
+        let limitReached = false;
+        if (budget) {
+          const isUnlimited = Boolean(budget.unlimitedDate && budget.unlimitedDate === todayDate);
+          if (isUnlimited) {
+            remSec = 999999;
+            limitReached = false;
+          } else {
+            const effectiveBonus = (budget.bonusDate === todayDate) ? (budget.bonusSeconds || 0) : 0;
+            const totalAllowed = budget.dailyLimitSeconds + effectiveBonus;
+            remSec = Math.max(0, totalAllowed - consumed);
+            limitReached = consumed >= totalAllowed;
+          }
         }
+        return {
+          consumedSeconds: consumed,
+          remainingSeconds: remSec,
+          isLimitReached: limitReached,
+        };
       }
-      return {
-        consumedSeconds: existingUsage.consumedSeconds,
-        remainingSeconds: remSec,
-        isLimitReached: limitReached,
-      };
     }
 
     const now = new Date();
-    const id = existingUsage ? existingUsage.id : `use-${nanoid(10)}`;
-
-    // The relational schema links a device foreign key only when device.childId === childId.
-    // Secondary mapped children remain family-validated within the same family tenancy.
     const canLinkDevice = device.childId === childId;
 
-    const usage = await prisma.childUsageRecord.upsert({
-      where: {
-        childId_targetType_target_date: {
-          childId,
-          targetType,
-          target: target.toLowerCase(),
-          date: todayDate,
-        },
-      },
-      create: {
-        id,
-        familyId: child.familyId,
-        childId,
-        deviceId: canLinkDevice ? deviceId : null,
-        target: target.toLowerCase(),
-        targetType,
-        date: todayDate,
-        consumedSeconds: cleanIncrement,
-        lastSyncId: syncId || null,
-        lastCheckpointTimestamp: now,
-      },
-      update: {
-        consumedSeconds: { increment: cleanIncrement },
-        deviceId: canLinkDevice ? deviceId : null,
-        lastSyncId: syncId || null,
-        lastCheckpointTimestamp: now,
-      },
-    });
+    let usage: { consumedSeconds: number };
+
+    try {
+      usage = await prisma.$transaction(async (tx) => {
+        if (syncId) {
+          await tx.usageSyncReceipt.create({
+            data: {
+              id: `rec-${nanoid(12)}`,
+              syncId,
+              familyId: child.familyId,
+              childId,
+              deviceId,
+              targetType,
+              target: target.toLowerCase(),
+              usageDate: todayDate,
+              secondsIncrement: cleanIncrement,
+            },
+          });
+        }
+
+        const upserted = await tx.childUsageRecord.upsert({
+          where: {
+            childId_targetType_target_date: {
+              childId,
+              targetType,
+              target: target.toLowerCase(),
+              date: todayDate,
+            },
+          },
+          create: {
+            id: `use-${nanoid(10)}`,
+            familyId: child.familyId,
+            childId,
+            deviceId: canLinkDevice ? deviceId : null,
+            target: target.toLowerCase(),
+            targetType,
+            date: todayDate,
+            consumedSeconds: cleanIncrement,
+            lastSyncId: syncId || null,
+            lastCheckpointTimestamp: now,
+            lastSyncAt: now,
+          },
+          update: {
+            consumedSeconds: { increment: cleanIncrement },
+            deviceId: canLinkDevice ? deviceId : null,
+            lastSyncId: syncId || null,
+            lastCheckpointTimestamp: now,
+            lastSyncAt: now,
+          },
+        });
+
+        return upserted;
+      });
+    } catch (err: any) {
+      if (err.code === 'P2002' && syncId) {
+        // Unique conflict on deviceId + syncId from a concurrent duplicate request
+        const existingUsage = await prisma.childUsageRecord.findUnique({
+          where: {
+            childId_targetType_target_date: {
+              childId,
+              targetType,
+              target: target.toLowerCase(),
+              date: todayDate,
+            },
+          },
+        });
+        const consumed = existingUsage?.consumedSeconds || 0;
+        let remSec = 999999;
+        let limitReached = false;
+        if (budget) {
+          const isUnlimited = Boolean(budget.unlimitedDate && budget.unlimitedDate === todayDate);
+          if (isUnlimited) {
+            remSec = 999999;
+            limitReached = false;
+          } else {
+            const effectiveBonus = (budget.bonusDate === todayDate) ? (budget.bonusSeconds || 0) : 0;
+            const totalAllowed = budget.dailyLimitSeconds + effectiveBonus;
+            remSec = Math.max(0, totalAllowed - consumed);
+            limitReached = consumed >= totalAllowed;
+          }
+        }
+        return {
+          consumedSeconds: consumed,
+          remainingSeconds: remSec,
+          isLimitReached: limitReached,
+        };
+      }
+      throw err;
+    }
 
     let remainingSeconds = 999999;
     let isLimitReached = false;
@@ -227,7 +307,8 @@ export class UsageService {
     const familyTimezone = await this.getFamilyTimezone(undefined, childId);
 
     for (const budget of usageBudgets) {
-      const todayDate = this.getTodayDateString(budget.timezone || familyTimezone);
+      const effectiveTz = this.resolveEffectiveTimezone(budget, familyTimezone);
+      const todayDate = this.getTodayDateString(effectiveTz);
       const usage = await prisma.childUsageRecord.findUnique({
         where: {
           childId_targetType_target_date: {
@@ -269,7 +350,8 @@ export class UsageService {
     target: string,
     targetType: BudgetTargetType,
     dailyLimitMinutes: number,
-    actorUserId?: string
+    actorUserId?: string,
+    customTimezone?: string
   ): Promise<UsageBudget> {
     const policy = await prisma.policy.findUnique({
       where: { childId },
@@ -285,12 +367,28 @@ export class UsageService {
     const dailyLimitSeconds = Math.max(1, dailyLimitMinutes) * 60;
     const now = new Date().toISOString();
 
+    const familyTimezone = await this.getFamilyTimezone(undefined, childId);
+    let budgetTimezone = familyTimezone;
+    let isCustomTimezone = false;
+    if (customTimezone && customTimezone.trim()) {
+      try {
+        Intl.DateTimeFormat(undefined, { timeZone: customTimezone.trim() });
+        budgetTimezone = customTimezone.trim();
+        isCustomTimezone = true;
+      } catch {
+        throw new Error(`Invalid IANA timezone: ${customTimezone}`);
+      }
+    }
+
     let budget: UsageBudget;
 
     if (existingIndex >= 0) {
+      const existing = usageBudgets[existingIndex];
       budget = {
-        ...usageBudgets[existingIndex],
+        ...existing,
         dailyLimitSeconds,
+        timezone: isCustomTimezone ? budgetTimezone : (existing.isCustomTimezone ? existing.timezone : familyTimezone),
+        isCustomTimezone: isCustomTimezone || existing.isCustomTimezone,
         enabled: true,
         updatedAt: now,
         policyVersion: policy.version + 1,
@@ -303,7 +401,8 @@ export class UsageService {
         target: cleanTarget,
         targetType,
         dailyLimitSeconds,
-        timezone: 'UTC',
+        timezone: budgetTimezone,
+        isCustomTimezone,
         resetTime: '00:00',
         enabled: true,
         policyVersion: policy.version + 1,
@@ -355,7 +454,8 @@ export class UsageService {
     if (!budget) throw new Error('Budget not found.');
 
     const familyTimezone = await this.getFamilyTimezone(undefined, childId);
-    const todayDate = this.getTodayDateString(budget.timezone || familyTimezone);
+    const effectiveTz = this.resolveEffectiveTimezone(budget, familyTimezone);
+    const todayDate = this.getTodayDateString(effectiveTz);
 
     if (budget.bonusDate === todayDate) {
       budget.bonusSeconds = (budget.bonusSeconds || 0) + bonusMinutes * 60;
@@ -407,7 +507,8 @@ export class UsageService {
     if (!budget) throw new Error('Budget not found.');
 
     const familyTimezone = await this.getFamilyTimezone(undefined, childId);
-    const todayDate = this.getTodayDateString(budget.timezone || familyTimezone);
+    const effectiveTz = this.resolveEffectiveTimezone(budget, familyTimezone);
+    const todayDate = this.getTodayDateString(effectiveTz);
 
     budget.unlimitedToday = true;
     budget.unlimitedDate = todayDate;

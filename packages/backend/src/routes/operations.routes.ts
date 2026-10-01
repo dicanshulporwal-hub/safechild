@@ -145,18 +145,32 @@ operationsRouter.post(
 );
 
 // Public Service Status Page (status.safebrowse.io API)
-operationsRouter.get('/status', (req, res) => {
+operationsRouter.get('/status', async (req, res) => {
+  let dbStatus = 'UNKNOWN';
+  let dbOk = false;
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    dbStatus = 'OPERATIONAL';
+    dbOk = true;
+  } catch {
+    dbStatus = 'OUTAGE';
+  }
+
   res.json({
-    status: 'OPERATIONAL',
+    status: dbOk ? 'UNKNOWN' : 'DEGRADED',
+    dataAvailable: false,
     timestamp: new Date().toISOString(),
     uptime: null,
     uptimeAvailable: false,
+    activeIncidents: null,
+    activeIncidentsAvailable: false,
     services: [
-      { name: 'Core Policy Evaluation Engine', status: 'OPERATIONAL' },
-      { name: 'DNS Filtering Engine', status: 'OPERATIONAL' },
-      { name: 'Real-time WebSocket Gateway', status: 'OPERATIONAL' },
-      { name: 'Backend REST API & Identity Service', status: 'OPERATIONAL' },
-      { name: 'Ask Parent Cloud Notification Broker', status: 'OPERATIONAL' },
+      { name: 'PostgreSQL Database Engine', status: dbStatus, monitored: true },
+      { name: 'Backend REST API & Identity Service', status: 'OPERATIONAL', monitored: true },
+      { name: 'Core Policy Evaluation Engine', status: 'UNKNOWN', monitored: false },
+      { name: 'DNS Filtering Engine', status: 'UNKNOWN', monitored: false },
+      { name: 'Real-time WebSocket Gateway', status: 'UNKNOWN', monitored: false },
+      { name: 'Ask Parent Cloud Notification Broker', status: 'UNKNOWN', monitored: false },
     ],
   });
 });

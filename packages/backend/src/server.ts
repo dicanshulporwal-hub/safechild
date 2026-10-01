@@ -46,7 +46,7 @@ app.use('/api/activity', activityRouter);
 app.use('/api/notifications', notificationRouter);
 app.use('/api/family', authMiddleware, requireVerifiedEmail, familyRouter);
 app.use('/api/referrals', authMiddleware, requireVerifiedEmail, referralRouter);
-app.use('/api/operations', authMiddleware, requireVerifiedEmail, operationsRouter);
+app.use('/api/operations', operationsRouter);
 app.use('/api/admin', adminRouter);
 app.use('/api/feedback', authMiddleware, requireVerifiedEmail, feedbackRouter);
 app.use('/api/support', authMiddleware, requireVerifiedEmail, supportRouter);

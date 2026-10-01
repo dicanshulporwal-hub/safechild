@@ -13,13 +13,14 @@ import {
   Radio,
   FileCheck,
   Lock,
+  HelpCircle,
 } from 'lucide-react';
 import { DnsBenchmarkCard } from '../components/DnsBenchmarkCard';
 
 interface DiagnosticCheck {
   name: string;
-  pass: boolean;
-  status?: 'passed' | 'warning' | 'failed';
+  pass: boolean | null;
+  status?: 'passed' | 'warning' | 'failed' | 'unknown' | 'limited';
   detail: string;
 }
 
@@ -31,7 +32,7 @@ export const DeviceDiagnosticsPage: React.FC = () => {
   const [device, setDevice] = useState<Device | null>(null);
   const [running, setRunning] = useState(false);
   const [checks, setChecks] = useState<DiagnosticCheck[]>([]);
-  const [verdict, setVerdict] = useState<'PASS' | 'WARNING' | 'FAIL'>('PASS');
+  const [verdict, setVerdict] = useState<'PASS' | 'WARNING' | 'FAIL' | 'UNKNOWN'>('PASS');
   const [remediation, setRemediation] = useState<string>('');
 
   useEffect(() => {
@@ -103,6 +104,8 @@ export const DeviceDiagnosticsPage: React.FC = () => {
           ? 'bg-slate-900 border-emerald-500/30'
           : verdict === 'WARNING'
           ? 'bg-slate-900 border-amber-500/30'
+          : verdict === 'UNKNOWN'
+          ? 'bg-slate-900 border-slate-700'
           : 'bg-slate-900 border-rose-500/30'
       }`}>
         <div className="flex items-center gap-4">
@@ -111,6 +114,8 @@ export const DeviceDiagnosticsPage: React.FC = () => {
               ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
               : verdict === 'WARNING'
               ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+              : verdict === 'UNKNOWN'
+              ? 'bg-slate-800 text-slate-400 border border-slate-700'
               : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
           }`}>
             🛡️
@@ -123,6 +128,8 @@ export const DeviceDiagnosticsPage: React.FC = () => {
                   ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
                   : verdict === 'WARNING'
                   ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                  : verdict === 'UNKNOWN'
+                  ? 'bg-slate-800 text-slate-300 border-slate-700'
                   : 'bg-rose-500/20 text-rose-300 border-rose-500/30'
               }`}>
                 {verdict}
@@ -207,10 +214,12 @@ export const DeviceDiagnosticsPage: React.FC = () => {
             {checks.map((step, idx) => (
               <div key={idx} className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 flex items-start justify-between gap-4">
                 <div className="flex items-start gap-3">
-                  {step.status === 'passed' || (step.pass && step.status !== 'warning') ? (
+                  {step.status === 'passed' ? (
                     <CheckCircle className="w-5 h-5 text-emerald-400 mt-0.5 shrink-0" />
-                  ) : step.status === 'warning' ? (
+                  ) : step.status === 'warning' || step.status === 'limited' ? (
                     <AlertTriangle className="w-5 h-5 text-amber-400 mt-0.5 shrink-0" />
+                  ) : step.status === 'unknown' ? (
+                    <HelpCircle className="w-5 h-5 text-slate-500 mt-0.5 shrink-0" />
                   ) : (
                     <AlertOctagon className="w-5 h-5 text-rose-400 mt-0.5 shrink-0" />
                   )}
@@ -220,6 +229,11 @@ export const DeviceDiagnosticsPage: React.FC = () => {
                       {step.status === 'warning' && (
                         <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1.5 py-0.5 rounded font-mono">
                           NOTICE
+                        </span>
+                      )}
+                      {step.status === 'unknown' && (
+                        <span className="text-[10px] bg-slate-800 text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded font-mono">
+                          UNMEASURED
                         </span>
                       )}
                     </div>

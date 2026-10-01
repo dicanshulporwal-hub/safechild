@@ -86,20 +86,46 @@ export class ActivityService {
     // Secondary mapped children remain family-validated but store a null device FK.
     const canLinkDevice = device.childId === childId;
 
-    const created = await prisma.activityEvent.create({
-      data: {
-        id,
-        familyId: child.familyId,
-        childId,
-        deviceId: canLinkDevice ? deviceId : null,
-        domain,
-        action,
-        category,
-        blockedReason,
-        clientEventId: metadata?.clientEventId || null,
-        timestamp: eventTimestamp,
-      },
-    });
+    let created;
+    try {
+      created = await prisma.activityEvent.create({
+        data: {
+          id,
+          familyId: child.familyId,
+          childId,
+          deviceId: canLinkDevice ? deviceId : null,
+          domain,
+          action,
+          category,
+          blockedReason,
+          clientEventId: metadata?.clientEventId || null,
+          timestamp: eventTimestamp,
+        },
+      });
+    } catch (err: any) {
+      if (err.code === 'P2002' && metadata?.clientEventId) {
+        const existing = await prisma.activityEvent.findFirst({
+          where: {
+            childId,
+            clientEventId: metadata.clientEventId,
+          },
+        });
+        if (existing) {
+          return {
+            id: existing.id,
+            childId: existing.childId,
+            deviceId: existing.deviceId || deviceId,
+            deviceName: device.name,
+            domain: existing.domain,
+            category: existing.category as any,
+            action: existing.action as any,
+            reason: existing.blockedReason || undefined,
+            timestamp: existing.timestamp.toISOString(),
+          };
+        }
+      }
+      throw err;
+    }
 
     const event: ActivityEvent = {
       id: created.id,

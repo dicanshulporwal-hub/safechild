@@ -224,6 +224,15 @@ export class WebSocketManager {
     }
     return count;
   }
+
+  public isDeviceConnected(deviceId: string): boolean {
+    for (const conn of this.connections) {
+      if (conn.deviceId === deviceId && conn.authenticated && conn.ws.readyState === WebSocket.OPEN) {
+        return true;
+      }
+    }
+    return false;
+  }
 }
 
 export const wsManager = new WebSocketManager();

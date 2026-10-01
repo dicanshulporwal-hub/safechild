@@ -158,7 +158,7 @@ model Family {
   owner        User               @relation("FamilyOwner", fields: [ownerUserId], references: [id], onDelete: Restrict)
   requireMfa   Boolean            @default(false)
   approvalRule FamilyApprovalRule @default(OWNER_OR_PARENT)
-  timezone     String             @default("Asia/Kolkata")
+  timezone     String             @default("UTC")
   createdAt    DateTime           @default(now())
   updatedAt    DateTime           @updatedAt
 
@@ -170,6 +170,7 @@ model Family {
   pairingCodes      PairingCode[]
   accessRequests    AccessRequest[]
   childUsageRecords ChildUsageRecord[]
+  usageSyncReceipts UsageSyncReceipt[]
   activityEvents    ActivityEvent[]
   timelineEvents    TimelineEvent[]
   auditLogs         FamilyAuditLog[]
@@ -226,6 +227,7 @@ model Child {
   pairingCodes      PairingCode[]
   accessRequests    AccessRequest[]
   childUsageRecords ChildUsageRecord[]
+  usageSyncReceipts UsageSyncReceipt[]
   activityEvents    ActivityEvent[]
   timelineEvents    TimelineEvent[]
 
@@ -273,6 +275,7 @@ model Device {
 
   accessRequests    AccessRequest[]
   childUsageRecords ChildUsageRecord[]
+  usageSyncReceipts UsageSyncReceipt[]
   activityEvents    ActivityEvent[]
 
   @@unique([familyId, id])
@@ -389,23 +392,46 @@ model ActivityEvent {
   @@index([childId])
   @@index([familyId, deviceId])
   @@index([familyId, childId, deviceId])
-  @@index([childId, clientEventId])
+  @@unique([childId, clientEventId])
+}
+
+model UsageSyncReceipt {
+  id               String   @id @default(cuid())
+  syncId           String
+  familyId         String
+  family           Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  childId          String
+  child            Child    @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
+  deviceId         String
+  device           Device   @relation(fields: [familyId, childId, deviceId], references: [familyId, childId, id], onDelete: Cascade)
+  targetType       String   @default("DOMAIN")
+  target           String
+  usageDate        String
+  secondsIncrement Int
+  receivedAt       DateTime @default(now())
+
+  @@unique([deviceId, syncId])
+  @@index([familyId])
+  @@index([childId])
+  @@index([deviceId, syncId])
 }
 
 model TimelineEvent {
-  id        String   @id
-  familyId  String
-  family    Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
-  childId   String?
-  child     Child?   @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
-  deviceId  String?
-  eventType String
-  decision  String?
-  domain    String?
-  reason    String?
-  metadata  Json?
-  timestamp DateTime @default(now())
-  createdAt DateTime @default(now())
+  id            String   @id
+  familyId      String
+  family        Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  childId       String?
+  child         Child?   @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
+  deviceId      String?
+  eventType     String
+  decision      String?
+  domain        String?
+  category      String?
+  reason        String?
+  metadata      Json?
+  policyVersion Int?
+  timestamp     DateTime @default(now())
+  createdAt     DateTime @default(now())
 
   @@index([familyId])
   @@index([childId])
