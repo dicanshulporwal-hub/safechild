@@ -480,8 +480,15 @@ async function runServiceMode(): Promise<void> {
     );
   }
 
-  // 5. Initialize Windows Application Process Limiter
-  processLimiter = new WindowsProcessLimiter(config, () => syncClient!.getActivePolicy());
+  // 5. Initialize Windows Application Process Limiter (Strictly APP-budget limited, 0 termination on pause/bedtime)
+  processLimiter = new WindowsProcessLimiter(
+    config,
+    () => syncClient!.getActivePolicy(),
+    {
+      getActiveUserPolicy: () => sessionMonitor.getCurrentPolicy(),
+      hasMultipleSessions: () => sessionMonitor.hasMultipleSessions(),
+    }
+  );
   processLimiter.start();
 
   logServiceMessage('INFO', '--------------------------------------------------');

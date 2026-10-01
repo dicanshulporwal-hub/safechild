@@ -223,7 +223,7 @@ jobs:
             release/windows/SHA256SUMS.txt
           if-no-files-found: error
 
-      - name: Update GitHub Release Assets (v1.0.2-pilot)
+      - name: Update GitHub Release Assets (v1.0.3-pilot)
         if: github.ref == 'refs/heads/feature/stage11-step4-device-enforcement'
         shell: pwsh
         env:
@@ -237,11 +237,11 @@ jobs:
             "release/windows/SafeBrowseServiceHost.exe",
             "release/windows/SHA256SUMS.txt"
           )
-          Write-Host "Checking if release v1.0.2-pilot exists..."
-          gh release view v1.0.2-pilot 2>$null
+          Write-Host "Checking if release v1.0.3-pilot exists..."
+          gh release view v1.0.3-pilot 2>$null
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "Creating release v1.0.2-pilot..."
-            gh release create v1.0.2-pilot --title "SafeBrowse Windows Pilot Release v1.0.2" --notes "SafeBrowse Windows Pilot v1.0.2 Release with UAC-isolated elevated device attachment wizard, fail-closed privilege enforcement, and zero plaintext credentials."
+            Write-Host "Creating release v1.0.3-pilot..."
+            gh release create v1.0.3-pilot --title "SafeBrowse Windows Pilot Release v1.0.3 (P0 Hotfix)" --notes "SafeBrowse Windows Pilot v1.0.3 P0 Hotfix: Eliminates process termination on Dinner Time and Bedtime, ensures network-only loopback DNS enforcement, restricts process limiter strictly to explicit APP budgets, enforces immutable system process protection whitelist, eliminates image-wide taskkill in favor of child PID targeting, restores service to Automatic on upgrade, and provides user-friendly block page messaging without browser disruption."
           }
-          Write-Host "Updating release v1.0.2-pilot assets via gh CLI..."
-          gh release upload v1.0.2-pilot $files --clobber
+          Write-Host "Updating release v1.0.3-pilot assets via gh CLI..."
+          gh release upload v1.0.3-pilot $files --clobber

@@ -1,7 +1,9 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { Policy, UsageBudget, isWithinBedtime } from '@safebrowse/shared';
+import { Policy, UsageBudget } from '@safebrowse/shared';
 import { DeviceConfig } from './sync-client';
+import { sessionMonitor } from './session-monitor';
+import { ResolvedUserPolicy } from './account-manager';
 
 const execAsync = promisify(exec);
 
@@ -13,10 +15,88 @@ export interface ProcessUsageState {
   warned1Min: boolean;
 }
 
+export interface ProcessInfo {
+  pid: number;
+  imageName: string;
+  userName?: string;
+  sessionId?: number;
+}
+
 export interface ProcessLimiterOptions {
   checkIntervalMs?: number;
   syncIntervalMs?: number;
   simulate?: boolean; // For testing without killing system processes
+  getActiveUserPolicy?: () => ResolvedUserPolicy | null;
+  hasMultipleSessions?: () => boolean;
+}
+
+/**
+ * Immutable protected Windows system, core shell, and SafeBrowse service binaries.
+ * Attempting to terminate any process in this list is strictly forbidden and fail-safe rejected.
+ */
+export const PROTECTED_SYSTEM_PROCESSES: ReadonlySet<string> = new Set([
+  'system',
+  'system idle process',
+  'registry',
+  'smss.exe',
+  'csrss.exe',
+  'wininit.exe',
+  'winlogon.exe',
+  'services.exe',
+  'lsass.exe',
+  'lsaiso.exe',
+  'svchost.exe',
+  'fontdrvhost.exe',
+  'dwm.exe',
+  'explorer.exe',
+  'taskhostw.exe',
+  'sihost.exe',
+  'conhost.exe',
+  'audiodg.exe',
+  'searchhost.exe',
+  'searchindexer.exe',
+  'startmenuexperiencehost.exe',
+  'shellexperiencehost.exe',
+  'runtimebroker.exe',
+  'applicationframehost.exe',
+  'ctfmon.exe',
+  'spoolsv.exe',
+  'taskmgr.exe',
+  'securityhealthsystray.exe',
+  'securityhealthservice.exe',
+  'msmpeng.exe',
+  'dllhost.exe',
+  'smartscreen.exe',
+  'userinit.exe',
+  'logonui.exe',
+  'werfault.exe',
+  'wlanext.exe',
+  'dashost.exe',
+  'cmd.exe',
+  'powershell.exe',
+  'pwsh.exe',
+  'wscript.exe',
+  'cscript.exe',
+  'safebrowsechild-pilot.exe',
+  'safebrowseservicehost.exe',
+  'safebrowsechildservice.exe',
+  'safebrowsechildservice',
+  'node.exe',
+]);
+
+/**
+ * Verifies whether an image name belongs to protected Windows system or SafeBrowse binaries.
+ */
+export function isProtectedProcess(imageName: string): boolean {
+  if (!imageName) return true;
+  const lower = imageName.trim().toLowerCase();
+  const withExe = lower.endsWith('.exe') ? lower : `${lower}.exe`;
+  const withoutExe = lower.endsWith('.exe') ? lower.slice(0, -4) : lower;
+  return (
+    PROTECTED_SYSTEM_PROCESSES.has(lower) ||
+    PROTECTED_SYSTEM_PROCESSES.has(withExe) ||
+    PROTECTED_SYSTEM_PROCESSES.has(withoutExe)
+  );
 }
 
 export class WindowsProcessLimiter {
@@ -27,7 +107,7 @@ export class WindowsProcessLimiter {
   private checkTimer: NodeJS.Timeout | null = null;
   private syncTimer: NodeJS.Timeout | null = null;
   private isRunning: boolean = false;
-  private mockRunningProcesses: string[] | null = null;
+  private mockProcesses: ProcessInfo[] | null = null;
 
   constructor(
     config: DeviceConfig,
@@ -40,11 +120,27 @@ export class WindowsProcessLimiter {
       checkIntervalMs: options.checkIntervalMs || 5000,
       syncIntervalMs: options.syncIntervalMs || 30000,
       simulate: options.simulate ?? (process.platform !== 'win32'),
+      getActiveUserPolicy: options.getActiveUserPolicy,
+      hasMultipleSessions: options.hasMultipleSessions,
     };
   }
 
-  public setMockProcesses(processes: string[] | null) {
-    this.mockRunningProcesses = processes;
+  public setMockProcesses(processes: Array<string | ProcessInfo> | null): void {
+    if (processes === null) {
+      this.mockProcesses = null;
+      return;
+    }
+    this.mockProcesses = processes.map((item, idx) => {
+      if (typeof item === 'string') {
+        return {
+          pid: 2000 + idx,
+          imageName: item,
+          userName: 'ChildUser',
+          sessionId: 1,
+        };
+      }
+      return item;
+    });
   }
 
   private getTodayDateString(): string {
@@ -53,11 +149,27 @@ export class WindowsProcessLimiter {
   }
 
   /**
-   * Enumerate currently running process image names
+   * Helper to parse CSV lines produced by tasklist /FO CSV
    */
-  public async getRunningProcessNames(): Promise<string[]> {
-    if (this.mockRunningProcesses !== null) {
-      return [...this.mockRunningProcesses];
+  public parseCsvLine(line: string): string[] {
+    const fields: string[] = [];
+    const regex = /(?:^|,)(?:"([^"]*)"|([^,]*))/g;
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(line)) !== null) {
+      fields.push(match[1] !== undefined ? match[1] : (match[2] !== undefined ? match[2] : ''));
+      if (regex.lastIndex === match.index) {
+        regex.lastIndex++;
+      }
+    }
+    return fields;
+  }
+
+  /**
+   * Enumerate currently running processes with PID, image name, user name, and session ID.
+   */
+  public async getRunningProcesses(): Promise<ProcessInfo[]> {
+    if (this.mockProcesses !== null) {
+      return [...this.mockProcesses];
     }
 
     if (process.platform !== 'win32') {
@@ -65,56 +177,189 @@ export class WindowsProcessLimiter {
     }
 
     try {
-      // Use tasklist in CSV format: "Image Name","PID","Session Name","Session#","Mem Usage"
-      const { stdout } = await execAsync('tasklist /FO CSV /NH');
-      const lines = stdout.split('\n');
-      const processNames = new Set<string>();
+      // tasklist /V in CSV format: "Image Name","PID","Session Name","Session#","Mem Usage","Status","User Name","CPU Time","Window Title"
+      const { stdout } = await execAsync('tasklist /V /FO CSV /NH');
+      const lines = stdout.split(/\r?\n/);
+      const results: ProcessInfo[] = [];
 
       for (const line of lines) {
-        const match = line.match(/^"([^"]+)"/);
-        if (match && match[1]) {
-          processNames.add(match[1].toLowerCase());
+        if (!line.trim()) continue;
+        const cols = this.parseCsvLine(line);
+        if (cols.length >= 2) {
+          const imageName = (cols[0] || '').toLowerCase().trim();
+          const pid = parseInt(cols[1], 10);
+          const sessionId = cols.length > 3 ? parseInt(cols[3], 10) : undefined;
+          const userName = cols.length > 6 ? cols[6].trim() : undefined;
+
+          if (!isNaN(pid) && imageName) {
+            results.push({
+              pid,
+              imageName,
+              userName,
+              sessionId: isNaN(sessionId as number) ? undefined : sessionId,
+            });
+          }
         }
       }
-
-      return Array.from(processNames);
+      return results;
     } catch (e: any) {
-      console.warn(`[Process Limiter] Failed to enumerate processes: ${e.message}`);
-      return [];
+      console.warn(`[Process Limiter] Failed to enumerate processes with tasklist /V: ${e.message}`);
+      // Fallback to basic tasklist /FO CSV /NH if /V failed
+      try {
+        const { stdout } = await execAsync('tasklist /FO CSV /NH');
+        const lines = stdout.split(/\r?\n/);
+        const results: ProcessInfo[] = [];
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const cols = this.parseCsvLine(line);
+          if (cols.length >= 2) {
+            const imageName = (cols[0] || '').toLowerCase().trim();
+            const pid = parseInt(cols[1], 10);
+            if (!isNaN(pid) && imageName) {
+              results.push({ pid, imageName });
+            }
+          }
+        }
+        return results;
+      } catch (err: any) {
+        console.warn(`[Process Limiter] Failed fallback process enumeration: ${err.message}`);
+        return [];
+      }
     }
   }
 
   /**
-   * Terminate a running process by image name
+   * Enumerate currently running process image names (lowercase)
    */
-  public async terminateProcess(imageName: string): Promise<boolean> {
-    console.log(`[Process Limiter] 🛑 HARD TERMINATING PROCESS: ${imageName}`);
+  public async getRunningProcessNames(): Promise<string[]> {
+    const list = await this.getRunningProcesses();
+    return Array.from(new Set(list.map((p) => p.imageName.toLowerCase())));
+  }
+
+  /**
+   * Terminate a specific process strictly by PID with full verification.
+   * NEVER uses /IM or image-wide taskkill.
+   * Fail-safe refuses termination of system processes, PID <= 4, or unverified owners.
+   */
+  public async terminateProcessByPid(
+    pid: number,
+    imageName: string,
+    processUserName?: string,
+    expectedUserName?: string
+  ): Promise<boolean> {
+    if (pid <= 4) {
+      console.warn(`[Process Limiter] 🛡️ REFUSED: Cannot terminate system PID ${pid} (${imageName})`);
+      return false;
+    }
+
+    if (isProtectedProcess(imageName)) {
+      console.warn(
+        `[Process Limiter] 🛡️ REFUSED: Protected system process ${imageName} cannot be terminated (PROTECTED_PROCESS)`
+      );
+      return false;
+    }
+
+    // Verify process ownership if usernames are provided
+    if (processUserName && expectedUserName) {
+      const cleanProcUser = processUserName.includes('\\')
+        ? processUserName.split('\\')[1].toLowerCase().trim()
+        : processUserName.toLowerCase().trim();
+      const cleanExpected = expectedUserName.includes('\\')
+        ? expectedUserName.split('\\')[1].toLowerCase().trim()
+        : expectedUserName.toLowerCase().trim();
+
+      if (cleanProcUser !== cleanExpected) {
+        console.warn(
+          `[Process Limiter] 🛡️ REFUSED: Process PID ${pid} (${imageName}) owner '${processUserName}' does not match expected managed child '${expectedUserName}'`
+        );
+        return false;
+      }
+    }
+
+    console.log(`[Process Limiter] 🛑 HARD TERMINATING CHILD PROCESS: ${imageName} (PID ${pid})`);
 
     if (this.options.simulate || process.platform !== 'win32') {
-      if (this.mockRunningProcesses) {
-        this.mockRunningProcesses = this.mockRunningProcesses.filter(
-          (p) => p.toLowerCase() !== imageName.toLowerCase()
-        );
+      if (this.mockProcesses) {
+        this.mockProcesses = this.mockProcesses.filter((p) => p.pid !== pid);
       }
       return true;
     }
 
     try {
-      await execAsync(`taskkill /F /T /IM "${imageName}"`);
+      // STRICTLY PID TARGETED taskkill - NEVER /IM, NEVER image-wide!
+      await execAsync(`taskkill /F /PID ${pid}`);
       return true;
     } catch (e: any) {
-      console.warn(`[Process Limiter] taskkill notice for ${imageName}: ${e.message}`);
+      console.warn(`[Process Limiter] taskkill notice for PID ${pid} (${imageName}): ${e.message}`);
       return false;
     }
   }
 
   /**
-   * Evaluate a single process against active budget and policies
+   * Legacy helper: terminate running child process matching image name.
+   * Safely discovers candidate PIDs and invokes terminateProcessByPid.
+   * Refuses to kill protected system processes.
+   */
+  public async terminateProcess(imageName: string): Promise<boolean> {
+    if (isProtectedProcess(imageName)) {
+      console.warn(
+        `[Process Limiter] 🛡️ REFUSED: Protected system process ${imageName} cannot be terminated (PROTECTED_PROCESS)`
+      );
+      return false;
+    }
+
+    const procs = await this.getRunningProcesses();
+    const targets = procs.filter((p) => {
+      const k = p.imageName.toLowerCase();
+      const targetKey = imageName.toLowerCase();
+      return k === targetKey || k === `${targetKey}.exe` || `${k}.exe` === targetKey;
+    });
+
+    if (targets.length === 0) {
+      if (this.options.simulate || process.platform !== 'win32') {
+        if (this.mockProcesses) {
+          this.mockProcesses = this.mockProcesses.filter(
+            (p) => p.imageName.toLowerCase() !== imageName.toLowerCase()
+          );
+        }
+        return true;
+      }
+      return false;
+    }
+
+    let allKilled = true;
+    const activeUser = this.options.getActiveUserPolicy
+      ? this.options.getActiveUserPolicy()
+      : sessionMonitor.getCurrentPolicy();
+
+    for (const target of targets) {
+      const success = await this.terminateProcessByPid(
+        target.pid,
+        target.imageName,
+        target.userName,
+        activeUser?.accountName
+      );
+      if (!success) {
+        allKilled = false;
+      }
+    }
+    return allKilled;
+  }
+
+  /**
+   * Evaluate a single process against active budget and policies.
+   *
+   * ARCHITECTURAL RULE:
+   * Dinner Time (isPaused) and Bedtime curfew MUST NEVER TERMINATE PROCESSES.
+   * They are strictly network-level restrictions handled by loopback DNS.
+   * ZERO process termination for Dinner Time or Bedtime.
+   *
+   * Scope is strictly narrowed to explicit targetType === 'APP' budget exhaustion.
    */
   public evaluateProcess(
     processName: string,
     policy: Policy,
-    now: Date = new Date()
+    _now: Date = new Date()
   ): {
     action: 'ALLOW' | 'WARN_5MIN' | 'WARN_1MIN' | 'TERMINATE';
     reason: string;
@@ -125,34 +370,34 @@ export class WindowsProcessLimiter {
     const today = this.getTodayDateString();
     const key = processName.toLowerCase();
 
-    // 1. Check Global Internet Pause
-    if (policy.isPaused) {
+    // 1. Immutable System Process Protection Guard
+    if (isProtectedProcess(key)) {
       return {
-        action: 'TERMINATE',
-        reason: 'GLOBAL_INTERNET_PAUSED',
+        action: 'ALLOW',
+        reason: 'PROTECTED_PROCESS',
         consumedSeconds: 0,
-        limitSeconds: 0,
-        remainingSeconds: 0,
+        limitSeconds: Infinity,
+        remainingSeconds: Infinity,
       };
     }
 
-    // 2. Check Bedtime Schedule
-    if (policy.bedtime && policy.bedtime.enabled) {
-      if (isWithinBedtime(now, policy.bedtime)) {
-        return {
-          action: 'TERMINATE',
-          reason: 'BEDTIME_CURFEW_ACTIVE',
-          consumedSeconds: 0,
-          limitSeconds: 0,
-          remainingSeconds: 0,
-        };
-      }
-    }
-
-    // 3. Find matching usage budget
+    // 2. Find matching usage budget: strictly narrow to APP targetType
     const budgets: UsageBudget[] = (policy.usageBudgets as any[]) || [];
     const matchedBudget = budgets.find((b) => {
       if (!b.enabled) return false;
+      // Reject non-APP budgets: DOMAIN and CATEGORY budgets must never terminate processes
+      if (b.targetType && b.targetType !== 'APP') return false;
+      if (!b.targetType) {
+        const t = b.target.toLowerCase();
+        if (t.includes('.') && !t.endsWith('.exe')) return false; // e.g. 'youtube.com'
+        if (
+          ['ADULT_CONTENT', 'GAMBLING', 'GAMES', 'SOCIAL_MEDIA', 'EDUCATION', 'STREAMING'].includes(
+            b.target.toUpperCase()
+          )
+        ) {
+          return false;
+        }
+      }
       const target = b.target.toLowerCase();
       return target === key || target.replace('.exe', '') === key.replace('.exe', '');
     });
@@ -191,7 +436,8 @@ export class WindowsProcessLimiter {
       this.usageTracker.set(key, state);
     }
 
-    const totalAllowedSeconds = (matchedBudget.dailyLimitSeconds || 3600) + (matchedBudget.bonusSeconds || 0);
+    const totalAllowedSeconds =
+      (matchedBudget.dailyLimitSeconds || 3600) + (matchedBudget.bonusSeconds || 0);
     const remainingSeconds = Math.max(0, totalAllowedSeconds - state.consumedSeconds);
 
     if (remainingSeconds <= 0) {
@@ -239,27 +485,81 @@ export class WindowsProcessLimiter {
    * Periodic enforcement loop: checks all active processes
    */
   public async checkAndEnforce(): Promise<void> {
+    // 1. Safety Guard: Check multi-session condition (Fast User Switching)
+    const hasMultiple = this.options.hasMultipleSessions
+      ? this.options.hasMultipleSessions()
+      : sessionMonitor.hasMultipleSessions();
+    if (hasMultiple) {
+      console.log(
+        '[Process Limiter] ⚠️ Multiple interactive Windows sessions detected. Process enforcement suspended for safety.'
+      );
+      return;
+    }
+
+    // 2. Safety Guard: Check active console user policy
+    const activeUser = this.options.getActiveUserPolicy
+      ? this.options.getActiveUserPolicy()
+      : sessionMonitor.getCurrentPolicy();
+    if (activeUser && !activeUser.isManaged) {
+      // Parent or unmanaged user is active at console: zero enforcement
+      return;
+    }
+
     const policy = this.getPolicy();
     if (!policy) return;
 
-    const runningProcesses = await this.getRunningProcessNames();
+    // 3. Enumerate running processes
+    const runningProcesses = await this.getRunningProcesses();
     const intervalSec = Math.round((this.options.checkIntervalMs || 5000) / 1000);
 
-    for (const proc of runningProcesses) {
-      const result = this.evaluateProcess(proc, policy);
+    // Group by process name so usage tracking counts each app once per interval
+    const seenNamesInThisTick = new Set<string>();
 
-      // Increment tracking if running
-      const key = proc.toLowerCase();
-      const state = this.usageTracker.get(key);
-      if (state) {
-        state.consumedSeconds += intervalSec;
+    for (const proc of runningProcesses) {
+      const key = proc.imageName.toLowerCase();
+
+      // Protected processes are never evaluated or tracked
+      if (isProtectedProcess(key)) {
+        continue;
+      }
+
+      // Check ownership if username is known
+      if (activeUser && proc.userName) {
+        const cleanProcUser = proc.userName.includes('\\')
+          ? proc.userName.split('\\')[1].toLowerCase().trim()
+          : proc.userName.toLowerCase().trim();
+        const cleanActive = activeUser.accountName.toLowerCase().trim();
+        if (cleanProcUser !== cleanActive) {
+          // Process does not belong to active managed child (e.g. SYSTEM or Parent user)
+          continue;
+        }
+      }
+
+      const result = this.evaluateProcess(proc.imageName, policy);
+
+      // Increment tracking once per interval for this app name
+      if (!seenNamesInThisTick.has(key)) {
+        seenNamesInThisTick.add(key);
+        const state = this.usageTracker.get(key);
+        if (state) {
+          state.consumedSeconds += intervalSec;
+        }
       }
 
       if (result.action === 'TERMINATE') {
-        console.log(`[Process Limiter] ⚠️ Enforcing limit for ${proc}: ${result.reason} (Consumed: ${Math.round(result.consumedSeconds / 60)}m / ${Math.round(result.limitSeconds / 60)}m)`);
-        await this.terminateProcess(proc);
+        console.log(
+          `[Process Limiter] ⚠️ Enforcing limit for ${proc.imageName} (PID ${proc.pid}): ${result.reason} (Consumed: ${Math.round(result.consumedSeconds / 60)}m / ${Math.round(result.limitSeconds / 60)}m)`
+        );
+        await this.terminateProcessByPid(
+          proc.pid,
+          proc.imageName,
+          proc.userName,
+          activeUser?.accountName
+        );
       } else if (result.action === 'WARN_5MIN' || result.action === 'WARN_1MIN') {
-        console.log(`[Process Limiter] 🔔 Child Warning for ${proc}: ${Math.round(result.remainingSeconds / 60)} minutes remaining today.`);
+        console.log(
+          `[Process Limiter] 🔔 Child Warning for ${proc.imageName}: ${Math.round(result.remainingSeconds / 60)} minutes remaining today.`
+        );
       }
     }
   }
@@ -304,7 +604,9 @@ export class WindowsProcessLimiter {
       this.syncUsageToBackend().catch(() => {});
     }, this.options.syncIntervalMs);
 
-    console.log(`[Process Limiter] 🎮 Windows Application Watchdog running (Polling interval: ${this.options.checkIntervalMs}ms)`);
+    console.log(
+      `[Process Limiter] 🎮 Windows Application Watchdog running (Polling interval: ${this.options.checkIntervalMs}ms)`
+    );
   }
 
   public stop(): void {
@@ -324,3 +626,4 @@ export class WindowsProcessLimiter {
     this.usageTracker.set(processName.toLowerCase(), state);
   }
 }
+

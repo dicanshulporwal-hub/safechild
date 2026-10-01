@@ -25,8 +25,24 @@ export function formatFriendlyReason(rawReason: string): string {
 
   const upper = rawReason.trim().toUpperCase();
 
-  if (upper.includes('BEDTIME') || upper.includes('CURFEW')) {
+  if (
+    upper === 'PAUSED_INTERNET' ||
+    upper === 'DINNER_TIME' ||
+    upper === 'PAUSED' ||
+    upper.includes('PAUSE') ||
+    upper.includes('DINNER')
+  ) {
+    return 'Internet is paused for family time.';
+  }
+  if (upper === 'BEDTIME_RESTRICTION') {
     return 'Bedtime rule active. Internet access is paused until morning.';
+  }
+  if (
+    upper === 'BEDTIME_ACTIVE' ||
+    upper.includes('BEDTIME') ||
+    upper.includes('CURFEW')
+  ) {
+    return 'Bedtime restrictions are active.';
   }
   if (upper === 'ADULT_CONTENT' || upper.includes('ADULT')) {
     return 'This website has content that is not suitable for children.';
@@ -45,9 +61,6 @@ export function formatFriendlyReason(rawReason: string): string {
   }
   if (upper === 'STUDY_MODE') {
     return 'Study Mode is active. Only educational websites are permitted right now.';
-  }
-  if (upper === 'PAUSED' || upper.includes('PAUSE')) {
-    return 'Internet access is temporarily paused by your parent.';
   }
   if (upper.includes('PARENT') || upper.includes('BLACKLIST') || upper.includes('BLOCK') || upper === 'CUSTOM_RULE') {
     return 'Blocked by your parent in family rules.';

@@ -1,7 +1,7 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <?ifndef ProductVersion?>
-  <?define ProductVersion = "1.0.2.0" ?>
+  <?define ProductVersion = "1.0.3.0" ?>
   <?endif?>
   <Package
       Name="SafeBrowse Child Pilot"
@@ -155,7 +155,7 @@
     <CustomAction
         Id="ConfigureServiceRecovery"
         Directory="INSTALLFOLDER"
-        ExeCommand="cmd.exe /c &quot;sc.exe failure SafeBrowseChildService reset= 86400 actions= restart/5000/restart/5000/restart/5000 &amp; sc.exe failureflag SafeBrowseChildService 1&quot;"
+        ExeCommand="cmd.exe /c &quot;sc.exe config SafeBrowseChildService start= auto &amp; sc.exe failure SafeBrowseChildService reset= 86400 actions= restart/5000/restart/5000/restart/5000 &amp; sc.exe failureflag SafeBrowseChildService 1 &amp; sc.exe start SafeBrowseChildService&quot;"
         Execute="deferred"
         Impersonate="no"
         Return="ignore" />

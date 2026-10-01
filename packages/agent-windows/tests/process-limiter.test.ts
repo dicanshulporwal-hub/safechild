@@ -191,7 +191,7 @@ describe('SafeBrowse Windows Process Limiter & Hard Enforcer Tests', () => {
     assert.strictEqual(result.reason, 'UNLIMITED_TODAY_GRANTED');
   });
 
-  it('8. should terminate game process immediately during Bedtime curfew (22:00)', () => {
+  it('8. should NOT terminate process during Bedtime curfew (Bedtime is network-only DNS enforcement)', () => {
     let policy = createBasePolicy({
       bedtime: {
         enabled: true,
@@ -206,17 +206,19 @@ describe('SafeBrowse Windows Process Limiter & Hard Enforcer Tests', () => {
 
     const nightTime = new Date('2026-09-15T22:00:00');
     const result = limiter.evaluateProcess('RobloxPlayerBeta.exe', policy, nightTime);
-    assert.strictEqual(result.action, 'TERMINATE');
-    assert.strictEqual(result.reason, 'BEDTIME_CURFEW_ACTIVE');
+    // ZERO PROCESS TERMINATION: Bedtime is enforced strictly at DNS layer, not by killing apps
+    assert.notStrictEqual(result.action, 'TERMINATE');
+    assert.strictEqual(result.action, 'ALLOW');
   });
 
-  it('9. should terminate all monitored processes when global isPaused is true', () => {
+  it('9. should NOT terminate processes when global isPaused (Dinner Time) is true (Network-only DNS enforcement)', () => {
     let policy = createBasePolicy({ isPaused: true });
     const limiter = new WindowsProcessLimiter(mockConfig, () => policy, { simulate: true });
 
     const result = limiter.evaluateProcess('RobloxPlayerBeta.exe', policy);
-    assert.strictEqual(result.action, 'TERMINATE');
-    assert.strictEqual(result.reason, 'GLOBAL_INTERNET_PAUSED');
+    // ZERO PROCESS TERMINATION: Dinner Time is enforced strictly at DNS layer, not by killing apps
+    assert.notStrictEqual(result.action, 'TERMINATE');
+    assert.strictEqual(result.action, 'ALLOW');
   });
 
   it('10. should execute checkAndEnforce loop and remove exhausted process from mock list', async () => {

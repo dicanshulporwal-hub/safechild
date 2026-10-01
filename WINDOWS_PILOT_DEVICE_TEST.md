@@ -1,6 +1,6 @@
 # SafeBrowse Windows Pilot v1.0 — Device & Account Manual Verification Protocol
 
-**Version:** 1.0.1-pilot  
+**Version:** 1.0.3-pilot (P0 Hotfix: OS Stability Guard for Dinner Time & Bedtime)  
 **Classification:** Pilot Ready for Single-Active-User Deployment  
 **Repository:** `dicanshulporwal-hub/safechild`  
 **Branch:** `feature/stage11-step4-device-enforcement`  
@@ -10,11 +10,11 @@
 
 ## Overview
 
-This document provides a comprehensive 30-point physical and automated verification matrix for the SafeBrowse Windows Pilot release. Tests cover device registration, cryptographic pairing, multi-session safety guard, parent dashboard device management, graphical setup GUI, policy push synchronization, and security invariants.
+This document provides a comprehensive 53-point physical and automated verification matrix for the SafeBrowse Windows Pilot release. Tests cover device registration, cryptographic pairing, multi-session safety guard, parent dashboard device management, graphical setup GUI, policy push synchronization, privilege separation, process termination safety, and OS stability under Dinner Time and Bedtime.
 
 ---
 
-## Test Verification Matrix (W1 – W30)
+## Test Verification Matrix (W1 – W53)
 
 | Test ID | Category | Test Description | Expected Result | Automated / Manual |
 | :--- | :--- | :--- | :--- | :--- |
@@ -63,6 +63,14 @@ This document provides a comprehensive 30-point physical and automated verificat
 | **W43** | Cryptographic Storage | DPAPI Machine Scope Device Credential Encryption | `deviceToken` encrypted with LocalMachine DPAPI, stored in `secure/` only | Automated |
 | **W44** | State Separation | Zero-Secret State Storage | `state/sanitized-config.json` written with `isPaired: true`, 0 tokens | Automated |
 | **W45** | Reactive Refresh | Normal GUI Background Auto-Detection | Unelevated GUI on `8885` automatically switches from Not Paired to Paired | Automated & Manual |
+| **W46** | OS Stability | Dinner Time Network-Only Enforcement | `isPaused=true` enforces loopback DNS blocks (`PAUSED_INTERNET`); strictly 0 process kills | Automated & Manual |
+| **W47** | OS Stability | Bedtime Curfew Network-Only Enforcement | Bedtime window blocks non-educational DNS queries; strictly 0 process kills | Automated & Manual |
+| **W48** | Process Protection | Immutable System Process Whitelist | Fail-safe refusal to terminate Windows core/shell (`explorer.exe`, `svchost.exe`, `dwm.exe`, `System`) | Automated |
+| **W49** | Process Protection | SafeBrowse Service Self-Protection | Refuses termination of SafeBrowse binaries (`SafeBrowseChild-Pilot.exe`, `SafeBrowseServiceHost.exe`, `node.exe`) | Automated |
+| **W50** | Scope Narrowing | Process Limiter APP-Budget Isolation | Process limiter strictly evaluates `targetType === 'APP'`; DOMAIN/CATEGORY budgets never terminate apps | Automated |
+| **W51** | Targeting Safety | Strict PID Targeting & SID Verification | Eliminates `taskkill /IM`; verifies process owner matches child SID; spares parent PIDs | Automated |
+| **W52** | Service Recovery | MSI Upgrade SCM Startup Restoration | v1.0.3 installer resets `SafeBrowseChildService` startup type from Manual to Automatic and starts service | Automated & Manual |
+| **W53** | Block Page / UX | Non-Disruptive Friendly Messaging | Displays "Internet is paused for family time." and "Bedtime restrictions are active." without closing apps | Automated & Manual |
 
 ---
 
@@ -181,5 +189,46 @@ This document provides a comprehensive 30-point physical and automated verificat
    - If a staging request older than 60 seconds is processed, verify rejection: `Staging request expired`.
 6. Verify hash integrity:
    - If payload data is tampered with, verify rejection: `Payload hash mismatch: integrity verification failed`.
+
+### Procedure 8: Dinner Time & Bedtime Physical Stability Verification Protocol (P0 Hotfix)
+1. **Service Recovery on Stopped Machines**:
+   - If `SafeBrowseChildService` was previously stopped and set to `Manual` due to the v1.0.2 issue:
+   - Run the v1.0.3 MSI installer upgrade:
+     ```powershell
+     msiexec /i SafeBrowseChild-Pilot.msi /qn
+     ```
+   - Verify that the SCM startup type has automatically reverted to `Automatic` and the service is Running:
+     ```powershell
+     Get-Service SafeBrowseChildService | Select-Object Name, Status, StartType
+     # Expected: Status = Running, StartType = Automatic
+     ```
+2. **Managed Child Active Session Setup**:
+   - Sign into Windows as the managed child account (e.g. `Manjari`).
+   - Open multiple Windows desktop applications:
+     * Browser: Microsoft Edge (`msedge.exe`) or Google Chrome (`chrome.exe`).
+     * Productivity: Notepad (`notepad.exe`) or WordPad.
+     * File Explorer: Open any folder (`explorer.exe`).
+3. **Dinner Time (Global Family Internet Pause) Activation**:
+   - In Parent Portal (`https://safebrowse.porwal.online`), toggle **Dinner Time / Internet Pause** ON for the family / child.
+   - Observe the Windows desktop:
+     * **Invariant:** Windows must remain 100% stable, responsive, and interactive.
+     * **Invariant:** Strictly ZERO logoffs, zero freezes, zero restarts, and zero blue screens.
+     * **Invariant:** File Explorer, shell (`explorer.exe`), DWM (`dwm.exe`), and running local applications remain untouched and running.
+4. **Child Browsing Experience Verification**:
+   - In the child's browser, attempt to navigate to any external website (e.g. `https://wikipedia.org` or `https://news.ycombinator.com`).
+   - Verify that DNS resolution blocks access with `NXDOMAIN` and the browser displays the SafeBrowse interstitial:
+     `Internet is paused for family time.`
+   - Confirm that the browser is NOT killed, closed, or terminated by `taskkill`.
+5. **Dinner Time Resume Verification**:
+   - In Parent Portal, toggle **Dinner Time** OFF.
+   - Within 2 seconds, refresh the child's browser.
+   - Verify that internet browsing immediately resumes normally.
+   - Confirm that zero applications were killed during the toggle.
+6. **Bedtime Curfew Verification**:
+   - In Parent Portal, configure a Bedtime schedule covering the current time.
+   - Verify that non-educational browsing is blocked with:
+     `Bedtime restrictions are active.`
+   - Confirm that zero Windows system processes or child apps are terminated.
+
 
 
