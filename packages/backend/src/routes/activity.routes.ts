@@ -13,27 +13,54 @@ activityRouter.post('/', deviceAuthMiddleware, async (req: AuthenticatedDeviceRe
   try {
     const { domain, action, childId, events } = req.body;
 
-    const normalizeAction = (act: string): 'BLOCKED' | 'ALLOWED' | 'TEMPORARY_ACCESSED' => {
+    const normalizeAction = (
+      act: string
+    ): 'BLOCKED' | 'ALLOWED' | 'TEMPORARY_ACCESSED' | null => {
       const upper = (act || '').toUpperCase();
       if (upper === 'BLOCK' || upper === 'BLOCKED') return 'BLOCKED';
       if (upper === 'ALLOW' || upper === 'ALLOWED') return 'ALLOWED';
       if (upper === 'TEMPORARY_ACCESSED' || upper === 'TEMPORARY_ALLOW') return 'TEMPORARY_ACCESSED';
-      return 'ALLOWED';
+      return null;
     };
 
     // Support batch event submission from agent outbox
     if (Array.isArray(events) && events.length > 0) {
       const results = [];
+      let rejected = 0;
       for (const ev of events) {
-        if (!ev.domain || !ev.action) continue;
+        if (!ev?.domain || !ev?.action) {
+          rejected++;
+          continue;
+        }
         const targetChild = ev.childId || childId || req.childId!;
         const normalized = normalizeAction(ev.action);
+        if (!normalized) {
+          rejected++;
+          continue;
+        }
         try {
-          const recorded = await activityService.logActivity(targetChild, req.deviceId!, ev.domain, normalized);
+          const recorded = await activityService.logActivity(
+            targetChild,
+            req.deviceId!,
+            ev.domain,
+            normalized,
+            {
+              category: ev.category,
+              reason: ev.reason,
+              timestamp: ev.timestamp,
+            }
+          );
           results.push(recorded);
-        } catch {}
+        } catch {
+          rejected++;
+        }
       }
-      return res.json({ success: true, count: results.length, events: results });
+      return res.json({
+        success: rejected === 0,
+        count: results.length,
+        rejected,
+        events: results,
+      });
     }
 
     if (!domain || !action) {
@@ -42,7 +69,20 @@ activityRouter.post('/', deviceAuthMiddleware, async (req: AuthenticatedDeviceRe
 
     const targetChild = childId || req.childId!;
     const normalized = normalizeAction(action);
-    const event = await activityService.logActivity(targetChild, req.deviceId!, domain, normalized);
+    if (!normalized) {
+      return res.status(400).json({ error: 'Unsupported activity action.' });
+    }
+    const event = await activityService.logActivity(
+      targetChild,
+      req.deviceId!,
+      domain,
+      normalized,
+      {
+        category: req.body.category,
+        reason: req.body.reason,
+        timestamp: req.body.timestamp,
+      }
+    );
     res.json(event);
   } catch (e: any) {
     res.status(400).json({ error: e.message });

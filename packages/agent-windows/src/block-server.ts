@@ -80,6 +80,7 @@ export class BlockPageServer {
   private backendUrl: string;
   private defaultChildId: string;
   private deviceId: string;
+  private deviceToken: string;
   private activeChildProvider?: () => ActiveChildContext;
   private port: number = 8880;
 
@@ -91,11 +92,13 @@ export class BlockPageServer {
     backendUrl: string,
     defaultChildId: string,
     deviceId: string,
-    activeChildProvider?: () => ActiveChildContext
+    activeChildProvider?: () => ActiveChildContext,
+    deviceToken: string = ''
   ) {
     this.backendUrl = backendUrl;
     this.defaultChildId = defaultChildId;
     this.deviceId = deviceId;
+    this.deviceToken = deviceToken;
     this.activeChildProvider = activeChildProvider;
   }
 
@@ -188,7 +191,11 @@ export class BlockPageServer {
 
               const response = await fetch(`${this.backendUrl}/api/requests`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                  'Content-Type': 'application/json',
+                  'x-device-id': this.deviceId,
+                  'x-device-token': this.deviceToken,
+                },
                 body: JSON.stringify({
                   childId: targetChildId,
                   deviceId: this.deviceId,

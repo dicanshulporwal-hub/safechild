@@ -49,6 +49,8 @@ class SyncWorker(appContext: Context, workerParams: WorkerParameters) :
             val body = heartbeatJson.toString().toRequestBody("application/json".toMediaType())
             val request = Request.Builder()
                 .url("$backendUrl/api/devices/heartbeat")
+                .addHeader("x-device-id", deviceId)
+                .addHeader("x-device-token", deviceToken)
                 .post(body)
                 .build()
 
@@ -59,6 +61,8 @@ class SyncWorker(appContext: Context, workerParams: WorkerParameters) :
                     // Fetch updated policy
                     val policyReq = Request.Builder()
                         .url("$backendUrl/api/policies/device/$deviceId")
+                        .addHeader("x-device-id", deviceId)
+                        .addHeader("x-device-token", deviceToken)
                         .get()
                         .build()
                     val policyRes = httpClient.newCall(policyReq).execute()

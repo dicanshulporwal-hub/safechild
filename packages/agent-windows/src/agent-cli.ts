@@ -383,7 +383,13 @@ async function runServiceMode(): Promise<void> {
   await syncClient.start(5000);
 
   // 2. Initialize Block Page Server
-  blockServer = new BlockPageServer(config.backendUrl, config.childId, config.deviceId);
+  blockServer = new BlockPageServer(
+    config.backendUrl,
+    config.childId,
+    config.deviceId,
+    undefined,
+    config.deviceToken
+  );
   await blockServer.start(8880);
 
   // 3. Initialize DNS Filter Proxy on port 53 with physical network's upstream DNS

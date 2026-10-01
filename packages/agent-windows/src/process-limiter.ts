@@ -10,6 +10,7 @@ const execAsync = promisify(exec);
 export interface ProcessUsageState {
   processName: string;
   consumedSeconds: number;
+  lastSyncedSeconds?: number;
   lastDate: string; // 'YYYY-MM-DD'
   warned5Min: boolean;
   warned1Min: boolean;
@@ -528,7 +529,9 @@ export class WindowsProcessLimiter {
         const cleanProcUser = proc.userName.includes('\\')
           ? proc.userName.split('\\')[1].toLowerCase().trim()
           : proc.userName.toLowerCase().trim();
-        const cleanActive = activeUser.accountName.toLowerCase().trim();
+        const cleanActive = activeUser.accountName.includes('\\')
+          ? activeUser.accountName.split('\\')[1].toLowerCase().trim()
+          : activeUser.accountName.toLowerCase().trim();
         if (cleanProcUser !== cleanActive) {
           // Process does not belong to active managed child (e.g. SYSTEM or Parent user)
           continue;
@@ -569,25 +572,51 @@ export class WindowsProcessLimiter {
    */
   public async syncUsageToBackend(): Promise<void> {
     const today = this.getTodayDateString();
+    const activeUser = this.options.getActiveUserPolicy
+      ? this.options.getActiveUserPolicy()
+      : sessionMonitor.getCurrentPolicy();
+
+    // Usage must only be attributed to the currently active managed child.
+    if (!activeUser?.isManaged || !activeUser.childId) {
+      return;
+    }
+
     for (const [proc, state] of this.usageTracker.entries()) {
-      if (state.lastDate === today && state.consumedSeconds > 0) {
-        try {
-          await fetch(`${this.config.backendUrl}/api/usage/session`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-device-id': this.config.deviceId,
-              'x-device-token': this.config.deviceToken,
-            },
-            body: JSON.stringify({
-              childId: this.config.childId,
-              deviceId: this.config.deviceId,
-              appName: proc,
-              durationSeconds: state.consumedSeconds,
-              date: today,
-            }),
-          });
-        } catch {}
+      if (state.lastDate !== today || state.consumedSeconds <= 0) continue;
+
+      const alreadySynced = Math.max(0, state.lastSyncedSeconds || 0);
+      const deltaSeconds = Math.max(0, state.consumedSeconds - alreadySynced);
+      if (deltaSeconds <= 0) continue;
+
+      try {
+        const res = await fetch(`${this.config.backendUrl}/api/usage/session`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-device-id': this.config.deviceId,
+            'x-device-token': this.config.deviceToken,
+          },
+          body: JSON.stringify({
+            childId: activeUser.childId,
+            deviceId: this.config.deviceId,
+            appName: proc,
+            durationSeconds: deltaSeconds,
+            clientWallIso: new Date().toISOString(),
+          }),
+        });
+
+        if (res.ok) {
+          // Advance checkpoint only after the backend accepted the increment.
+          state.lastSyncedSeconds = state.consumedSeconds;
+        } else {
+          console.warn(
+            `[Process Limiter] Usage sync rejected for ${proc}: HTTP ${res.status}. Retaining unsent delta.`
+          );
+        }
+      } catch (err: any) {
+        console.warn(
+          `[Process Limiter] Usage sync deferred for ${proc}: ${err?.message || 'network error'}`
+        );
       }
     }
   }

@@ -11,7 +11,12 @@ export class ActivityService {
     childId: string,
     deviceId: string,
     rawDomain: string,
-    action: 'BLOCKED' | 'ALLOWED' | 'TEMPORARY_ACCESSED'
+    action: 'BLOCKED' | 'ALLOWED' | 'TEMPORARY_ACCESSED',
+    metadata?: {
+      category?: string;
+      reason?: string;
+      timestamp?: string;
+    }
   ): Promise<ActivityEvent> {
     const domain = normalizeDomain(rawDomain);
     const child = await prisma.child.findUnique({
@@ -24,11 +29,36 @@ export class ActivityService {
     if (!child) {
       throw new Error('Child not found.');
     }
+    if (!device) {
+      throw new Error('Device not found.');
+    }
+    if (device.familyId !== child.familyId) {
+      throw new Error('Forbidden: Device and child do not belong to the same family.');
+    }
 
     const id = `act-${nanoid(8)}`;
     const now = new Date();
 
-    const canLinkDevice = device && device.childId === childId;
+    let eventTimestamp = now;
+    if (metadata?.timestamp) {
+      const candidate = new Date(metadata.timestamp);
+      const maxFutureMs = 5 * 60 * 1000;
+      const maxPastMs = 30 * 24 * 60 * 60 * 1000;
+      if (
+        !Number.isNaN(candidate.getTime()) &&
+        candidate.getTime() <= now.getTime() + maxFutureMs &&
+        candidate.getTime() >= now.getTime() - maxPastMs
+      ) {
+        eventTimestamp = candidate;
+      }
+    }
+
+    const category = (metadata?.category || 'GENERAL').toString().trim().slice(0, 64) || 'GENERAL';
+    const blockedReason = metadata?.reason ? metadata.reason.toString().trim().slice(0, 512) : null;
+
+    // The current relational schema can link a device only to its primary child.
+    // Secondary mapped children remain family-validated but store a null device FK.
+    const canLinkDevice = device.childId === childId;
 
     const created = await prisma.activityEvent.create({
       data: {
@@ -38,8 +68,9 @@ export class ActivityService {
         deviceId: canLinkDevice ? deviceId : null,
         domain,
         action,
-        category: 'GENERAL',
-        timestamp: now,
+        category,
+        blockedReason,
+        timestamp: eventTimestamp,
       },
     });
 
@@ -47,9 +78,11 @@ export class ActivityService {
       id: created.id,
       childId: created.childId,
       deviceId: created.deviceId || deviceId,
-      deviceName: device ? device.name : 'Child Device',
+      deviceName: device.name,
       domain: created.domain,
+      category: created.category as any,
       action: created.action as any,
+      reason: created.blockedReason || undefined,
       timestamp: created.timestamp.toISOString(),
     };
 
@@ -77,7 +110,9 @@ export class ActivityService {
       deviceId: a.deviceId || '',
       deviceName: a.device?.name || 'Child Device',
       domain: a.domain,
+      category: a.category as any,
       action: a.action as any,
+      reason: a.blockedReason || undefined,
       timestamp: a.timestamp.toISOString(),
     }));
   }

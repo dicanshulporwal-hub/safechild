@@ -7,6 +7,8 @@ import { configManager } from './config-manager';
 
 export type PolicyStatus = 'POLICY_LIVE' | 'POLICY_CACHED' | 'POLICY_UNAVAILABLE';
 
+export const WINDOWS_AGENT_VERSION = '1.0.3-pilot';
+
 export interface DeviceConfig {
   deviceId: string;
   deviceToken: string;
@@ -301,7 +303,7 @@ export class PolicySyncClient {
         activePolicyVersion: this.currentPolicy?.version || 1,
         enforcementActive: isEnforcing,
         platform: 'windows',
-        agentVersion: '1.0.0-pilot',
+        agentVersion: WINDOWS_AGENT_VERSION,
         mappedAccountName: extraState?.mappedAccountName,
         hasMultipleSessions: extraState?.hasMultipleSessions,
         protectionStatus: extraState?.protectionStatus,

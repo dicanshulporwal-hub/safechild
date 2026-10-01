@@ -99,7 +99,15 @@ class BlockScreenActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("safebrowse_device", MODE_PRIVATE)
         val childId = prefs.getString("child_id", "") ?: ""
         val deviceId = prefs.getString("device_id", "") ?: ""
+        val deviceToken = prefs.getString("device_token", "") ?: ""
         val backendUrl = com.safebrowse.child.config.AgentConfig.getBackendUrl(this@BlockScreenActivity)
+
+        if (deviceId.isBlank() || deviceToken.isBlank()) {
+            Toast.makeText(this, "SafeBrowse device credentials are unavailable. Please re-pair this device.", Toast.LENGTH_LONG).show()
+            btn.isEnabled = true
+            btn.text = "Try Again"
+            return
+        }
 
         val json = JSONObject().apply {
             put("childId", childId)
@@ -114,6 +122,8 @@ class BlockScreenActivity : AppCompatActivity() {
                     val body = json.toString().toRequestBody("application/json".toMediaType())
                     val request = Request.Builder()
                         .url("$backendUrl/api/requests")
+                        .addHeader("x-device-id", deviceId)
+                        .addHeader("x-device-token", deviceToken)
                         .post(body)
                         .build()
                     val response = httpClient.newCall(request).execute()
