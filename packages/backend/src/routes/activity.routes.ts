@@ -32,11 +32,29 @@ activityRouter.post('/', deviceAuthMiddleware, async (req: AuthenticatedDeviceRe
           rejected++;
           continue;
         }
-        const targetChild = ev.childId || childId || req.childId!;
+        const targetChild = ev.childId || childId || req.childId;
+        if (!targetChild) {
+          rejected++;
+          continue;
+        }
         const normalized = normalizeAction(ev.action);
         if (!normalized) {
           rejected++;
           continue;
+        }
+        if (ev.timestamp) {
+          const candidate = new Date(ev.timestamp);
+          const maxFutureMs = 5 * 60 * 1000;
+          const maxPastMs = 30 * 24 * 60 * 60 * 1000;
+          const now = Date.now();
+          if (
+            Number.isNaN(candidate.getTime()) ||
+            candidate.getTime() > now + maxFutureMs ||
+            candidate.getTime() < now - maxPastMs
+          ) {
+            rejected++;
+            continue;
+          }
         }
         try {
           const recorded = await activityService.logActivity(
@@ -67,11 +85,30 @@ activityRouter.post('/', deviceAuthMiddleware, async (req: AuthenticatedDeviceRe
       return res.status(400).json({ error: 'domain and action are required.' });
     }
 
-    const targetChild = childId || req.childId!;
+    const targetChild = childId || req.childId;
+    if (!targetChild) {
+      return res.status(400).json({ error: 'childId is required.' });
+    }
+
     const normalized = normalizeAction(action);
     if (!normalized) {
       return res.status(400).json({ error: 'Unsupported activity action.' });
     }
+
+    if (req.body.timestamp) {
+      const candidate = new Date(req.body.timestamp);
+      const maxFutureMs = 5 * 60 * 1000;
+      const maxPastMs = 30 * 24 * 60 * 60 * 1000;
+      const now = Date.now();
+      if (
+        Number.isNaN(candidate.getTime()) ||
+        candidate.getTime() > now + maxFutureMs ||
+        candidate.getTime() < now - maxPastMs
+      ) {
+        return res.status(400).json({ error: 'Invalid activity timestamp. Must be a valid ISO date within the last 30 days.' });
+      }
+    }
+
     const event = await activityService.logActivity(
       targetChild,
       req.deviceId!,
@@ -85,6 +122,9 @@ activityRouter.post('/', deviceAuthMiddleware, async (req: AuthenticatedDeviceRe
     );
     res.json(event);
   } catch (e: any) {
+    if (e.message?.startsWith('Forbidden') || e.message?.includes('Forbidden')) {
+      return res.status(403).json({ error: e.message });
+    }
     res.status(400).json({ error: e.message });
   }
 });

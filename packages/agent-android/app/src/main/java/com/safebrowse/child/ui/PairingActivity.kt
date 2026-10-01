@@ -99,7 +99,7 @@ class PairingActivity : AppCompatActivity() {
             put("code", code)
             put("deviceName", "Rahul's Android Phone")
             put("platform", "android")
-            put("agentVersion", "1.0.0")
+            put("agentVersion", com.safebrowse.child.config.AgentConfig.AGENT_VERSION)
         }
 
         scope.launch {

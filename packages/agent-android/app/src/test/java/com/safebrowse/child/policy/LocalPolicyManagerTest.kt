@@ -292,4 +292,143 @@ class LocalPolicyManagerTest {
         assertEquals(false, manager.isEnrolled())
         assertEquals(false, manager.isPaired())
     }
+
+    @Test
+    fun `test Essential Allow List overrides Global Internet Pause and Study Mode`() {
+        val policy = Policy(
+            id = "pol-essential",
+            childId = "child-1",
+            version = 1,
+            isPaused = true,
+            essentialAllowList = listOf("emergency.school.org", "khanacademy.org"),
+            studyMode = StudyMode(active = true)
+        )
+        val manager = LocalPolicyManager(policy)
+
+        // Essential match is allowed despite pause and study mode
+        val decision = manager.evaluate("emergency.school.org", fixedNow)
+        assertEquals("ALLOW", decision.action)
+        assertEquals("ESSENTIAL_ALLOW", decision.reason)
+
+        // Non-essential is blocked by pause
+        val decisionBlocked = manager.evaluate("randomsite.com", fixedNow)
+        assertEquals("BLOCK", decisionBlocked.action)
+        assertEquals("PAUSED_INTERNET", decisionBlocked.reason)
+    }
+
+    @Test
+    fun `test Study Mode allows educational sites and blocks non-educational`() {
+        val policy = Policy(
+            id = "pol-study",
+            childId = "child-1",
+            version = 1,
+            isPaused = false,
+            studyMode = StudyMode(active = true, allowedCategories = listOf("EDUCATION"))
+        )
+        val manager = LocalPolicyManager(policy)
+
+        val eduDecision = manager.evaluate("wikipedia.org", fixedNow)
+        assertEquals("ALLOW", eduDecision.action)
+
+        val nonEduDecision = manager.evaluate("tiktok.com", fixedNow)
+        assertEquals("BLOCK", nonEduDecision.action)
+        assertEquals("STUDY_MODE_ACTIVE", nonEduDecision.reason)
+    }
+
+    @Test
+    fun `test Bedtime curfew blocks access during bedtime hours`() {
+        // Bedtime: 21:00 to 07:00. At 22:30 it is active.
+        val bedtimeTime = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }.parse("2026-09-17T22:30:00")!!
+
+        val daytime = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }.parse("2026-09-17T14:30:00")!!
+
+        val policy = Policy(
+            id = "pol-bedtime",
+            childId = "child-1",
+            version = 1,
+            isPaused = false,
+            bedtime = BedtimeSchedule(
+                enabled = true,
+                startHour = 21,
+                startMinute = 0,
+                endHour = 7,
+                endMinute = 0,
+                allowEducationalOnly = true
+            )
+        )
+        val manager = LocalPolicyManager(policy)
+
+        // During bedtime: non-educational blocked
+        val nightBlock = manager.evaluate("tiktok.com", bedtimeTime)
+        assertEquals("BLOCK", nightBlock.action)
+        assertEquals("BEDTIME_ACTIVE", nightBlock.reason)
+
+        // During bedtime: educational permitted
+        val nightEdu = manager.evaluate("wikipedia.org", bedtimeTime)
+        assertEquals("ALLOW", nightEdu.action)
+
+        // Outside bedtime: allowed
+        val dayAllow = manager.evaluate("tiktok.com", daytime)
+        assertEquals("ALLOW", dayAllow.action)
+    }
+
+    @Test
+    fun `test Category Controls block configured categories`() {
+        val policy = Policy(
+            id = "pol-cat",
+            childId = "child-1",
+            version = 1,
+            isPaused = false,
+            categoryControls = listOf(
+                CategoryControl(category = "GAMBLING", action = "BLOCK"),
+                CategoryControl(category = "SOCIAL_MEDIA", action = "BLOCK")
+            )
+        )
+        val manager = LocalPolicyManager(policy)
+
+        val gamblingDecision = manager.evaluate("stake.com", fixedNow)
+        assertEquals("BLOCK", gamblingDecision.action)
+        assertEquals("CATEGORY_BLOCKED", gamblingDecision.reason)
+
+        val socialDecision = manager.evaluate("instagram.com", fixedNow)
+        assertEquals("BLOCK", socialDecision.action)
+        assertEquals("CATEGORY_BLOCKED", socialDecision.reason)
+
+        val eduDecision = manager.evaluate("khanacademy.org", fixedNow)
+        assertEquals("ALLOW", eduDecision.action)
+    }
+
+    @Test
+    fun `test Usage Budget exhausts daily screen time for domain`() {
+        val policy = Policy(
+            id = "pol-budget",
+            childId = "child-1",
+            version = 1,
+            isPaused = false,
+            usageBudgets = listOf(
+                UsageBudget(
+                    id = "b-1",
+                    childId = "child-1",
+                    targetType = "DOMAIN",
+                    target = "youtube.com",
+                    dailyLimitSeconds = 1800,
+                    enabled = true
+                )
+            )
+        )
+        val manager = LocalPolicyManager(policy)
+
+        // Under limit: allowed
+        val underDecision = manager.evaluate("youtube.com", fixedNow, simulatedUsageSeconds = 1200)
+        assertEquals("ALLOW", underDecision.action)
+
+        // Over limit: blocked
+        val overDecision = manager.evaluate("youtube.com", fixedNow, simulatedUsageSeconds = 1850)
+        assertEquals("BLOCK", overDecision.action)
+        assertEquals("USAGE_LIMIT_EXHAUSTED", overDecision.reason)
+    }
 }

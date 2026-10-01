@@ -42,6 +42,37 @@ export class UsageService {
     });
     if (!child) throw new Error('Child profile not found.');
 
+    const device = await prisma.device.findUnique({
+      where: { id: deviceId },
+    });
+    if (!device) throw new Error('Device not found.');
+
+    if (device.familyId !== child.familyId) {
+      throw new Error('Forbidden: Device and child do not belong to the same family.');
+    }
+
+    if (!['APP', 'DOMAIN', 'CATEGORY'].includes(targetType)) {
+      throw new Error('Unsupported targetType. Must be APP, DOMAIN, or CATEGORY.');
+    }
+
+    if (!Number.isFinite(secondsIncrement) || secondsIncrement <= 0 || secondsIncrement > 3600) {
+      throw new Error('Invalid secondsIncrement: must be between 1 and 3600.');
+    }
+
+    if (clientWallIso) {
+      const candidate = new Date(clientWallIso);
+      const maxFutureMs = 5 * 60 * 1000;
+      const maxPastMs = 30 * 24 * 60 * 60 * 1000;
+      const now = Date.now();
+      if (
+        Number.isNaN(candidate.getTime()) ||
+        candidate.getTime() > now + maxFutureMs ||
+        candidate.getTime() < now - maxPastMs
+      ) {
+        throw new Error('Invalid clientWallIso: must be a valid ISO date within the last 30 days.');
+      }
+    }
+
     const policy = await prisma.policy.findUnique({
       where: { childId },
     });
@@ -53,7 +84,7 @@ export class UsageService {
     );
 
     const todayDate = this.getTodayDateString(budget?.timezone || 'UTC');
-    const cleanIncrement = Math.max(0, Math.min(secondsIncrement, 3600));
+    const cleanIncrement = Math.round(secondsIncrement);
 
     const existingUsage = await prisma.childUsageRecord.findUnique({
       where: {
@@ -68,6 +99,10 @@ export class UsageService {
     const now = new Date();
     const id = existingUsage ? existingUsage.id : `use-${nanoid(10)}`;
 
+    // The relational schema links a device foreign key only when device.childId === childId.
+    // Secondary mapped children remain family-validated within the same family tenancy.
+    const canLinkDevice = device.childId === childId;
+
     const usage = await prisma.childUsageRecord.upsert({
       where: {
         childId_target_date: {
@@ -80,7 +115,7 @@ export class UsageService {
         id,
         familyId: child.familyId,
         childId,
-        deviceId,
+        deviceId: canLinkDevice ? deviceId : null,
         target: target.toLowerCase(),
         date: todayDate,
         consumedSeconds: cleanIncrement,
@@ -88,7 +123,7 @@ export class UsageService {
       },
       update: {
         consumedSeconds: { increment: cleanIncrement },
-        deviceId,
+        deviceId: canLinkDevice ? deviceId : null,
         lastCheckpointTimestamp: now,
       },
     });

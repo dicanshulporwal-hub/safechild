@@ -42,7 +42,7 @@ class SyncWorker(appContext: Context, workerParams: WorkerParameters) :
             put("activePolicyVersion", activeVersion)
             put("enforcementActive", true)
             put("platform", "android")
-            put("agentVersion", "1.0.0")
+            put("agentVersion", com.safebrowse.child.config.AgentConfig.AGENT_VERSION)
         }
 
         try {

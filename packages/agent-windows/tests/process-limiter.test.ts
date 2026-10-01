@@ -244,4 +244,135 @@ describe('SafeBrowse Windows Process Limiter & Hard Enforcer Tests', () => {
     const remainingRunning = await limiter.getRunningProcessNames();
     assert.deepStrictEqual(remainingRunning, ['chrome.exe', 'spotify.exe']);
   });
+
+  it('11. should send delta-only increments (30 + 30 + 30 = 90 sec, never cumulative 180 sec)', async () => {
+    let policy = createBasePolicy();
+    const sentDeltas: number[] = [];
+
+    // Mock fetch for syncUsageToBackend
+    const originalFetch = global.fetch;
+    (global as any).fetch = async (url: string, init: any) => {
+      if (url.includes('/api/usage/session')) {
+        const body = JSON.parse(init.body);
+        sentDeltas.push(body.durationSeconds);
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    };
+
+    try {
+      const limiter = new WindowsProcessLimiter(mockConfig, () => policy, {
+        simulate: true,
+        getActiveUserPolicy: () => ({
+          accountName: 'DESKTOP\\Rahul',
+          sid: 'S-1-5-21-1000',
+          isManaged: true,
+          childId: 'child-test',
+          childName: 'Rahul',
+          policyVersion: 1,
+        }),
+      });
+
+      const today = new Date().toISOString().slice(0, 10);
+
+      // Step 1: 30s consumed
+      limiter.setUsageState('robloxplayerbeta.exe', {
+        processName: 'robloxplayerbeta.exe',
+        consumedSeconds: 30,
+        lastDate: today,
+        warned5Min: false,
+        warned1Min: false,
+      });
+      await limiter.syncUsageToBackend();
+      assert.deepStrictEqual(sentDeltas, [30], 'First sync should send delta of 30');
+
+      // Step 2: another 30s consumed (total consumed is now 60s)
+      const state2 = limiter.getUsageState('robloxplayerbeta.exe')!;
+      state2.consumedSeconds = 60;
+      limiter.setUsageState('robloxplayerbeta.exe', state2);
+      await limiter.syncUsageToBackend();
+      assert.deepStrictEqual(sentDeltas, [30, 30], 'Second sync should send delta of 30, NOT cumulative 60');
+
+      // Step 3: another 30s consumed (total consumed is now 90s)
+      const state3 = limiter.getUsageState('robloxplayerbeta.exe')!;
+      state3.consumedSeconds = 90;
+      limiter.setUsageState('robloxplayerbeta.exe', state3);
+      await limiter.syncUsageToBackend();
+      assert.deepStrictEqual(sentDeltas, [30, 30, 30], 'Third sync should send delta of 30, NOT cumulative 90');
+
+      const totalReceived = sentDeltas.reduce((a, b) => a + b, 0);
+      assert.strictEqual(totalReceived, 90, 'Total backend received should be 90s, NOT 180s');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('12. should NOT advance checkpoint on failed backend upload, sending only unsent delta on retry', async () => {
+    let policy = createBasePolicy();
+    const sentDeltas: number[] = [];
+    let simulateFailure = true;
+
+    const originalFetch = global.fetch;
+    (global as any).fetch = async (url: string, init: any) => {
+      if (url.includes('/api/usage/session')) {
+        const body = JSON.parse(init.body);
+        sentDeltas.push(body.durationSeconds);
+        if (simulateFailure) {
+          return { ok: false, status: 503, json: async () => ({ error: 'Service Unavailable' }) };
+        }
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    };
+
+    try {
+      const limiter = new WindowsProcessLimiter(mockConfig, () => policy, {
+        simulate: true,
+        getActiveUserPolicy: () => ({
+          accountName: 'DESKTOP\\Rahul',
+          sid: 'S-1-5-21-1000',
+          isManaged: true,
+          childId: 'child-test',
+          childName: 'Rahul',
+          policyVersion: 1,
+        }),
+      });
+
+      const today = new Date().toISOString().slice(0, 10);
+
+      // Consumed 30s, upload fails
+      limiter.setUsageState('robloxplayerbeta.exe', {
+        processName: 'robloxplayerbeta.exe',
+        consumedSeconds: 30,
+        lastDate: today,
+        warned5Min: false,
+        warned1Min: false,
+      });
+
+      await limiter.syncUsageToBackend();
+      assert.strictEqual(sentDeltas.length, 1);
+      assert.strictEqual(sentDeltas[0], 30);
+
+      const stateAfterFail = limiter.getUsageState('robloxplayerbeta.exe')!;
+      assert.strictEqual(stateAfterFail.lastSyncedSeconds ?? 0, 0, 'Checkpoint must NOT advance after failed upload');
+
+      // Now more time passes, total consumed is 50s. Backend recovers.
+      simulateFailure = false;
+      stateAfterFail.consumedSeconds = 50;
+      limiter.setUsageState('robloxplayerbeta.exe', stateAfterFail);
+
+      await limiter.syncUsageToBackend();
+      assert.strictEqual(sentDeltas.length, 2);
+      assert.strictEqual(sentDeltas[1], 50, 'Retry sends full unsent delta (50s - 0s)');
+
+      const stateAfterSuccess = limiter.getUsageState('robloxplayerbeta.exe')!;
+      assert.strictEqual(stateAfterSuccess.lastSyncedSeconds, 50, 'Checkpoint advances to 50s after success');
+
+      // No new time used: next sync sends nothing
+      await limiter.syncUsageToBackend();
+      assert.strictEqual(sentDeltas.length, 2, 'No redundant request sent when delta is 0');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
 });

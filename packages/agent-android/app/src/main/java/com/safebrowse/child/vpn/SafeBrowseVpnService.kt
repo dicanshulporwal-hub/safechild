@@ -1,11 +1,28 @@
 package com.safebrowse.child.vpn
 
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import com.google.gson.Gson
+import com.safebrowse.child.config.AgentConfig
 import com.safebrowse.child.policy.LocalPolicyManager
+import com.safebrowse.child.policy.Policy
+import com.safebrowse.child.telemetry.ActivityTelemetryManager
 import com.safebrowse.child.ui.BlockScreenActivity
+import com.safebrowse.child.usage.UsageTracker
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.DatagramPacket
@@ -24,6 +41,9 @@ class SafeBrowseVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var isRunning = false
     private lateinit var policyManager: LocalPolicyManager
+    private lateinit var activityTelemetry: ActivityTelemetryManager
+    private lateinit var usageTracker: UsageTracker
+    private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     companion object {
         const val TAG = "SafeBrowseVPN"
@@ -34,6 +54,8 @@ class SafeBrowseVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         policyManager = LocalPolicyManager(applicationContext)
+        activityTelemetry = ActivityTelemetryManager.getInstance(applicationContext)
+        usageTracker = UsageTracker.getInstance(applicationContext)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -46,6 +68,10 @@ class SafeBrowseVpnService : VpnService() {
 
     private fun startVpnTunnel() {
         try {
+            activityTelemetry.start()
+            usageTracker.start()
+            startHeartbeatLoop()
+
             val builder = Builder()
                 .setSession("SafeBrowse Child Protection")
                 .addAddress("10.240.0.2", 32)
@@ -120,11 +146,26 @@ class SafeBrowseVpnService : VpnService() {
 
                         if (decision.action == "BLOCK") {
                             Log.w(TAG, "🚫 [VpnService] BLOCKED: $domain (Reason: ${decision.reason})")
+                            activityTelemetry.recordEvent(
+                                domain = domain,
+                                action = "BLOCKED",
+                                category = decision.category,
+                                reason = decision.reason
+                            )
                             val blockDnsPacket = buildSyntheticNxDomain(packet, headerLength, length)
                             outputStream.write(blockDnsPacket)
                             notifyBlockedAccess(domain)
                             return
                         } else if (decision.rewriteIp != null) {
+                            val act = if (decision.reason == "TEMPORARY_ALLOW") "TEMPORARY_ACCESSED" else "ALLOWED"
+                            activityTelemetry.recordEvent(
+                                domain = domain,
+                                action = act,
+                                category = decision.category,
+                                reason = decision.reason
+                            )
+                            usageTracker.recordDomainAccess(domain, decision.category)
+
                             if (query.qType == 28) {
                                 // AAAA (IPv6) query: synthesize authoritative NODATA response so client uses IPv4 VIP
                                 Log.i(TAG, "🔒 [VpnService] SAFESEARCH ENFORCED (AAAA NODATA): $domain")
@@ -139,6 +180,15 @@ class SafeBrowseVpnService : VpnService() {
                                 return
                             }
                         } else {
+                            val act = if (decision.reason == "TEMPORARY_ALLOW") "TEMPORARY_ACCESSED" else "ALLOWED"
+                            activityTelemetry.recordEvent(
+                                domain = domain,
+                                action = act,
+                                category = decision.category,
+                                reason = decision.reason
+                            )
+                            usageTracker.recordDomainAccess(domain, decision.category)
+
                             Log.d(TAG, "✅ [VpnService] ALLOWED: $domain -> Forwarding to protected upstream")
                             forwardAllowedDnsQuery(packet, headerLength, length, outputStream)
                             return
@@ -398,9 +448,83 @@ class SafeBrowseVpnService : VpnService() {
         startActivity(intent)
     }
 
+    private fun startHeartbeatLoop() {
+        serviceScope.launch {
+            val httpClient = OkHttpClient()
+            while (isRunning) {
+                try {
+                    val prefs = applicationContext.getSharedPreferences("safebrowse_device", Context.MODE_PRIVATE)
+                    val deviceId = prefs.getString("device_id", null)
+                    val deviceToken = prefs.getString("device_token", null)
+                    val backendUrl = AgentConfig.getBackendUrl(applicationContext)
+
+                    if (!deviceId.isNullOrBlank() && !deviceToken.isNullOrBlank()) {
+                        val activeVersion = policyManager.getPolicy()?.version ?: 1
+                        val hasAppUsage = UsageTracker.hasUsageStatsPermission(applicationContext)
+
+                        val payload = JSONObject().apply {
+                            put("deviceId", deviceId)
+                            put("deviceToken", deviceToken)
+                            put("activePolicyVersion", activeVersion)
+                            put("enforcementActive", true)
+                            put("platform", "android")
+                            put("agentVersion", AgentConfig.AGENT_VERSION)
+                            put("protectionStatus", "ACTIVE")
+                            put("capabilities", JSONObject().apply {
+                                put("appUsageAvailable", hasAppUsage)
+                                put("dnsFiltering", true)
+                                put("safeSearch", true)
+                                put("studyMode", true)
+                                put("bedtime", true)
+                                put("categories", true)
+                            })
+                        }
+
+                        val body = payload.toString().toRequestBody("application/json".toMediaType())
+                        val request = Request.Builder()
+                            .url("$backendUrl/api/devices/heartbeat")
+                            .addHeader("x-device-id", deviceId)
+                            .addHeader("x-device-token", deviceToken)
+                            .post(body)
+                            .build()
+
+                        val res = httpClient.newCall(request).execute()
+                        if (res.isSuccessful) {
+                            val resJson = JSONObject(res.body?.string() ?: "{}")
+                            if (resJson.optBoolean("policyChanged", false)) {
+                                val pReq = Request.Builder()
+                                    .url("$backendUrl/api/policies/device/$deviceId")
+                                    .addHeader("x-device-id", deviceId)
+                                    .addHeader("x-device-token", deviceToken)
+                                    .get()
+                                    .build()
+                                val pRes = httpClient.newCall(pReq).execute()
+                                if (pRes.isSuccessful) {
+                                    val pData = JSONObject(pRes.body?.string() ?: "{}")
+                                    val updatedPolicy = Gson().fromJson(
+                                        pData.getJSONObject("policy").toString(),
+                                        Policy::class.java
+                                    )
+                                    policyManager.savePolicy(updatedPolicy)
+                                    Log.i(TAG, "Dynamic policy update applied (v${updatedPolicy.version})")
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Heartbeat deferred: ${e.message}")
+                }
+                delay(45_000)
+            }
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         isRunning = false
+        serviceScope.cancel()
+        activityTelemetry.stop()
+        usageTracker.stop()
         vpnInterface?.close()
         vpnInterface = null
         Log.i(TAG, "SafeBrowse VPN Service stopped.")

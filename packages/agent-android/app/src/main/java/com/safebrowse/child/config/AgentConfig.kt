@@ -10,6 +10,8 @@ import java.net.URI
  */
 object AgentConfig {
 
+    const val AGENT_VERSION = "1.0.3-pilot"
+
     /**
      * Build-time configured default API base URL.
      * Evaluated once and cached. Throws IllegalArgumentException if malformed.

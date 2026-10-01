@@ -50,6 +50,8 @@ export class ActivityService {
         candidate.getTime() >= now.getTime() - maxPastMs
       ) {
         eventTimestamp = candidate;
+      } else {
+        throw new Error('Invalid activity timestamp: must be within the last 30 days.');
       }
     }
 

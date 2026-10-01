@@ -160,7 +160,7 @@ test('SafeBrowse Windows Pilot v1.0 — Device Management & Multi-Session Safety
 
       assert.ok(capturedHeartbeat, 'Heartbeat was received by backend');
       assert.strictEqual(capturedHeartbeat.deviceId, 'dev-pilot-test-1');
-      assert.strictEqual(capturedHeartbeat.agentVersion, '1.0.0-pilot');
+      assert.strictEqual(capturedHeartbeat.agentVersion, '1.0.3-pilot');
       assert.strictEqual(capturedHeartbeat.mappedAccountName, 'DESKTOP-PC\\Rahul');
       assert.strictEqual(capturedHeartbeat.hasMultipleSessions, true);
       assert.strictEqual(capturedHeartbeat.protectionStatus, 'DEGRADED');

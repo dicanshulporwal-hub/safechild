@@ -19,6 +19,9 @@ requestRouter.post('/', deviceAuthMiddleware, async (req: AuthenticatedDeviceReq
     const request = await requestService.createRequest(req.childId!, req.deviceId!, domain, reason);
     res.json(request);
   } catch (e: any) {
+    if (e.message?.startsWith('Forbidden') || e.message?.includes('Forbidden')) {
+      return res.status(403).json({ error: e.message });
+    }
     res.status(400).json({ error: e.message });
   }
 });

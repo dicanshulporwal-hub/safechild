@@ -37,6 +37,12 @@ export class RequestService {
     if (!child || !child.familyId) {
       throw new Error('Mandatory tenancy error: Child profile not found or has no valid family.');
     }
+    if (!device) {
+      throw new Error('Device not found.');
+    }
+    if (device.familyId !== child.familyId) {
+      throw new Error('Forbidden: Device and child do not belong to the same family.');
+    }
 
     const id = `req-${nanoid(10)}`;
     const now = new Date();

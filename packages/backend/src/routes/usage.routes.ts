@@ -180,16 +180,44 @@ usageRouter.post('/sync', deviceAuthMiddleware, async (req: AuthenticatedDeviceR
     if (!target || !targetType || secondsIncrement === undefined) {
       return res.status(400).json({ error: 'Missing required sync fields: target, targetType, secondsIncrement.' });
     }
+    const cleanTargetType = (targetType as string).toUpperCase();
+    if (!['APP', 'DOMAIN', 'CATEGORY'].includes(cleanTargetType)) {
+      return res.status(400).json({ error: 'Unsupported targetType. Must be APP, DOMAIN, or CATEGORY.' });
+    }
+    const increment = Number(secondsIncrement);
+    if (!Number.isFinite(increment) || increment <= 0 || increment > 3600) {
+      return res.status(400).json({ error: 'secondsIncrement must be a number between 1 and 3600.' });
+    }
+    if (clientWallIso) {
+      const candidate = new Date(clientWallIso);
+      const maxFutureMs = 5 * 60 * 1000;
+      const maxPastMs = 30 * 24 * 60 * 60 * 1000;
+      const now = Date.now();
+      if (
+        Number.isNaN(candidate.getTime()) ||
+        candidate.getTime() > now + maxFutureMs ||
+        candidate.getTime() < now - maxPastMs
+      ) {
+        return res.status(400).json({ error: 'Invalid clientWallIso. Must be a valid ISO date within the last 30 days.' });
+      }
+    }
+    const targetChild = req.body.childId || req.childId;
+    if (!targetChild) {
+      return res.status(400).json({ error: 'childId is required.' });
+    }
     const result = await usageService.recordUsageSync(
-      req.childId!,
+      targetChild,
       req.deviceId!,
       target,
-      targetType,
-      Number(secondsIncrement),
+      cleanTargetType as any,
+      increment,
       clientWallIso
     );
     res.json(result);
   } catch (e: any) {
+    if (e.message?.startsWith('Forbidden') || e.message?.includes('Forbidden')) {
+      return res.status(403).json({ error: e.message });
+    }
     res.status(400).json({ error: e.message });
   }
 });
@@ -201,16 +229,40 @@ usageRouter.post('/session', deviceAuthMiddleware, async (req: AuthenticatedDevi
     if (!appName || durationSeconds === undefined) {
       return res.status(400).json({ error: 'Missing required session fields: appName, durationSeconds.' });
     }
+    const duration = Number(durationSeconds);
+    if (!Number.isFinite(duration) || duration <= 0 || duration > 3600) {
+      return res.status(400).json({ error: 'durationSeconds must be a number between 1 and 3600.' });
+    }
+    if (clientWallIso) {
+      const candidate = new Date(clientWallIso);
+      const maxFutureMs = 5 * 60 * 1000;
+      const maxPastMs = 30 * 24 * 60 * 60 * 1000;
+      const now = Date.now();
+      if (
+        Number.isNaN(candidate.getTime()) ||
+        candidate.getTime() > now + maxFutureMs ||
+        candidate.getTime() < now - maxPastMs
+      ) {
+        return res.status(400).json({ error: 'Invalid clientWallIso. Must be a valid ISO date within the last 30 days.' });
+      }
+    }
+    const targetChild = req.body.childId || req.childId;
+    if (!targetChild) {
+      return res.status(400).json({ error: 'childId is required.' });
+    }
     const result = await usageService.recordUsageSync(
-      req.childId!,
+      targetChild,
       req.deviceId!,
       appName,
       'APP',
-      Number(durationSeconds),
+      duration,
       clientWallIso
     );
     res.json(result);
   } catch (e: any) {
+    if (e.message?.startsWith('Forbidden') || e.message?.includes('Forbidden')) {
+      return res.status(403).json({ error: e.message });
+    }
     res.status(400).json({ error: e.message });
   }
 });
