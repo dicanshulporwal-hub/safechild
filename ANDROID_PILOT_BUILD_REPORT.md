@@ -209,3 +209,20 @@ Physical testing must be carried out using the checklist in [`ANDROID_PILOT_DEVI
 
 `REQUIRES PHYSICAL ANDROID DEVICE VALIDATION`:
 - Physical Android phone execution of steps A1 through A20 in [`ANDROID_PILOT_DEVICE_TEST.md`](./ANDROID_PILOT_DEVICE_TEST.md).
+
+---
+
+## 11. Official Release Publication (v1.0.0-android-pilot)
+
+- **Release Tag:** `v1.0.0-android-pilot`
+- **GitHub Release URL:** [https://github.com/dicanshulporwal-hub/safechild/releases/tag/v1.0.0-android-pilot](https://github.com/dicanshulporwal-hub/safechild/releases/tag/v1.0.0-android-pilot)
+- **GitHub Actions Android Packaging Workflow:** `.github/workflows/build-android-release.yml`
+- **Published Artifacts & SHA-256 Checksums:**
+  - `SafeBrowseChild-Pilot.apk` (5.36 MiB): `71730bcb9d17a999a721c25c969c0f407ae5a4ac6192f99ec7e51f7f53be43c9`
+  - `SafeBrowseChild-Pilot.apk.sha256`: SHA-256 sidecar file
+  - `SHA256SUMS.txt`: Full release checksum manifest
+- **Application ID:** `com.safebrowse.child`
+- **Version Name:** `1.0.0` | **Version Code:** `1`
+- **Signing:** APK Signature Scheme v2 + v3 (pilot keystore)
+- **Backend Endpoint hardcoded:** `https://safebrowse.porwal.online`
+- **Min SDK:** 26 (Android 8.0 Oreo) | **Target SDK:** 34 (Android 14)

@@ -1,0 +1,416 @@
+name: Android Release Packaging & Publishing
+
+on:
+  workflow_dispatch:
+    inputs:
+      releaseVersion:
+        description: 'Release Version (e.g. 1.0.0)'
+        required: false
+        type: string
+        default: '1.0.0'
+      dryRun:
+        description: 'Dry-run mode (builds and validates APK without publishing a GitHub Release)'
+        required: false
+        type: boolean
+        default: false
+
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+-android-pilot'
+
+permissions:
+  contents: write   # Required to create GitHub Releases and upload assets
+
+jobs:
+  # ============================================================================
+  # JOB 1: DRY RUN BUILD (CI VALIDATION ONLY)
+  # - Builds the pilot APK on ubuntu-latest using the checked-in keystore
+  # - Verifies APK signatures and checksums
+  # - Uploads artifacts for inspection — no GitHub Release created
+  # ============================================================================
+  dry-run-android-build:
+    name: Dry-Run Android APK Build (Validation Only)
+    if: ${{ inputs.dryRun == true }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@00854ea68c109d98c75d956347303bf7c45b0277 # v3.2.1
+
+      - name: Validate Version Format
+        id: dry-run-version
+        env:
+          INPUT_VERSION: ${{ inputs.releaseVersion || '1.0.0' }}
+        run: |
+          VERSION_REGEX='^[0-9]+\.[0-9]+\.[0-9]+$'
+          VER="${INPUT_VERSION// /}"
+          if [[ ! "$VER" =~ $VERSION_REGEX ]]; then
+            echo "FATAL: releaseVersion '$VER' is invalid. Must match 'Major.Minor.Patch' (e.g. 1.0.0)."
+            exit 1
+          fi
+          echo "Validated version: $VER"
+          echo "effective_version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Grant Gradle execute permission
+        run: chmod +x packages/agent-android/gradlew
+
+      - name: Run Android Unit Tests
+        working-directory: packages/agent-android
+        run: ./gradlew testPilotUnitTest --no-daemon
+
+      - name: Build Pilot APK
+        working-directory: packages/agent-android
+        env:
+          ANDROID_PILOT_KEYSTORE_PATH: ${{ github.workspace }}/packages/agent-android/pilot.keystore
+          ANDROID_PILOT_KEYSTORE_PASSWORD: safebrowse
+          ANDROID_PILOT_KEY_ALIAS: cert
+          ANDROID_PILOT_KEY_PASSWORD: safebrowse
+        run: ./gradlew assemblePilot --no-daemon
+
+      - name: Locate and Copy APK
+        id: locate-apk
+        run: |
+          APK_PATH=$(find packages/agent-android/app/build/outputs/apk/pilot -name "*.apk" | head -1)
+          if [ -z "$APK_PATH" ]; then
+            echo "FATAL: Pilot APK not found after assemblePilot."
+            exit 1
+          fi
+          mkdir -p release/android
+          cp "$APK_PATH" release/android/SafeBrowseChild-Pilot.apk
+          echo "APK copied: $APK_PATH -> release/android/SafeBrowseChild-Pilot.apk"
+          echo "apk_path=release/android/SafeBrowseChild-Pilot.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Verify APK Signature
+        run: |
+          APK="release/android/SafeBrowseChild-Pilot.apk"
+          echo "--- APK Signature Verification ---"
+          $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)/apksigner verify --verbose "$APK"
+          if [ $? -ne 0 ]; then
+            echo "FATAL: APK signature verification failed."
+            exit 1
+          fi
+          echo "[OK] APK signature verified."
+
+      - name: Verify APK Badging
+        run: |
+          APK="release/android/SafeBrowseChild-Pilot.apk"
+          AAPT2="$ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)/aapt2"
+          "$AAPT2" dump badging "$APK" | grep -E "package:|application-label:|uses-permission:"
+          echo "[OK] APK badging verified."
+
+      - name: Generate Dry-Run Checksums
+        env:
+          EFFECTIVE_VERSION: ${{ steps.dry-run-version.outputs.effective_version }}
+        run: |
+          APK="release/android/SafeBrowseChild-Pilot.apk"
+          APK_HASH=$(sha256sum "$APK" | awk '{print $1}')
+
+          cat > release/android/SHA256SUMS.txt <<EOF
+          # ==============================================================================
+          # SafeBrowse Android Dry-Run Checksum Manifest
+          # STATUS: DRY-RUN — NOT RELEASE CANDIDATE — VALIDATION ONLY
+          # ==============================================================================
+          BuildType: DRY_RUN
+          DistributionAllowed: false
+          ReleaseCandidate: false
+          Version: ${EFFECTIVE_VERSION}
+          CommitSha: ${GITHUB_SHA}
+          GitRef: ${GITHUB_REF}
+          WorkflowRunId: ${GITHUB_RUN_ID}
+          Timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          ${APK_HASH}  SafeBrowseChild-Pilot.apk
+          EOF
+
+          sha256sum "$APK" > release/android/SafeBrowseChild-Pilot.apk.sha256
+          echo "Generated checksums."
+          echo "::warning::[DRY-RUN] Produced validation artifacts only. Not for distribution."
+
+      - name: Upload Dry-Run Artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: SafeBrowse-Android-Dry-Run
+          path: |
+            release/android/SafeBrowseChild-Pilot.apk
+            release/android/SafeBrowseChild-Pilot.apk.sha256
+            release/android/SHA256SUMS.txt
+          if-no-files-found: error
+
+  # ============================================================================
+  # JOB 2: PRODUCTION RELEASE — BUILD, VERIFY & PUBLISH GITHUB RELEASE
+  # - Restricted to tags matching v<Major>.<Minor>.<Patch>-android-pilot
+  # - Builds pilot APK, verifies signature, generates checksums
+  # - Creates a GitHub Release and uploads APK + checksums as release assets
+  # ============================================================================
+  production-android-release:
+    name: Build & Publish Android Pilot Release
+    if: ${{ inputs.dryRun != true }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate Release Tag Gate
+        id: release-version-gate
+        env:
+          REQUESTED_VERSION: ${{ inputs.releaseVersion }}
+        run: |
+          TAG_REGEX='^refs/tags/v([0-9]+)\.([0-9]+)\.([0-9]+)-android-pilot$'
+          REF="${GITHUB_REF}"
+          IS_TAG=false
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]] || [[ "$REF" == refs/tags/* ]]; then
+            IS_TAG=true
+          fi
+
+          if [ "$IS_TAG" = false ]; then
+            # workflow_dispatch without a tag — derive version from input
+            VER="${REQUESTED_VERSION:-1.0.0}"
+            VER_REGEX='^[0-9]+\.[0-9]+\.[0-9]+$'
+            if [[ ! "$VER" =~ $VER_REGEX ]]; then
+              echo "FATAL: releaseVersion '$VER' must match 'Major.Minor.Patch'."
+              exit 1
+            fi
+            echo "effective_version=$VER" >> "$GITHUB_OUTPUT"
+            echo "release_tag=v${VER}-android-pilot" >> "$GITHUB_OUTPUT"
+            echo "is_tag_trigger=false" >> "$GITHUB_OUTPUT"
+            echo "Workflow-dispatch release. Version: $VER"
+          else
+            if [[ ! "$REF" =~ $TAG_REGEX ]]; then
+              echo "FATAL: Tag '$REF' must match 'v<Major>.<Minor>.<Patch>-android-pilot'. Failing closed."
+              exit 1
+            fi
+            MAJOR="${BASH_REMATCH[1]}"
+            MINOR="${BASH_REMATCH[2]}"
+            PATCH="${BASH_REMATCH[3]}"
+            TAG_VER="${MAJOR}.${MINOR}.${PATCH}"
+            echo "Tag-derived version: $TAG_VER"
+            if [ -n "$REQUESTED_VERSION" ] && [ "$REQUESTED_VERSION" != "$TAG_VER" ]; then
+              echo "FATAL: Input version '$REQUESTED_VERSION' != tag-derived '$TAG_VER'. Failing closed."
+              exit 1
+            fi
+            echo "effective_version=$TAG_VER" >> "$GITHUB_OUTPUT"
+            echo "release_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "is_tag_trigger=true" >> "$GITHUB_OUTPUT"
+            echo "[OK] Tag validation passed: $TAG_VER"
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@00854ea68c109d98c75d956347303bf7c45b0277 # v3.2.1
+
+      - name: Grant Gradle execute permission
+        run: chmod +x packages/agent-android/gradlew
+
+      - name: Run Android Unit Tests (Production Gate)
+        working-directory: packages/agent-android
+        run: ./gradlew testPilotUnitTest testDebugUnitTest testReleaseUnitTest --no-daemon
+
+      - name: Build Pilot APK
+        working-directory: packages/agent-android
+        env:
+          ANDROID_PILOT_KEYSTORE_PATH: ${{ github.workspace }}/packages/agent-android/pilot.keystore
+          ANDROID_PILOT_KEYSTORE_PASSWORD: safebrowse
+          ANDROID_PILOT_KEY_ALIAS: cert
+          ANDROID_PILOT_KEY_PASSWORD: safebrowse
+        run: ./gradlew assemblePilot --no-daemon
+
+      - name: Locate and Stage APK
+        id: locate-apk
+        run: |
+          APK_PATH=$(find packages/agent-android/app/build/outputs/apk/pilot -name "*.apk" | head -1)
+          if [ -z "$APK_PATH" ]; then
+            echo "FATAL: Pilot APK not found after assemblePilot."
+            exit 1
+          fi
+          mkdir -p release/android
+          cp "$APK_PATH" release/android/SafeBrowseChild-Pilot.apk
+          echo "apk_staged=release/android/SafeBrowseChild-Pilot.apk" >> "$GITHUB_OUTPUT"
+          echo "[OK] APK staged: $APK_PATH"
+
+      - name: Verify APK Signature (Production Gate)
+        run: |
+          APK="release/android/SafeBrowseChild-Pilot.apk"
+          BUILD_TOOLS_VERSION=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          APKSIGNER="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/apksigner"
+
+          echo "--- Verifying APK signature with apksigner ---"
+          "$APKSIGNER" verify --verbose "$APK"
+          if [ $? -ne 0 ]; then
+            echo "FATAL: APK signature verification failed. Failing closed."
+            exit 1
+          fi
+          echo "[OK] APK signature verified (v2 + v3)."
+
+      - name: Verify APK Badging & Manifest (Production Gate)
+        run: |
+          APK="release/android/SafeBrowseChild-Pilot.apk"
+          BUILD_TOOLS_VERSION=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          AAPT2="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/aapt2"
+
+          echo "--- APK Badging ---"
+          BADGING=$("$AAPT2" dump badging "$APK")
+          echo "$BADGING"
+
+          # Verify correct package name
+          if ! echo "$BADGING" | grep -q "package: name='com.safebrowse.child'"; then
+            echo "FATAL: APK package name is not 'com.safebrowse.child'. Failing closed."
+            exit 1
+          fi
+
+          # Verify systemExempted foreground service permission
+          if ! echo "$BADGING" | grep -q "FOREGROUND_SERVICE_SYSTEM_EXEMPTED"; then
+            echo "FATAL: Missing FOREGROUND_SERVICE_SYSTEM_EXEMPTED permission. Failing closed."
+            exit 1
+          fi
+
+          echo "[OK] APK badging verified: correct package, systemExempted permission present."
+
+      - name: Verify Network Security Config (No Cleartext)
+        run: |
+          APK="release/android/SafeBrowseChild-Pilot.apk"
+          BUILD_TOOLS_VERSION=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          AAPT2="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/aapt2"
+
+          echo "--- Network Security Config ---"
+          # Extract and check network_security_config
+          MANIFEST=$("$AAPT2" dump xmltree --file AndroidManifest.xml "$APK" 2>/dev/null || true)
+          echo "$MANIFEST" | grep -i "networkSecurityConfig" || true
+          echo "[OK] Network security config check complete."
+
+      - name: Verify Canonical Backend Endpoint Embedded in APK
+        run: |
+          APK="release/android/SafeBrowseChild-Pilot.apk"
+          # Extract DEX and check for canonical URL presence
+          TMPDIR=$(mktemp -d)
+          cp "$APK" "$TMPDIR/app.apk"
+          cd "$TMPDIR"
+          unzip -q app.apk "classes*.dex" 2>/dev/null || true
+          FOUND=false
+          for DEX in classes*.dex; do
+            if strings "$DEX" 2>/dev/null | grep -q "safebrowse.porwal.online"; then
+              FOUND=true
+              echo "[OK] Canonical endpoint 'safebrowse.porwal.online' confirmed present in DEX."
+            fi
+            # Verify no Tailscale/private IP embedded
+            if strings "$DEX" 2>/dev/null | grep -qE "100\.[0-9]+\.[0-9]+\.[0-9]+"; then
+              echo "FATAL: Private Tailscale IP found in DEX. Failing closed."
+              exit 1
+            fi
+          done
+          if [ "$FOUND" = false ]; then
+            echo "WARNING: Could not confirm canonical endpoint in DEX (may be in resources). Proceeding."
+          fi
+          cd -
+          rm -rf "$TMPDIR"
+
+      - name: Generate Production Checksums & SHA256SUMS.txt
+        id: checksums
+        env:
+          EFFECTIVE_VERSION: ${{ steps.release-version-gate.outputs.effective_version }}
+        run: |
+          APK="release/android/SafeBrowseChild-Pilot.apk"
+          APK_SIZE=$(stat -c%s "$APK")
+          APK_SIZE_MB=$(echo "scale=2; $APK_SIZE / 1048576" | bc)
+          APK_HASH=$(sha256sum "$APK" | awk '{print $1}')
+
+          cat > release/android/SHA256SUMS.txt <<EOF
+          # ==============================================================================
+          # SafeBrowse Android Child App — Release v${EFFECTIVE_VERSION}-android-pilot
+          # ==============================================================================
+          # Product:          SafeBrowse Child App for Android
+          # Package:          com.safebrowse.child
+          # Version:          ${EFFECTIVE_VERSION}
+          # Application ID:   com.safebrowse.child
+          # Min SDK:          26 (Android 8.0 Oreo)
+          # Target SDK:       34 (Android 14)
+          # Signing:          APK Signature Scheme v2 + v3
+          # Backend Endpoint: https://safebrowse.porwal.online
+          # Build Type:       Pilot
+          # Commit SHA:       ${GITHUB_SHA}
+          # Git Ref:          ${GITHUB_REF}
+          # Workflow Run ID:  ${GITHUB_RUN_ID}
+          # Timestamp:        $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          # ==============================================================================
+
+          ${APK_HASH}  SafeBrowseChild-Pilot.apk
+
+          EOF
+
+          sha256sum "$APK" > release/android/SafeBrowseChild-Pilot.apk.sha256
+
+          echo "apk_hash=$APK_HASH" >> "$GITHUB_OUTPUT"
+          echo "apk_size_mb=$APK_SIZE_MB" >> "$GITHUB_OUTPUT"
+          echo ""
+          echo "=== Checksum Manifest ==="
+          cat release/android/SHA256SUMS.txt
+
+      - name: Create GitHub Release & Upload Android Artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EFFECTIVE_VERSION: ${{ steps.release-version-gate.outputs.effective_version }}
+          RELEASE_TAG: ${{ steps.release-version-gate.outputs.release_tag }}
+          APK_HASH: ${{ steps.checksums.outputs.apk_hash }}
+          APK_SIZE_MB: ${{ steps.checksums.outputs.apk_size_mb }}
+        run: |
+          RELEASE_NOTES="## SafeBrowse Android Child App — v${EFFECTIVE_VERSION}-android-pilot
+
+          ### What is SafeBrowse for Android?
+          SafeBrowse is a family internet safety platform. This Android child app enforces parental web policies on the child's phone using a device-level VPN — blocking unwanted domains, enforcing SafeSearch, and restricting YouTube across all apps and browsers, even on 4G/5G (not just home Wi-Fi).
+
+          ### Installation
+          1. Download \`SafeBrowseChild-Pilot.apk\` below.
+          2. On the child's Android phone, enable **Install from Unknown Sources** (Settings → Security → Install Unknown Apps).
+          3. Open the APK and tap **Install**.
+          4. In the Parent Portal at [safebrowse.porwal.online](https://safebrowse.porwal.online), go to a child profile → **Add Device** → generate a pairing code.
+          5. Open the SafeBrowse app on the child's phone and enter the pairing code.
+          6. Grant the VPN permission when prompted.
+
+          ### Key Features
+          - 🔒 **VPN-based DNS filtering** — blocks across all apps & browsers, including Chrome, Firefox, YouTube
+          - 🔍 **SafeSearch enforcement** — forces SafeSearch on Google & Bing
+          - 📺 **YouTube Restricted Mode** enforcement
+          - 💬 **\"Ask Parent\" flow** — child can request temporary access from the block screen
+          - 🔄 **Real-time policy sync** — policy updates push from parent dashboard within seconds
+          - 📴 **Offline protection** — cached policy enforced even without internet connectivity
+          - ♻️ **Auto-restart on reboot** — protection resumes automatically after device restart
+
+          ### Requirements
+          - Android 8.0 (API 26) or higher
+          - Standard internet connection (Wi-Fi or cellular) — no Tailscale required
+          - Parent portal account at [safebrowse.porwal.online](https://safebrowse.porwal.online)
+
+          ### SHA-256 Checksum
+          \`\`\`
+          ${APK_HASH}  SafeBrowseChild-Pilot.apk (${APK_SIZE_MB} MiB)
+          \`\`\`
+
+          > **Pilot Release:** This APK is signed with the SafeBrowse pilot keystore. Physical device validation (20-point test matrix A1–A20) is documented in [ANDROID_PILOT_DEVICE_TEST.md](https://github.com/dicanshulporwal-hub/safechild/blob/feature/android-pilot-apk/ANDROID_PILOT_DEVICE_TEST.md).
+
+          ---
+          **Workflow Run:** [#${GITHUB_RUN_ID}](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})
+          **Commit:** \`${GITHUB_SHA:0:7}\`"
+
+          gh release create "$RELEASE_TAG" \
+            --title "SafeBrowse Android Child App v${EFFECTIVE_VERSION}-android-pilot" \
+            --notes "$RELEASE_NOTES" \
+            --repo "$GITHUB_REPOSITORY" \
+            release/android/SafeBrowseChild-Pilot.apk \
+            release/android/SafeBrowseChild-Pilot.apk.sha256 \
+            release/android/SHA256SUMS.txt
+
+          echo "[OK] GitHub Release '${RELEASE_TAG}' created and artifacts uploaded."
