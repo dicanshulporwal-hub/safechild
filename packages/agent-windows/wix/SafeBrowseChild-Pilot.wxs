@@ -1,7 +1,7 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <?ifndef ProductVersion?>
-  <?define ProductVersion = "1.0.4.0" ?>
+  <?define ProductVersion = "1.0.4.1" ?>
   <?endif?>
   <Package
       Name="SafeBrowse Child Pilot"
@@ -10,7 +10,7 @@
       UpgradeCode="B7C5E643-81D2-4A7F-991A-7110C99AA511"
       Scope="perMachine">
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <!-- 1. Program Files (64-bit) Structure -->
@@ -47,6 +47,17 @@
               Stop="both"
               Remove="uninstall"
               Wait="yes" />
+        </Component>
+
+        <!-- User Session Helper (Non-elevated background helper running in interactive user desktop sessions) -->
+        <Component Id="UserHelperExecutable" Guid="5E1F82A3-B4C5-6D7E-8F90-123456789ABC" Bitness="always64">
+          <File Id="UserHelperExe" Source="$(var.SourceDir)\SafeBrowseUserHelper.exe" KeyPath="yes" />
+          <RegistryValue
+              Root="HKLM"
+              Key="Software\Microsoft\Windows\CurrentVersion\Run"
+              Name="SafeBrowseUserHelper"
+              Value="&quot;[INSTALLFOLDER]SafeBrowseUserHelper.exe&quot;"
+              Type="string" />
         </Component>
 
         <!-- Pairing Utility Script -->
@@ -169,6 +180,7 @@
     <Feature Id="MainFeature" Title="SafeBrowse Child Agent" Level="1">
       <ComponentRef Id="MainExecutable" />
       <ComponentRef Id="ServiceHostExecutable" />
+      <ComponentRef Id="UserHelperExecutable" />
       <ComponentRef Id="ApplicationShortcut" />
       <ComponentRef Id="DesktopShortcutComponent" />
       <ComponentRef Id="PairingScript" />

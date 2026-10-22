@@ -2,6 +2,7 @@ import http from 'http';
 import url from 'url';
 import fs from 'fs';
 import { spawn, exec } from 'child_process';
+import { blockIpcServer } from './block-ipc';
 
 export interface ActiveChildContext {
   childId: string | null;
@@ -112,66 +113,19 @@ export class BlockPageServer {
 
   /**
    * Triggers the child-visible SafeBrowse block experience outside of TLS/HTTPS interception.
-   * Debounces duplicate queries for the same domain within 3 seconds.
+   * Dispatches the event via authenticated local IPC to the SafeBrowse User-Session Helper
+   * running in the logged-in interactive child's desktop session.
    */
   public triggerBlockExperience(domain: string, reason: string): void {
     const now = Date.now();
-    const last = this.lastTriggeredTimes.get(domain) || 0;
-    if (now - last < 3000) {
-      return;
-    }
-    this.lastTriggeredTimes.set(domain, now);
     this.lastTriggeredExperience = { domain, reason, timestamp: now };
 
     if (this.onBlockExperienceCallback) {
       this.onBlockExperienceCallback(domain, reason);
     }
 
-    const safeDomain = encodeURIComponent(domain);
-    const safeReason = encodeURIComponent(reason);
-    const blockUrl = `http://127.0.0.1:${this.port}/blocked?domain=${safeDomain}&reason=${safeReason}`;
-
-    if (process.platform === 'win32' && process.env.NODE_ENV !== 'test') {
-      try {
-        const progFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
-        const progFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
-        const edgeCandidates = [
-          `${progFilesX86}\\Microsoft\\Edge\\Application\\msedge.exe`,
-          `${progFiles}\\Microsoft\\Edge\\Application\\msedge.exe`,
-        ];
-        let foundEdge: string | null = null;
-        for (const candidate of edgeCandidates) {
-          if (fs.existsSync(candidate)) {
-            foundEdge = candidate;
-            break;
-          }
-        }
-
-        if (foundEdge) {
-          const child = spawn(foundEdge, [`--app=${blockUrl}`], {
-            detached: true,
-            stdio: 'ignore',
-          });
-          child.on('error', () => {
-            try {
-              exec(`start "" "${blockUrl}"`);
-            } catch {}
-          });
-          child.unref();
-        } else {
-          const child = spawn('cmd.exe', ['/c', 'start', '', blockUrl], {
-            detached: true,
-            stdio: 'ignore',
-          });
-          child.on('error', () => {});
-          child.unref();
-        }
-      } catch (e) {
-        try {
-          exec(`start "" "${blockUrl}"`);
-        } catch {}
-      }
-    }
+    // Delegate presentation to User Session Helper via authenticated local IPC
+    blockIpcServer.presentBlock(domain, reason, this.port);
   }
 
   public start(port: number = 8880): Promise<void> {
@@ -507,8 +461,13 @@ export class BlockPageServer {
         res.end(html);
       });
 
-      this.server.listen(port, () => {
+      this.server.listen(port, '127.0.0.1', async () => {
         console.log(`[Agent] Local Block Landing Server running on http://127.0.0.1:${port}`);
+        try {
+          await blockIpcServer.start();
+        } catch (e: any) {
+          console.warn(`[BlockServer] Notice: IPC server start: ${e.message}`);
+        }
         resolve();
       });
 
@@ -531,6 +490,9 @@ export class BlockPageServer {
   }
 
   public stop(): void {
+    try {
+      blockIpcServer.stop().catch(() => {});
+    } catch {}
     try {
       this.server?.close();
     } catch {}

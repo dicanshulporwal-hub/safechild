@@ -93,6 +93,25 @@ jobs:
           }
           Write-Host "Compiled SafeBrowseServiceHost.exe successfully."
 
+          # Compile SafeBrowseUserHelper.exe (Non-elevated user desktop helper)
+          $userHelperRel = "packages/agent-windows/user-helper/SafeBrowseUserHelper.cs"
+          if (Test-Path $userHelperRel) {
+            $userHelperSource = (Resolve-Path $userHelperRel).Path
+            $userHelperOutput = Join-Path $outDir "SafeBrowseUserHelper.exe"
+            Write-Host "Compiling SafeBrowseUserHelper with $cscPath..."
+            & $cscPath `
+              /target:winexe `
+              /optimize+ `
+              "/out:$userHelperOutput" `
+              "$userHelperSource"
+
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "csc.exe compilation of UserHelper failed with exit code $LASTEXITCODE"
+              exit $LASTEXITCODE
+            }
+            Write-Host "Compiled SafeBrowseUserHelper.exe successfully."
+          }
+
       - name: Build Single Executable Application (SafeBrowseChild-Pilot.exe)
         shell: pwsh
         run: |
@@ -126,8 +145,11 @@ jobs:
           Write-Host "Injecting SEA blob with postject..."
           npx --yes postject "$targetExe" NODE_SEA_BLOB "$seaBlob" --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
 
-          # Copy SafeBrowseServiceHost.exe and helper scripts to release/windows
+          # Copy SafeBrowseServiceHost.exe, SafeBrowseUserHelper.exe, and helper scripts to release/windows
           Copy-Item "packages/agent-windows/dist/SafeBrowseServiceHost.exe" "$releaseWinDir/SafeBrowseServiceHost.exe" -Force
+          if (Test-Path "packages/agent-windows/dist/SafeBrowseUserHelper.exe") {
+            Copy-Item "packages/agent-windows/dist/SafeBrowseUserHelper.exe" "$releaseWinDir/SafeBrowseUserHelper.exe" -Force
+          }
           Copy-Item "packages/agent-windows/wix/SafeBrowse-Pair.cmd" "$releaseWinDir/SafeBrowse-Pair.cmd" -Force
           Copy-Item "packages/agent-windows/wix/SafeBrowse-EmergencyRestore.cmd" "$releaseWinDir/SafeBrowse-EmergencyRestore.cmd" -Force
 
@@ -163,7 +185,7 @@ jobs:
           Write-Host "Source Directory: $sourceDir"
           Write-Host "MSI Output: $msiOutput"
 
-          wix build -arch x64 "$wxsPath" -ext WixToolset.Util.wixext -d SourceDir="$sourceDir" -o "$msiOutput"
+          wix build -arch x64 "$wxsPath" -ext WixToolset.Util.wixext -d SourceDir="$sourceDir" -d ProductVersion="1.0.4.1" -o "$msiOutput"
           $wixExitCode = $LASTEXITCODE
 
           if ($wixExitCode -ne 0) {
@@ -183,11 +205,17 @@ jobs:
           $releaseWinDir = "release/windows"
           $exePath = "$releaseWinDir/SafeBrowseChild-Pilot.exe"
           $serviceHostPath = "$releaseWinDir/SafeBrowseServiceHost.exe"
+          $userHelperPath = "$releaseWinDir/SafeBrowseUserHelper.exe"
           $msiPath = "$releaseWinDir/SafeBrowseChild-Pilot.msi"
 
           $exeHash = (Get-FileHash -Path $exePath -Algorithm SHA256).Hash.ToLower()
           $hostHash = (Get-FileHash -Path $serviceHostPath -Algorithm SHA256).Hash.ToLower()
           $msiHash = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash.ToLower()
+          $userHelperHash = ""
+          if (Test-Path $userHelperPath) {
+            $userHelperHash = (Get-FileHash -Path $userHelperPath -Algorithm SHA256).Hash.ToLower()
+            Set-Content -Path "$userHelperPath.sha256" -Value "$userHelperHash *SafeBrowseUserHelper.exe" -Encoding UTF8
+          }
 
           $manifestBackend = "${{ inputs.pilotBackendUrl || github.event.inputs.pilotBackendUrl || 'https://safebrowse.porwal.online' }}"
           $manifestLines = @(
@@ -198,8 +226,11 @@ jobs:
             ""
             "$exeHash *SafeBrowseChild-Pilot.exe"
             "$hostHash *SafeBrowseServiceHost.exe"
-            "$msiHash *SafeBrowseChild-Pilot.msi"
           )
+          if ($userHelperHash) {
+            $manifestLines += "$userHelperHash *SafeBrowseUserHelper.exe"
+          }
+          $manifestLines += "$msiHash *SafeBrowseChild-Pilot.msi"
 
           $manifestFile = "$releaseWinDir/SHA256SUMS.txt"
           Set-Content -Path $manifestFile -Value ($manifestLines -join "`n") -Encoding UTF8
@@ -210,6 +241,9 @@ jobs:
           Write-Host "=== Checksum Summary ==="
           Write-Host "SafeBrowseChild-Pilot.exe: $exeHash"
           Write-Host "SafeBrowseServiceHost.exe: $hostHash"
+          if ($userHelperHash) {
+            Write-Host "SafeBrowseUserHelper.exe: $userHelperHash"
+          }
           Write-Host "SafeBrowseChild-Pilot.msi: $msiHash"
           Write-Host "NOTE: Pilot MSI and binaries are UNSIGNED for Stage 11 Step 4 physical validation."
 
@@ -223,6 +257,7 @@ jobs:
             release/windows/SafeBrowseChild-Pilot.exe
             release/windows/SafeBrowseChild-Pilot.exe.sha256
             release/windows/SafeBrowseServiceHost.exe
+            release/windows/SafeBrowseUserHelper.exe
             release/windows/SHA256SUMS.txt
           if-no-files-found: error
 

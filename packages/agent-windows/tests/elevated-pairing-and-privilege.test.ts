@@ -1,3 +1,4 @@
+process.env.NODE_ENV = 'test';
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import * as fs from 'fs';

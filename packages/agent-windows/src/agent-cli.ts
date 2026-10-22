@@ -1,5 +1,6 @@
 import { PolicySyncClient, WINDOWS_AGENT_VERSION, BUILD_COMMIT } from './sync-client';
 import { BlockPageServer } from './block-server';
+import { blockIpcServer } from './block-ipc';
 import { DnsFilterProxy } from './dns-proxy';
 import { WindowsProcessLimiter } from './process-limiter';
 import { configManager, DeviceConfig, ConfigManager } from './config-manager';
@@ -391,6 +392,10 @@ async function runServiceMode(): Promise<void> {
     config.deviceToken
   );
   await blockServer.start(8880);
+
+  // Connect active session and multi-session policy providers to Block IPC Server
+  blockIpcServer.setActivePolicyProvider(() => sessionMonitor.getCurrentPolicy());
+  blockIpcServer.setMultiSessionChecker(() => sessionMonitor.getMultiSessionState());
 
   // 3. Initialize DNS Filter Proxy on port 53 with physical network's upstream DNS
   currentEngineStatus = 'DNS_PROXY_STARTING';
@@ -1024,6 +1029,15 @@ async function main() {
       logServiceMessage('ERROR', `[SafeBrowse] [ERROR] Emergency restoration failed: ${err.message}`);
       process.exit(1);
     }
+  }
+
+  if (args.includes('user-helper') || args.includes('--user-helper') || args.includes('helper')) {
+    console.log('[SafeBrowse] Starting SafeBrowse User-Session Helper...');
+    const { SafeBrowseUserSessionHelper } = await import('./user-helper');
+    const helper = new SafeBrowseUserSessionHelper();
+    helper.start();
+    console.log('[SafeBrowse] User-Session Helper running in user session.');
+    return;
   }
 
   if (args.includes('--version') || args.includes('-v')) {
