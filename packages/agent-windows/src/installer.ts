@@ -5,6 +5,7 @@ import * as path from 'path';
 import { configManager, ConfigManager } from './config-manager';
 import { networkManager } from './network-manager';
 import { firewallEngine } from './wfp-engine';
+import { WINDOWS_AGENT_VERSION } from './sync-client';
 
 const execAsync = promisify(exec);
 
@@ -83,7 +84,7 @@ export class WindowsInstaller {
             code: options.pairingCode,
             deviceName: options.deviceName || "Rahul's Windows Laptop",
             platform: 'windows',
-            agentVersion: '1.0.0',
+            agentVersion: WINDOWS_AGENT_VERSION,
           }),
         });
 

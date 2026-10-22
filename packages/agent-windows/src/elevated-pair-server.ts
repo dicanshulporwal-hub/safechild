@@ -7,6 +7,7 @@ import { promisify } from 'util';
 import { configManager, ConfigManager, DeviceConfig } from './config-manager';
 import { accountManager, WindowsAccountManager } from './account-manager';
 import { logServiceMessage } from './network-manager';
+import { WINDOWS_AGENT_VERSION } from './sync-client';
 
 const execAsync = promisify(exec);
 
@@ -115,7 +116,7 @@ export class ElevatedPairServer {
                     code,
                     deviceName,
                     platform: 'windows',
-                    agentVersion: '1.0.2',
+                    agentVersion: WINDOWS_AGENT_VERSION,
                   }),
                 });
               } catch (netErr: any) {

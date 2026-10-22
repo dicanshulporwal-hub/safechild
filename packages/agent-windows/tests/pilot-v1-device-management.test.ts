@@ -4,7 +4,7 @@ import http from 'http';
 import { accountManager } from '../src/account-manager';
 import { sessionMonitor } from '../src/session-monitor';
 import { guiServer } from '../src/gui-server';
-import { PolicySyncClient } from '../src/sync-client';
+import { PolicySyncClient, WINDOWS_AGENT_VERSION } from '../src/sync-client';
 
 test('SafeBrowse Windows Pilot v1.0 — Device Management & Multi-Session Safety Guard Suite', async (t) => {
   // Reset any mock sessions
@@ -160,7 +160,7 @@ test('SafeBrowse Windows Pilot v1.0 — Device Management & Multi-Session Safety
 
       assert.ok(capturedHeartbeat, 'Heartbeat was received by backend');
       assert.strictEqual(capturedHeartbeat.deviceId, 'dev-pilot-test-1');
-      assert.strictEqual(capturedHeartbeat.agentVersion, '1.0.3-pilot');
+      assert.strictEqual(capturedHeartbeat.agentVersion, WINDOWS_AGENT_VERSION);
       assert.strictEqual(capturedHeartbeat.mappedAccountName, 'DESKTOP-PC\\Rahul');
       assert.strictEqual(capturedHeartbeat.hasMultipleSessions, true);
       assert.strictEqual(capturedHeartbeat.protectionStatus, 'DEGRADED');

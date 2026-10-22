@@ -1,4 +1,4 @@
-import { PolicySyncClient } from './sync-client';
+import { PolicySyncClient, WINDOWS_AGENT_VERSION, BUILD_COMMIT } from './sync-client';
 import { BlockPageServer } from './block-server';
 import { DnsFilterProxy } from './dns-proxy';
 import { WindowsProcessLimiter } from './process-limiter';
@@ -60,7 +60,7 @@ async function pairDevice(args: string[]): Promise<void> {
         code,
         deviceName: name,
         platform: 'windows',
-        agentVersion: '1.0.2',
+        agentVersion: WINDOWS_AGENT_VERSION,
       }),
     });
 
@@ -745,8 +745,10 @@ export async function evaluateSystemStatus(options?: {
 
 async function showStatus(): Promise<void> {
   console.log('==================================================');
-  console.log('[SafeBrowse] SafeBrowse Windows Agent Status');
+  console.log(`[SafeBrowse] SafeBrowse Windows Agent Status (v${WINDOWS_AGENT_VERSION})`);
   console.log('==================================================');
+  console.log(`Agent Version:   ${WINDOWS_AGENT_VERSION}`);
+  console.log(`Build Commit:    ${BUILD_COMMIT}`);
   console.log(`Data Directory:  ${configManager.getBaseDir()}`);
   console.log(`Config File:     ${configManager.getConfigFilePath()}`);
   console.log(`Logs Directory:  ${configManager.getLogsDir()}`);
@@ -1022,6 +1024,11 @@ async function main() {
       logServiceMessage('ERROR', `[SafeBrowse] [ERROR] Emergency restoration failed: ${err.message}`);
       process.exit(1);
     }
+  }
+
+  if (args.includes('--version') || args.includes('-v')) {
+    console.log(`SafeBrowse Windows Agent v${WINDOWS_AGENT_VERSION} (${BUILD_COMMIT.substring(0, 7)})`);
+    process.exit(0);
   }
 
   if (args.includes('--status')) {

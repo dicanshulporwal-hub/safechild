@@ -13,6 +13,7 @@ import {
   WindowsProfileMapping,
 } from './account-manager';
 import { sessionMonitor } from './session-monitor';
+import { WINDOWS_AGENT_VERSION, BUILD_COMMIT } from './sync-client';
 import { evaluateSystemStatus } from './agent-cli';
 import { logServiceMessage } from './network-manager';
 
@@ -74,6 +75,8 @@ export class GuiServer {
             res.end(
               JSON.stringify({
                 isPaired: Boolean(config),
+                agentVersion: WINDOWS_AGENT_VERSION,
+                buildCommit: BUILD_COMMIT,
                 config: config
                   ? {
                       deviceId: config.deviceId,
@@ -225,7 +228,7 @@ export class GuiServer {
                   code,
                   deviceName,
                   platform: 'windows',
-                  agentVersion: '1.0.2',
+                  agentVersion: WINDOWS_AGENT_VERSION,
                 }),
               });
 

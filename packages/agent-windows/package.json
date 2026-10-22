@@ -1,6 +1,6 @@
 {
   "name": "@safebrowse/agent-windows",
-  "version": "1.0.3",
+  "version": "1.0.4-validation",
   "main": "dist/agent-cli.js",
   "scripts": {
     "build": "tsc",

@@ -7,7 +7,8 @@ import { configManager } from './config-manager';
 
 export type PolicyStatus = 'POLICY_LIVE' | 'POLICY_CACHED' | 'POLICY_UNAVAILABLE';
 
-export const WINDOWS_AGENT_VERSION = '1.0.3-pilot';
+export const WINDOWS_AGENT_VERSION = '1.0.4-validation';
+export const BUILD_COMMIT = 'e2589b8ba43e46e25cd15287d41e91aa09ec1400';
 
 export interface DeviceConfig {
   deviceId: string;

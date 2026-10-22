@@ -7,25 +7,64 @@ android {
     namespace = "com.safebrowse.child"
     compileSdk = 34
 
-    val defaultApiBaseUrl = "http://10.0.2.2:11002"
+    val defaultProdApiBaseUrl = "https://safebrowse.porwal.online"
+    val defaultDevApiBaseUrl = "http://10.0.2.2:11002"
     val safebrowseApiBaseUrl: String = (project.findProperty("safebrowseApiBaseUrl") as? String)
         ?: System.getenv("SAFEBROWSE_API_BASE_URL")
-        ?: defaultApiBaseUrl
+        ?: defaultProdApiBaseUrl
 
     defaultConfig {
         applicationId = "com.safebrowse.child"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.3-pilot"
+        versionCode = 4
+        versionName = "1.0.4-validation"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "SAFEBROWSE_API_BASE_URL", "\"$safebrowseApiBaseUrl\"")
+        buildConfigField("String", "BUILD_COMMIT", "\"e2589b8ba43e46e25cd15287d41e91aa09ec1400\"")
+    }
+
+    signingConfigs {
+        create("pilot") {
+            val pilotKsFile = file("../pilot.keystore")
+            val debugKsFile = file("${System.getProperty("user.home")}/.android/debug.keystore")
+            val customKsPath = System.getenv("ANDROID_PILOT_KEYSTORE_PATH")
+
+            if (customKsPath != null && file(customKsPath).exists()) {
+                storeFile = file(customKsPath)
+                storePassword = System.getenv("ANDROID_PILOT_KEYSTORE_PASSWORD") ?: "safebrowse"
+                keyAlias = System.getenv("ANDROID_PILOT_KEY_ALIAS") ?: "cert"
+                keyPassword = System.getenv("ANDROID_PILOT_KEY_PASSWORD") ?: "safebrowse"
+            } else if (pilotKsFile.exists()) {
+                storeFile = pilotKsFile
+                storePassword = System.getenv("ANDROID_PILOT_KEYSTORE_PASSWORD") ?: "safebrowse"
+                keyAlias = System.getenv("ANDROID_PILOT_KEY_ALIAS") ?: "cert"
+                keyPassword = System.getenv("ANDROID_PILOT_KEY_PASSWORD") ?: "safebrowse"
+            } else if (debugKsFile.exists()) {
+                storeFile = debugKsFile
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+            enableV1Signing = true
+            enableV2Signing = true
+        }
     }
 
     buildTypes {
+        debug {
+            val devUrl = (project.findProperty("safebrowseDevApiUrl") as? String)
+                ?: System.getenv("SAFEBROWSE_DEV_API_URL")
+                ?: defaultDevApiBaseUrl
+            buildConfigField("String", "SAFEBROWSE_API_BASE_URL", "\"$devUrl\"")
+            buildConfigField("String", "BUILD_COMMIT", "\"e2589b8ba43e46e25cd15287d41e91aa09ec1400\"")
+        }
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("pilot")
+            buildConfigField("String", "SAFEBROWSE_API_BASE_URL", "\"$safebrowseApiBaseUrl\"")
+            buildConfigField("String", "BUILD_COMMIT", "\"e2589b8ba43e46e25cd15287d41e91aa09ec1400\"")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
