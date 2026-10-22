@@ -2,6 +2,7 @@ import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
+import { execFile } from 'child_process';
 import { ResolvedUserPolicy, MultiSessionCheckResult } from './account-manager';
 import { logServiceMessage } from './network-manager';
 
@@ -113,6 +114,14 @@ export class BlockIpcServer {
     this.globalThrottleMs = globalThrottleMs;
   }
 
+  public getPipePath(): string {
+    return this.pipePath;
+  }
+
+  public isRunning(): boolean {
+    return this.isListening;
+  }
+
   public setActivePolicyProvider(provider: () => ResolvedUserPolicy | null): void {
     this.activePolicyProvider = provider;
   }
@@ -163,10 +172,24 @@ export class BlockIpcServer {
         });
 
         socket.on('close', () => {
+          const helper = this.helpers.get(socket);
+          if (helper) {
+            logServiceMessage(
+              'INFO',
+              `[BlockIpcServer] Helper disconnected: account='${helper.accountName}', PID=${helper.pid || 'N/A'}`
+            );
+          }
           this.helpers.delete(socket);
         });
 
-        socket.on('error', () => {
+        socket.on('error', (err) => {
+          const helper = this.helpers.get(socket);
+          if (helper) {
+            logServiceMessage(
+              'WARN',
+              `[BlockIpcServer] Helper connection error: account='${helper.accountName}', PID=${helper.pid || 'N/A'}: ${err.message}`
+            );
+          }
           this.helpers.delete(socket);
         });
       });
@@ -176,9 +199,14 @@ export class BlockIpcServer {
         reject(err);
       });
 
-      this.server.listen(this.pipePath, () => {
+      this.server.listen(this.pipePath, async () => {
         this.isListening = true;
-        logServiceMessage('INFO', `[BlockIpcServer] Listening on IPC path: ${this.pipePath}`);
+        logServiceMessage('INFO', `[BlockIpcServer] Listening on ${this.pipePath}`);
+        if (process.platform === 'win32') {
+          try {
+            await configureWindowsPipeSecurity(this.pipePath);
+          } catch {}
+        }
         resolve();
       });
     });
@@ -197,7 +225,7 @@ export class BlockIpcServer {
         this.helpers.set(socket, helper);
         logServiceMessage(
           'INFO',
-          `[BlockIpcServer] User session helper registered for account: '${helper.accountName}' (PID: ${helper.pid || 'N/A'})`
+          `[BlockIpcServer] Helper registered: account='${helper.accountName}', PID=${helper.pid || 'N/A'}`
         );
 
         const ack: HelperRegisterAck = { type: 'REGISTER_ACK', status: 'OK' };
@@ -304,7 +332,7 @@ export class BlockIpcServer {
 
   public stop(): Promise<void> {
     this.isListening = false;
-    for (const [socket] of this.helpers.entries()) {
+    for (const [socket, helper] of this.helpers.entries()) {
       try {
         socket.destroy();
       } catch {}
@@ -323,11 +351,71 @@ export class BlockIpcServer {
             fs.unlinkSync(this.pipePath);
           } catch {}
         }
+        logServiceMessage('INFO', `[BlockIpcServer] Stopped IPC server on ${this.pipePath}`);
         this.server = null;
         resolve();
       });
     });
   }
+}
+
+/**
+ * Configures DACL on Windows Named Pipe to allow interactive child users
+ * to connect and write registration handshake, while denying network/remote users.
+ */
+export async function configureWindowsPipeSecurity(pipePath: string): Promise<void> {
+  if (process.platform !== 'win32') return;
+  if (!pipePath.startsWith('\\\\.\\pipe\\')) return;
+  if (process.env.NODE_ENV === 'test') return;
+
+  const systemRoot = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+  const psPath = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const exe = fs.existsSync(psPath) ? psPath : 'powershell.exe';
+
+  // SDDL: Deny Network (NU), Allow SYSTEM (SY) Full, Allow Administrators (BA) Full, Allow Interactive Users (IU) Read+Write, Allow Authenticated Users (AU) Read+Write
+  const psScript = `
+$code = @'
+using System;
+using System.Runtime.InteropServices;
+public class PipeAclHelper {
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern uint SetNamedSecurityInfo(
+        string pObjectName, int objectType, uint securityInfo,
+        IntPtr psidOwner, IntPtr psidGroup, IntPtr pDacl, IntPtr pSacl
+    );
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(
+        string sddl, uint rev, out IntPtr pSD, out uint size
+    );
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr LocalFree(IntPtr hMem);
+}
+'@
+Add-Type -TypeDefinition $code -Language CSharp
+$pSD = [IntPtr]::Zero; $size = 0
+$sddl = "D:(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)(A;;GRGW;;;AU)"
+if ([PipeAclHelper]::ConvertStringSecurityDescriptorToSecurityDescriptor($sddl, 1, [ref]$pSD, [ref]$size)) {
+    $res = [PipeAclHelper]::SetNamedSecurityInfo("${pipePath}", 1, 4, [IntPtr]::Zero, [IntPtr]::Zero, $pSD, [IntPtr]::Zero)
+    [PipeAclHelper]::LocalFree($pSD)
+    if ($res -ne 0) { exit $res }
+}
+`;
+
+  return new Promise((resolve) => {
+    execFile(
+      exe,
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', psScript],
+      { timeout: 5000 },
+      (err) => {
+        if (err) {
+          logServiceMessage('WARN', `[BlockIpcServer] [WARN] Pipe ACL configuration note: ${err.message}`);
+        } else {
+          logServiceMessage('INFO', `[BlockIpcServer] Configured local pipe ACL for interactive user sessions on ${pipePath}`);
+        }
+        resolve();
+      }
+    );
+  });
 }
 
 export const blockIpcServer = new BlockIpcServer();

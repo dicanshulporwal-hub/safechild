@@ -116,7 +116,7 @@ export class BlockPageServer {
    * Dispatches the event via authenticated local IPC to the SafeBrowse User-Session Helper
    * running in the logged-in interactive child's desktop session.
    */
-  public triggerBlockExperience(domain: string, reason: string): void {
+  public triggerBlockExperience(domain: string, reason: string): { sent: boolean; reason: string; url?: string } {
     const now = Date.now();
     this.lastTriggeredExperience = { domain, reason, timestamp: now };
 
@@ -125,7 +125,7 @@ export class BlockPageServer {
     }
 
     // Delegate presentation to User Session Helper via authenticated local IPC
-    blockIpcServer.presentBlock(domain, reason, this.port);
+    return blockIpcServer.presentBlock(domain, reason, this.port);
   }
 
   public start(port: number = 8880): Promise<void> {
@@ -461,13 +461,8 @@ export class BlockPageServer {
         res.end(html);
       });
 
-      this.server.listen(port, '127.0.0.1', async () => {
+      this.server.listen(port, '127.0.0.1', () => {
         console.log(`[Agent] Local Block Landing Server running on http://127.0.0.1:${port}`);
-        try {
-          await blockIpcServer.start();
-        } catch (e: any) {
-          console.warn(`[BlockServer] Notice: IPC server start: ${e.message}`);
-        }
         resolve();
       });
 
@@ -490,9 +485,6 @@ export class BlockPageServer {
   }
 
   public stop(): void {
-    try {
-      blockIpcServer.stop().catch(() => {});
-    } catch {}
     try {
       this.server?.close();
     } catch {}

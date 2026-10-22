@@ -311,6 +311,11 @@ async function runServiceMode(): Promise<void> {
       activityReporter.stop();
       if (processLimiter) processLimiter.stop();
       if (dnsProxy) dnsProxy.stop();
+      try {
+        await blockIpcServer.stop();
+      } catch (ipcErr: any) {
+        logServiceMessage('WARN', `[SafeBrowse Service] Warning during Block IPC teardown: ${ipcErr.message}`);
+      }
       if (blockServer) blockServer.stop();
       if (syncClient) syncClient.stop();
     } catch (e: any) {
@@ -397,6 +402,17 @@ async function runServiceMode(): Promise<void> {
   blockIpcServer.setActivePolicyProvider(() => sessionMonitor.getCurrentPolicy());
   blockIpcServer.setMultiSessionChecker(() => sessionMonitor.getMultiSessionState());
 
+  // Start Block IPC Server for user-session helper presentation
+  try {
+    await blockIpcServer.start();
+    logServiceMessage('INFO', `[BlockIpcServer] Listening on ${blockIpcServer.getPipePath()}`);
+  } catch (ipcErr: any) {
+    logServiceMessage(
+      'WARN',
+      `[BlockIpcServer] [WARN] Failed to start Block IPC Server: ${ipcErr.message}. Block-page presentation degraded.`
+    );
+  }
+
   // 3. Initialize DNS Filter Proxy on port 53 with physical network's upstream DNS
   currentEngineStatus = 'DNS_PROXY_STARTING';
   const physicalUpstreams = await networkManager.getCurrentPhysicalDnsServers();
@@ -422,11 +438,15 @@ async function runServiceMode(): Promise<void> {
 
   currentEngineStatus = 'DNS_PROXY_HEALTHY';
 
-  // 3b. Wire Activity Telemetry Outbox
+  // 3b. Wire Activity Telemetry Outbox & Block IPC Presentation
   activityReporter.setConfig(config);
   activityReporter.start();
   dnsProxy.setOnBlockExperienceTriggered((domain, reason) => {
-    blockServer?.triggerBlockExperience(domain, reason);
+    const result = blockIpcServer.presentBlock(domain, reason, 8880);
+    logServiceMessage(
+      'INFO',
+      `[SafeBrowse Service] Block presentation for '${domain}': ${result.reason} (sent=${result.sent})`
+    );
   });
   dnsProxy.setOnQueryEvaluated((event) => {
     const activePolicy = sessionMonitor.getCurrentPolicy();
