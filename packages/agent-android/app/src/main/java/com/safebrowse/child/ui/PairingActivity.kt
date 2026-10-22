@@ -100,6 +100,7 @@ class PairingActivity : AppCompatActivity() {
             put("deviceName", "Rahul's Android Phone")
             put("platform", "android")
             put("agentVersion", com.safebrowse.child.config.AgentConfig.AGENT_VERSION)
+            put("buildCommit", com.safebrowse.child.config.AgentConfig.BUILD_COMMIT)
         }
 
         scope.launch {

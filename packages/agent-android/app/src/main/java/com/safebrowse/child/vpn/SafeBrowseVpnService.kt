@@ -469,6 +469,7 @@ class SafeBrowseVpnService : VpnService() {
                             put("enforcementActive", true)
                             put("platform", "android")
                             put("agentVersion", AgentConfig.AGENT_VERSION)
+                            put("buildCommit", AgentConfig.BUILD_COMMIT)
                             put("protectionStatus", "ACTIVE")
                             put("capabilities", JSONObject().apply {
                                 put("appUsageAvailable", hasAppUsage)

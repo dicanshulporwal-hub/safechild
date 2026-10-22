@@ -11,7 +11,7 @@ import java.net.URI
 object AgentConfig {
 
     const val AGENT_VERSION = "1.0.4-validation"
-    const val BUILD_COMMIT = "e2589b8ba43e46e25cd15287d41e91aa09ec1400"
+    val BUILD_COMMIT: String get() = BuildConfig.BUILD_COMMIT
 
     /**
      * Build-time configured default API base URL.

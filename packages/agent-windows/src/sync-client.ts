@@ -7,8 +7,9 @@ import { configManager } from './config-manager';
 
 export type PolicyStatus = 'POLICY_LIVE' | 'POLICY_CACHED' | 'POLICY_UNAVAILABLE';
 
+import { BUILD_COMMIT } from './build-info';
+export { BUILD_COMMIT };
 export const WINDOWS_AGENT_VERSION = '1.0.4-validation';
-export const BUILD_COMMIT = 'e2589b8ba43e46e25cd15287d41e91aa09ec1400';
 
 export interface DeviceConfig {
   deviceId: string;
@@ -305,6 +306,7 @@ export class PolicySyncClient {
         enforcementActive: isEnforcing,
         platform: 'windows',
         agentVersion: WINDOWS_AGENT_VERSION,
+        buildCommit: BUILD_COMMIT,
         mappedAccountName: extraState?.mappedAccountName,
         hasMultipleSessions: extraState?.hasMultipleSessions,
         protectionStatus: extraState?.protectionStatus,

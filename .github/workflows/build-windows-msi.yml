@@ -105,6 +105,9 @@ jobs:
           $targetExe = "$releaseWinDir/SafeBrowseChild-Pilot.exe"
           $entryTs = "packages/agent-windows/src/agent-cli.ts"
 
+          # 0. Generate build-info with current HEAD
+          node packages/agent-windows/scripts/generate-build-info.js
+
           # 1. Bundle TypeScript agent with esbuild
           Write-Host "Bundling agent-cli.ts with esbuild..."
           npx esbuild "$entryTs" --bundle --platform=node --target=node20 --outfile="$bundleJs"
@@ -224,7 +227,7 @@ jobs:
           if-no-files-found: error
 
       - name: Update GitHub Release Assets (v1.0.3-pilot)
-        if: github.ref == 'refs/heads/feature/stage11-step4-device-enforcement'
+        if: false # Disabled during validation candidate builds to strictly protect published releases
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

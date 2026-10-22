@@ -1,6 +1,24 @@
+import java.io.ByteArrayOutputStream
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+fun getGitCommit(): String {
+    return try {
+        val stdout = ByteArrayOutputStream()
+        project.exec {
+            commandLine("git", "rev-parse", "HEAD")
+            standardOutput = stdout
+        }
+        stdout.toString().trim()
+    } catch (e: Exception) {
+        System.getenv("SAFEBROWSE_BUILD_COMMIT")
+            ?: System.getenv("BUILD_COMMIT")
+            ?: System.getenv("GITHUB_SHA")
+            ?: "unknown"
+    }
 }
 
 android {
@@ -12,6 +30,7 @@ android {
     val safebrowseApiBaseUrl: String = (project.findProperty("safebrowseApiBaseUrl") as? String)
         ?: System.getenv("SAFEBROWSE_API_BASE_URL")
         ?: defaultProdApiBaseUrl
+    val gitCommit = getGitCommit()
 
     defaultConfig {
         applicationId = "com.safebrowse.child"
@@ -22,7 +41,7 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "SAFEBROWSE_API_BASE_URL", "\"$safebrowseApiBaseUrl\"")
-        buildConfigField("String", "BUILD_COMMIT", "\"e2589b8ba43e46e25cd15287d41e91aa09ec1400\"")
+        buildConfigField("String", "BUILD_COMMIT", "\"$gitCommit\"")
     }
 
     signingConfigs {
@@ -58,13 +77,13 @@ android {
                 ?: System.getenv("SAFEBROWSE_DEV_API_URL")
                 ?: defaultDevApiBaseUrl
             buildConfigField("String", "SAFEBROWSE_API_BASE_URL", "\"$devUrl\"")
-            buildConfigField("String", "BUILD_COMMIT", "\"e2589b8ba43e46e25cd15287d41e91aa09ec1400\"")
+            buildConfigField("String", "BUILD_COMMIT", "\"$gitCommit\"")
         }
         release {
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("pilot")
             buildConfigField("String", "SAFEBROWSE_API_BASE_URL", "\"$safebrowseApiBaseUrl\"")
-            buildConfigField("String", "BUILD_COMMIT", "\"e2589b8ba43e46e25cd15287d41e91aa09ec1400\"")
+            buildConfigField("String", "BUILD_COMMIT", "\"$gitCommit\"")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

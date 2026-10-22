@@ -43,6 +43,7 @@ class SyncWorker(appContext: Context, workerParams: WorkerParameters) :
             put("enforcementActive", true)
             put("platform", "android")
             put("agentVersion", com.safebrowse.child.config.AgentConfig.AGENT_VERSION)
+            put("buildCommit", com.safebrowse.child.config.AgentConfig.BUILD_COMMIT)
         }
 
         try {

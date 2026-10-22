@@ -76,6 +76,7 @@ quarantine/
 .gemini/
 
 # IDE & OS-generated files
+packages/agent-windows/src/build-info.ts
 .vscode/
 .idea/
 *.swp
