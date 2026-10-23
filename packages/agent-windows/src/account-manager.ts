@@ -810,6 +810,69 @@ export class WindowsAccountManager {
   }
 
   /**
+   * Synchronizes account mappings to the backend API via PUT /api/devices/:id/account-mappings.
+   */
+  public async syncAccountMappingsToCloud(
+    backendUrl: string,
+    deviceId: string,
+    deviceToken: string,
+    mappings: WindowsProfileMapping[],
+    options?: {
+      maxRetries?: number;
+      retryDelayMs?: number;
+      fetchFn?: (url: string, init?: any) => Promise<any>;
+    }
+  ): Promise<{ success: boolean; count: number; mappings: any[] }> {
+    const maxRetries = options?.maxRetries ?? 3;
+    const baseDelay = options?.retryDelayMs ?? 300;
+    const fetchFunc = options?.fetchFn || fetch;
+
+    const cleanBackendUrl = backendUrl.replace(/\/+$/, '');
+    const url = `${cleanBackendUrl}/api/devices/${deviceId}/account-mappings`;
+
+    const payloadMappings = mappings.map((m) => ({
+      windowsSid: m.windowsSid,
+      windowsUsername: m.windowsUsername,
+      childId: m.childId || null,
+      enabled: m.enabled !== false,
+    }));
+
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      if (attempt > 0) {
+        await new Promise((res) => setTimeout(res, baseDelay * Math.pow(2, attempt - 1)));
+      }
+
+      try {
+        const resp = await fetchFunc(url, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-device-id': deviceId,
+            'x-device-token': deviceToken,
+            Authorization: `Bearer ${deviceToken}`,
+          },
+          body: JSON.stringify({ mappings: payloadMappings }),
+        });
+
+        if (resp.ok) {
+          const body: any = await resp.json();
+          return body;
+        } else {
+          const errBody = await resp.text().catch(() => '');
+          lastError = new Error(`HTTP ${resp.status} ${resp.statusText}: ${errBody}`);
+          console.warn(`[AccountManager] Cloud mapping sync attempt ${attempt + 1}/${maxRetries} failed: ${lastError.message}`);
+        }
+      } catch (err: any) {
+        lastError = err;
+        console.warn(`[AccountManager] Cloud mapping sync attempt ${attempt + 1}/${maxRetries} failed: ${err.message}`);
+      }
+    }
+
+    throw lastError || new Error('Failed to sync account mappings to cloud.');
+  }
+
+  /**
    * Creates a staged mapping save request with single-use nonce, timestamp,
    * deviceId binding, and SHA-256 payload integrity hash.
    */

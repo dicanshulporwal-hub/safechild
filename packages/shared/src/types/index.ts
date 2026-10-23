@@ -123,6 +123,19 @@ export interface Child {
   updatedAt: string;
 }
 
+export interface DeviceAccountMappingDto {
+  id?: string;
+  deviceId?: string;
+  familyId?: string;
+  windowsSid: string;
+  windowsUsername: string;
+  childId: string | null;
+  childName?: string | null;
+  enabled: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface Device {
   id: string;
   childId: string;
@@ -138,6 +151,8 @@ export interface Device {
   healthStatus: DeviceHealthStatus;
   ipAddress?: string;
   agentVersion?: string;
+  accountMappings?: DeviceAccountMappingDto[];
+  activeChildId?: string | null;
 }
 
 export interface PairingCode {
@@ -209,6 +224,8 @@ export interface HeartbeatPayload {
   agentVersion: string;
   buildCommit?: string;
   mappedAccountName?: string;
+  mappedAccountSid?: string | null;
+  activeChildId?: string | null;
   hasMultipleSessions?: boolean;
   protectionStatus?: string;
   capabilities?: {

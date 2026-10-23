@@ -209,20 +209,148 @@ export class ElevatedPairServer {
                   },
                 })
               );
-
-              // 8. Auto-close server after successful response
-              this.autoCloseTimer = setTimeout(() => {
-                this.stop();
-                if (process.env.NODE_ENV !== 'test') {
-                  process.exit(0);
-                }
-              }, 1200);
-              this.autoCloseTimer.unref();
             } catch (err: any) {
               res.writeHead(500, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: err.message || 'Unexpected error during pairing' }));
             }
           });
+          return;
+        }
+
+        // Endpoint: GET /api/accounts
+        if (pathname === '/api/accounts' && req.method === 'GET') {
+          try {
+            const accounts = await this.accountMgr.discoverAccounts();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ accounts }));
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e.message, accounts: [] }));
+          }
+          return;
+        }
+
+        // Endpoint: GET /api/family-profiles
+        if (pathname === '/api/family-profiles' && req.method === 'GET') {
+          try {
+            const secureConfig = await this.configMgr.loadDeviceConfig();
+            if (!secureConfig) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Device is not paired yet.', profiles: [] }));
+              return;
+            }
+            const result = await this.accountMgr.fetchFamilyProfilesWithResilience(
+              secureConfig.backendUrl,
+              secureConfig.deviceId,
+              secureConfig.deviceToken
+            );
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e.message, profiles: [] }));
+          }
+          return;
+        }
+
+        // Endpoint: POST /api/finish-setup
+        if (pathname === '/api/finish-setup' && req.method === 'POST') {
+          let body = '';
+          req.on('data', (c) => (body += c));
+          req.on('end', async () => {
+            try {
+              const data = JSON.parse(body || '{}');
+              const mappings = Array.isArray(data.mappings) ? data.mappings : [];
+
+              const secureConfig = await this.configMgr.loadDeviceConfig();
+              if (!secureConfig) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Device is not paired.' }));
+                return;
+              }
+
+              // 1. Persist mappings locally to config.json
+              await this.accountMgr.saveProfileMappingsTransaction(
+                mappings,
+                secureConfig.deviceId,
+                secureConfig.deviceName,
+                { isElevated: true }
+              );
+
+              // 2. Sync mappings to backend: PUT /api/devices/:deviceId/account-mappings
+              try {
+                await this.accountMgr.syncAccountMappingsToCloud(
+                  secureConfig.backendUrl,
+                  secureConfig.deviceId,
+                  secureConfig.deviceToken,
+                  mappings
+                );
+              } catch (syncErr: any) {
+                logServiceMessage('WARN', `[ElevatedPairServer] Cloud mapping sync warning: ${syncErr.message}`);
+              }
+
+              // 3. Fetch policies for all mapped children
+              for (const m of mappings) {
+                if (m.childId && m.enabled) {
+                  try {
+                    await this.triggerInitialPolicySync(
+                      secureConfig.backendUrl,
+                      secureConfig.deviceId,
+                      secureConfig.deviceToken,
+                      m.childId
+                    );
+                  } catch {}
+                }
+              }
+
+              // 4. Send heartbeat with active context
+              try {
+                const activeSession = await this.accountMgr.getActiveConsoleSession();
+                const activeMapping = mappings.find((m: any) => m.windowsSid === activeSession.sid && m.enabled);
+                await fetch(`${secureConfig.backendUrl}/api/devices/heartbeat`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'x-device-id': secureConfig.deviceId,
+                    'x-device-token': secureConfig.deviceToken,
+                  },
+                  body: JSON.stringify({
+                    deviceId: secureConfig.deviceId,
+                    deviceToken: secureConfig.deviceToken,
+                    activePolicyVersion: 1,
+                    enforcementActive: true,
+                    platform: 'windows',
+                    agentVersion: WINDOWS_AGENT_VERSION,
+                    mappedAccountName: activeSession.username,
+                    mappedAccountSid: activeSession.sid,
+                    activeChildId: activeMapping ? activeMapping.childId : null,
+                    hasMultipleSessions: false,
+                    protectionStatus: activeMapping?.childId ? 'MANAGED_CHILD' : 'UNMANAGED_USER',
+                  }),
+                });
+              } catch {}
+
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: true }));
+            } catch (e: any) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: e.message }));
+            }
+          });
+          return;
+        }
+
+        // Endpoint: POST /api/close
+        if (pathname === '/api/close' && req.method === 'POST') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, closed: true }));
+          this.autoCloseTimer = setTimeout(() => {
+            this.stop();
+            if (process.env.NODE_ENV !== 'test') {
+              process.exit(0);
+            }
+          }, 300);
+          this.autoCloseTimer.unref();
           return;
         }
 
@@ -423,7 +551,7 @@ export class ElevatedPairServer {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SafeBrowse — Administrator Device Attachment</title>
+  <title>SafeBrowse — Computer Setup</title>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
     :root {
@@ -499,6 +627,28 @@ export class ElevatedPairServer {
       align-items: center;
       gap: 6px;
     }
+    .screen { display: none; }
+    .screen.active { display: block; animation: fadeIn 0.25s ease-out; }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .feature-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+      margin: 24px 0;
+    }
+    .feature-card {
+      background: rgba(30, 41, 59, 0.5);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px 14px;
+      text-align: center;
+    }
+    .feature-icon { font-size: 24px; margin-bottom: 8px; }
+    .feature-title { font-weight: 700; font-size: 13px; margin-bottom: 4px; }
+    .feature-desc { font-size: 11px; color: var(--text-muted); line-height: 1.4; }
     .callout {
       background: rgba(30, 41, 59, 0.7);
       border: 1px solid rgba(255, 255, 255, 0.08);
@@ -538,9 +688,10 @@ export class ElevatedPairServer {
     }
     .input-code {
       font-family: 'Courier New', monospace;
-      font-size: 18px !important;
+      font-size: 22px !important;
       font-weight: 800 !important;
-      letter-spacing: 2px !important;
+      letter-spacing: 4px !important;
+      text-align: center;
       text-transform: uppercase !important;
     }
     .alert {
@@ -599,6 +750,85 @@ export class ElevatedPairServer {
       background: rgba(51, 65, 85, 0.8);
       color: #fff;
     }
+    .account-card {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px 20px;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .account-info {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .account-avatar {
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      background: rgba(37, 99, 235, 0.2);
+      color: #93c5fd;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+    }
+    .account-name { font-weight: 700; font-size: 14px; }
+    .account-badge {
+      font-size: 11px;
+      background: rgba(255, 255, 255, 0.1);
+      padding: 2px 8px;
+      border-radius: 9999px;
+      color: var(--text-muted);
+      margin-left: 6px;
+    }
+    select.account-select {
+      background: rgba(30, 41, 59, 0.9);
+      color: #fff;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      outline: none;
+      cursor: pointer;
+      min-width: 220px;
+    }
+    select.account-select:focus {
+      border-color: var(--accent);
+    }
+    .summary-card {
+      background: rgba(30, 41, 59, 0.6);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px 20px;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .pill-protected {
+      background: rgba(34, 197, 94, 0.2);
+      border: 1px solid rgba(34, 197, 94, 0.4);
+      color: #86efac;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .pill-parent {
+      background: rgba(148, 163, 184, 0.15);
+      border: 1px solid rgba(148, 163, 184, 0.3);
+      color: #cbd5e1;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 700;
+    }
   </style>
 </head>
 <body>
@@ -611,39 +841,145 @@ export class ElevatedPairServer {
           </svg>
         </div>
         <div>
-          <h1>SafeBrowse Setup Wizard</h1>
-          <div class="subtitle">Attach Device to Family Account</div>
+          <h1 id="headerTitle">SafeBrowse Setup Wizard</h1>
+          <div class="subtitle" id="headerSubtitle">Attach Device to Family</div>
         </div>
       </div>
       <div class="badge-admin">
         <span>🛡️</span>
-        <span>ADMINISTRATOR</span>
+        <span>ADMINISTRATOR APPROVED</span>
       </div>
-    </div>
-
-    <div class="callout">
-      Enter the pairing code generated from the SafeBrowse Parent Dashboard (<a href="https://safebrowse.porwal.online" target="_blank" style="color: #60a5fa; text-decoration: underline;">safebrowse.porwal.online</a>) under <strong>Add Device</strong>. Device credentials will be encrypted with machine-scope Windows DPAPI and stored in secure machine configuration.
     </div>
 
     <div id="alertBox" class="alert"></div>
 
-    <div class="input-group">
-      <label for="pairingCode">SafeBrowse Pairing Code</label>
-      <input type="text" id="pairingCode" class="input-code" placeholder="SB-XXXX-XXXX" value="${prefillCode}" autofocus>
+    <!-- SCREEN 1: WELCOME -->
+    <div id="screenWelcome" class="screen active">
+      <h2 style="font-size: 22px; font-weight: 800; margin: 0 0 8px 0;">Let's protect this computer</h2>
+      <p style="color: var(--text-muted); font-size: 14px; line-height: 1.6; margin-bottom: 20px;">
+        SafeBrowse helps keep your family safe on this PC by blocking harmful content, enforcing healthy screen time schedules, and providing family insights. Setup takes about 1 minute.
+      </p>
+
+      <div class="feature-grid">
+        <div class="feature-card">
+          <div class="feature-icon">🛡️</div>
+          <div class="feature-title">Safe Browsing</div>
+          <div class="feature-desc">Automatic protection from adult and harmful websites.</div>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">⏰</div>
+          <div class="feature-title">Healthy Routines</div>
+          <div class="feature-desc">Dinner Time and Bedtime schedules enforced seamlessly.</div>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">👨‍👩‍👧‍👦</div>
+          <div class="feature-title">Family Control</div>
+          <div class="feature-desc">Manage rules anytime from your Parent Dashboard.</div>
+        </div>
+      </div>
+
+      <div class="button-row">
+        <button class="btn btn-primary" onclick="showScreen('screenPair')">Continue to Connect</button>
+        <button class="btn btn-secondary" onclick="cancelSetup()">Cancel</button>
+      </div>
     </div>
 
-    <div class="input-group">
-      <label for="deviceName">Computer Display Name</label>
-      <input type="text" id="deviceName" value="${prefillName}">
+    <!-- SCREEN 2: CONNECT TO YOUR FAMILY -->
+    <div id="screenPair" class="screen">
+      <h2 style="font-size: 22px; font-weight: 800; margin: 0 0 8px 0;">Connect to your family</h2>
+      <p style="color: var(--text-muted); font-size: 14px; line-height: 1.6; margin-bottom: 24px;">
+        Enter the 6-digit pairing code from your <strong>Parent Dashboard</strong> (<a href="https://safebrowse.porwal.online" target="_blank" style="color: #60a5fa; text-decoration: underline;">safebrowse.porwal.online</a>) under <strong>Add Device</strong>.
+      </p>
+
+      <div class="input-group">
+        <label for="pairingCode">Pairing Code</label>
+        <input type="text" id="pairingCode" class="input-code" placeholder="123456" maxlength="8" value="${prefillCode}" autofocus>
+      </div>
+
+      <div class="input-group">
+        <label for="deviceName">Computer Display Name</label>
+        <input type="text" id="deviceName" value="${prefillName}">
+      </div>
+
+      <div class="button-row">
+        <button class="btn btn-primary" id="btnPair" onclick="submitPairing()">Connect Computer</button>
+        <button class="btn btn-secondary" onclick="showScreen('screenWelcome')">Back</button>
+      </div>
     </div>
 
-    <div class="button-row">
-      <button class="btn btn-primary" id="btnPair" onclick="submitPairing()">Attach Device & Protect Laptop</button>
-      <button class="btn btn-secondary" id="btnCancel" onclick="cancelPairing()">Cancel</button>
+    <!-- SCREEN 3: WHO USES THIS COMPUTER? -->
+    <div id="screenAccounts" class="screen">
+      <h2 style="font-size: 22px; font-weight: 800; margin: 0 0 8px 0;">Who uses this computer?</h2>
+      <p style="color: var(--text-muted); font-size: 14px; line-height: 1.6; margin-bottom: 24px;">
+        Choose which child uses each Windows account. Accounts marked <strong>Parent / Don't Protect</strong> will not be filtered.
+      </p>
+
+      <div id="accountsContainer">
+        <div style="text-align: center; padding: 24px; color: var(--text-muted);">
+          Discovering Windows computer accounts...
+        </div>
+      </div>
+
+      <div class="button-row">
+        <button class="btn btn-primary" id="btnReview" onclick="reviewProtection()">Review Protection</button>
+        <button class="btn btn-secondary" onclick="showScreen('screenPair')">Back</button>
+      </div>
     </div>
+
+    <!-- SCREEN 4: READY TO PROTECT / REVIEW -->
+    <div id="screenReview" class="screen">
+      <h2 style="font-size: 22px; font-weight: 800; margin: 0 0 8px 0;">Ready to Protect</h2>
+      <p style="color: var(--text-muted); font-size: 14px; line-height: 1.6; margin-bottom: 24px;">
+        Review your family's protection settings for this computer:
+      </p>
+
+      <div id="reviewContainer">
+        <!-- Populated dynamically -->
+      </div>
+
+      <div class="callout" style="margin-top: 20px;">
+        <strong>What SafeBrowse will do on this computer:</strong><br>
+        ✓ Block adult and harmful content for protected children<br>
+        ✓ Enforce Bedtime and Dinner Time schedules automatically<br>
+        ✓ Provide an Ask Parent button when a site is blocked
+      </div>
+
+      <div class="button-row">
+        <button class="btn btn-primary" id="btnStartProtection" onclick="finishSetup()">Start Protection</button>
+        <button class="btn btn-secondary" onclick="showScreen('screenAccounts')">Change Accounts</button>
+      </div>
+    </div>
+
+    <!-- SCREEN 5: SUCCESS -->
+    <div id="screenSuccess" class="screen">
+      <div style="text-align: center; padding: 20px 0;">
+        <div style="width: 64px; height: 64px; border-radius: 50%; background: rgba(34, 197, 94, 0.2); border: 2px solid var(--success); color: var(--success); font-size: 32px; display: flex; align-items: center; justify-content: center; margin: 0 auto 20px;">
+          ✓
+        </div>
+        <h2 style="font-size: 24px; font-weight: 800; margin: 0 0 10px 0;">You're all set!</h2>
+        <p style="color: var(--text-muted); font-size: 15px; line-height: 1.6; max-width: 480px; margin: 0 auto 24px;">
+          This computer is now protected by SafeBrowse. Protection is active in the background.
+        </p>
+
+        <div class="callout" style="text-align: left; max-width: 520px; margin: 0 auto 28px;">
+          You can manage rules, set schedules, and view activity anytime from your Parent Dashboard at <a href="https://safebrowse.porwal.online" target="_blank" style="color: #60a5fa; text-decoration: underline;">safebrowse.porwal.online</a>.
+        </div>
+
+        <button class="btn btn-primary" style="max-width: 240px; margin: 0 auto;" onclick="closeSetup()">Close Setup</button>
+      </div>
+    </div>
+
   </div>
 
   <script>
+    let appState = {
+      deviceId: null,
+      deviceName: '${prefillName}',
+      accounts: [],
+      familyProfiles: [],
+      selectedMappings: []
+    };
+
     function showAlert(msg, isError = false) {
       const b = document.getElementById('alertBox');
       b.className = 'alert ' + (isError ? 'alert-error' : 'alert-success');
@@ -651,54 +987,206 @@ export class ElevatedPairServer {
       b.style.display = 'block';
     }
 
+    function clearAlert() {
+      const b = document.getElementById('alertBox');
+      b.style.display = 'none';
+    }
+
+    function showScreen(id) {
+      clearAlert();
+      document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+      const target = document.getElementById(id);
+      if (target) target.classList.add('active');
+    }
+
     async function submitPairing() {
-      const code = document.getElementById('pairingCode').value.trim();
-      const deviceName = document.getElementById('deviceName').value.trim();
+      const codeInput = document.getElementById('pairingCode');
+      const code = (codeInput?.value || '').trim();
+      const name = (document.getElementById('deviceName')?.value || '').trim() || 'Family Laptop';
       const btn = document.getElementById('btnPair');
-      const cancelBtn = document.getElementById('btnCancel');
 
       if (!code) {
-        showAlert('Please enter a valid pairing code.', true);
+        showAlert('Please enter the 6-digit pairing code from your Parent Dashboard.', true);
         return;
       }
 
       btn.disabled = true;
-      cancelBtn.disabled = true;
-      btn.innerText = 'Connecting & Securing Device...';
-      showAlert('Claiming device credentials and configuring machine protection...', false);
+      btn.innerText = 'Connecting to SafeBrowse...';
+      showAlert('Connecting to your family account...', false);
 
       try {
         const res = await fetch('/api/claim-and-pair', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code, deviceName })
+          body: JSON.stringify({ code, deviceName: name })
         });
 
         const data = await res.json().catch(() => ({}));
-
         if (res.ok && data.success) {
-          showAlert('Device attached successfully! SafeBrowse service is running. Closing window...', false);
-          btn.innerText = 'Device Attached ✓';
-          setTimeout(() => {
-            window.close();
-          }, 1400);
+          appState.deviceId = data.device.deviceId;
+          appState.deviceName = data.device.deviceName;
+          clearAlert();
+          await loadAccountsScreen();
+          showScreen('screenAccounts');
         } else {
           showAlert(data.error || 'Pairing failed. Please check the code and retry.', true);
           btn.disabled = false;
-          cancelBtn.disabled = false;
-          btn.innerText = 'Attach Device & Protect Laptop';
+          btn.innerText = 'Connect Computer';
         }
       } catch (e) {
-        showAlert('Network error communicating with local pairing service: ' + e.message, true);
+        showAlert('Error communicating with setup service: ' + e.message, true);
         btn.disabled = false;
-        cancelBtn.disabled = false;
-        btn.innerText = 'Attach Device & Protect Laptop';
+        btn.innerText = 'Connect Computer';
       }
     }
 
-    async function cancelPairing() {
+    async function loadAccountsScreen() {
+      const container = document.getElementById('accountsContainer');
+      container.innerHTML = '<div style="text-align: center; padding: 24px; color: var(--text-muted);">Discovering Windows computer accounts...</div>';
+
+      try {
+        const [accRes, profRes] = await Promise.all([
+          fetch('/api/accounts').then(r => r.json()),
+          fetch('/api/family-profiles').then(r => r.json())
+        ]);
+
+        appState.accounts = accRes.accounts || [];
+        appState.familyProfiles = profRes.profiles || [];
+
+        renderAccounts();
+      } catch (err) {
+        container.innerHTML = '<div style="color: var(--danger); padding: 16px;">Failed to discover accounts: ' + err.message + '</div>';
+      }
+    }
+
+    function renderAccounts() {
+      const container = document.getElementById('accountsContainer');
+      if (appState.accounts.length === 0) {
+        container.innerHTML = '<div style="text-align: center; padding: 20px; color: var(--text-muted);">No interactive human accounts detected on this computer.</div>';
+        return;
+      }
+
+      let html = '';
+      const autoPreselect = appState.accounts.length === 1 && appState.familyProfiles.length === 1;
+
+      appState.accounts.forEach((acc, idx) => {
+        const isCurrent = Boolean(acc.isCurrentConsoleUser);
+        const displayName = acc.name || 'User Account';
+        const cleanName = displayName.replace(/^.*\\\\/, '');
+
+        html += \`
+          <div class="account-card">
+            <div class="account-info">
+              <div class="account-avatar">👤</div>
+              <div>
+                <div class="account-name">
+                  \${cleanName}
+                  \${isCurrent ? '<span class="account-badge">Current User</span>' : ''}
+                </div>
+                <div style="font-size: 11px; color: var(--text-muted);">\${displayName}</div>
+              </div>
+            </div>
+            <div>
+              <select class="account-select" data-sid="\${acc.sid}" data-username="\${displayName}">
+                <option value="">Parent / Don't Protect</option>
+                \${appState.familyProfiles.map(p => {
+                  const selected = autoPreselect ? 'selected' : '';
+                  return \`<option value="\${p.id}" \${selected}>\${p.name}\${p.age ? ' (Age ' + p.age + ')' : ''}</option>\`;
+                }).join('')}
+              </select>
+            </div>
+          </div>
+        \`;
+      });
+
+      container.innerHTML = html;
+    }
+
+    function reviewProtection() {
+      const selects = document.querySelectorAll('.account-select');
+      const mappings = [];
+      const reviewContainer = document.getElementById('reviewContainer');
+      let reviewHtml = '';
+
+      selects.forEach(sel => {
+        const sid = sel.getAttribute('data-sid');
+        const username = sel.getAttribute('data-username');
+        const childId = sel.value || null;
+        const cleanName = username.replace(/^.*\\\\/, '');
+
+        let childName = null;
+        if (childId) {
+          const prof = appState.familyProfiles.find(p => p.id === childId);
+          childName = prof ? prof.name : 'Protected Child';
+        }
+
+        mappings.push({
+          windowsSid: sid,
+          windowsUsername: username,
+          childId: childId,
+          childName: childName,
+          enabled: true
+        });
+
+        reviewHtml += \`
+          <div class="summary-card">
+            <div>
+              <div style="font-weight: 700; font-size: 14px;">\${cleanName}</div>
+              <div style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">
+                \${childId ? 'Used by ' + childName : 'Unrestricted user'}
+              </div>
+            </div>
+            <div>
+              \${childId ? '<span class="pill-protected">Protected</span>' : '<span class="pill-parent">Parent (Unrestricted)</span>'}
+            </div>
+          </div>
+        \`;
+      });
+
+      appState.selectedMappings = mappings;
+      reviewContainer.innerHTML = reviewHtml;
+      showScreen('screenReview');
+    }
+
+    async function finishSetup() {
+      const btn = document.getElementById('btnStartProtection');
+      btn.disabled = true;
+      btn.innerText = 'Applying protection and syncing...';
+      showAlert('Securing computer and synchronizing protection rules...', false);
+
+      try {
+        const res = await fetch('/api/finish-setup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mappings: appState.selectedMappings })
+        });
+
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.success) {
+          clearAlert();
+          showScreen('screenSuccess');
+        } else {
+          showAlert(data.error || 'Failed to finish setup. Please retry.', true);
+          btn.disabled = false;
+          btn.innerText = 'Start Protection';
+        }
+      } catch (err) {
+        showAlert('Error finishing setup: ' + err.message, true);
+        btn.disabled = false;
+        btn.innerText = 'Start Protection';
+      }
+    }
+
+    async function cancelSetup() {
       try {
         await fetch('/api/cancel', { method: 'POST' });
+      } catch {}
+      window.close();
+    }
+
+    async function closeSetup() {
+      try {
+        await fetch('/api/close', { method: 'POST' });
       } catch {}
       window.close();
     }

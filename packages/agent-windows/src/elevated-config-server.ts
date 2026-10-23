@@ -160,6 +160,20 @@ export class ElevatedConfigServer {
                 allowedChildIds,
               });
 
+              // Synchronize mappings to SafeBrowse cloud backend
+              if (secureConfig?.backendUrl && secureConfig?.deviceId && secureConfig?.deviceToken) {
+                try {
+                  await this.accountMgr.syncAccountMappingsToCloud(
+                    secureConfig.backendUrl,
+                    secureConfig.deviceId,
+                    secureConfig.deviceToken,
+                    mappings
+                  );
+                } catch (syncErr: any) {
+                  logServiceMessage('WARN', `[ElevatedConfigServer] Cloud sync warning: ${syncErr.message}`);
+                }
+              }
+
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ success: true }));
 

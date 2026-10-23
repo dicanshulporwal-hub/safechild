@@ -432,6 +432,65 @@ export class GuiServer {
           return;
         }
 
+        // Endpoint: POST /api/open-dashboard
+        if (pathname === '/api/open-dashboard' && req.method === 'POST') {
+          try {
+            const config = await this.configMgr.loadSanitizedConfig();
+            const dashUrl = config?.backendUrl || 'https://safebrowse.porwal.online';
+            if (process.platform === 'win32') {
+              await execAsync(`start "" "${dashUrl}"`);
+            } else if (process.env.NODE_ENV !== 'test') {
+              try {
+                await execAsync(`xdg-open "${dashUrl}" || open "${dashUrl}"`);
+              } catch {}
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, url: dashUrl }));
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e.message }));
+          }
+          return;
+        }
+
+        // Endpoint: GET /api/check-protection
+        if (pathname === '/api/check-protection' && req.method === 'GET') {
+          try {
+            let status: any = null;
+            try {
+              status = await evaluateSystemStatus();
+            } catch {}
+            const activeSession = await this.accountMgr.getActiveConsoleSession();
+            const activePolicy = await this.accountMgr.resolveUserPolicy(activeSession.sid, activeSession.username);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(
+              JSON.stringify({
+                success: true,
+                status,
+                activeSession,
+                activePolicy,
+              })
+            );
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e.message }));
+          }
+          return;
+        }
+
+        // Endpoint: POST /api/disconnect
+        if (pathname === '/api/disconnect' && req.method === 'POST') {
+          try {
+            await this.configMgr.deleteDeviceConfig();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true }));
+          } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e.message }));
+          }
+          return;
+        }
+
         // Serve Application HTML/UI
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(this.renderHtml());
@@ -805,9 +864,11 @@ export class GuiServer {
         </table>
       </div>
 
-      <div class="button-row">
-        <button class="btn btn-primary" id="btnReconfigure" onclick="launchElevatedReconfigure()">Reconfigure Accounts</button>
-        <button class="btn btn-secondary" onclick="loadStatusScreen()">Refresh Status</button>
+      <div class="button-row" style="flex-wrap: wrap;">
+        <button class="btn btn-primary" onclick="openParentDashboard()">🌐 Open Parent Dashboard</button>
+        <button class="btn btn-secondary" id="btnReconfigure" onclick="launchElevatedReconfigure()">👥 Change Computer Users</button>
+        <button class="btn btn-secondary" onclick="checkProtectionDiagnostics()">🩺 Check Protection</button>
+        <button class="btn btn-secondary" style="border-color: rgba(239, 68, 68, 0.4); color: #fca5a5;" onclick="confirmDisconnect()">Disconnect Device</button>
       </div>
     </div>
   </div>
@@ -1193,6 +1254,52 @@ export class GuiServer {
         }
       } catch (e) {
         if (!silent) showAlert('Failed to refresh status: ' + e.message, true);
+      }
+    }
+
+    async function openParentDashboard() {
+      try {
+        await fetch('/api/open-dashboard', { method: 'POST' });
+      } catch {
+        window.open('https://safebrowse.porwal.online', '_blank');
+      }
+    }
+
+    async function checkProtectionDiagnostics() {
+      showAlert('Running SafeBrowse protection diagnostics...', false);
+      try {
+        const res = await fetch('/api/check-protection');
+        const data = await res.json();
+        if (data.success) {
+          const sys = data.status || {};
+          const isManaged = data.activePolicy?.isManaged;
+          const msg = 'Protection Check: ' +
+            (sys.dnsEnforced ? 'DNS Filter Active ✓ | ' : 'DNS Inactive ✗ | ') +
+            'Session: ' + (isManaged ? 'Protected (' + (data.activePolicy.childName || 'Child') + ')' : 'Parent Unrestricted');
+          showAlert(msg, !sys.dnsEnforced);
+        } else {
+          showAlert('Diagnostic check failed: ' + data.error, true);
+        }
+      } catch (e) {
+        showAlert('Diagnostic check error: ' + e.message, true);
+      }
+    }
+
+    async function confirmDisconnect() {
+      if (!confirm('Are you sure you want to disconnect this computer from SafeBrowse? Protection will be disabled until reconnected.')) {
+        return;
+      }
+      try {
+        const res = await fetch('/api/disconnect', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.success) {
+          showAlert('Device disconnected successfully.');
+          setTimeout(() => location.reload(), 1000);
+        } else {
+          showAlert(data.error || 'Failed to disconnect device.', true);
+        }
+      } catch (e) {
+        showAlert('Error disconnecting device: ' + e.message, true);
       }
     }
 

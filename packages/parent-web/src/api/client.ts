@@ -44,6 +44,19 @@ export interface Policy {
   updatedAt: string;
 }
 
+export interface DeviceAccountMappingDto {
+  id: string;
+  deviceId: string;
+  familyId: string;
+  windowsSid: string;
+  windowsUsername: string;
+  childId: string | null;
+  childName?: string | null;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Device {
   id: string;
   childId: string;
@@ -57,8 +70,8 @@ export interface Device {
   lastSyncAt?: string;
   lastHeartbeatAt: string;
   activePolicyVersion: number;
-  healthStatus: 'protected' | 'syncing' | 'inactive' | 'attention_required' | 'PROTECTED' | 'DEGRADED' | 'OFFLINE' | 'BYPASSED';
-  healthState?: 'PROTECTED' | 'DEGRADED' | 'OFFLINE' | 'INACTIVE';
+  healthStatus: 'protected' | 'syncing' | 'inactive' | 'attention_required' | 'PROTECTED' | 'DEGRADED' | 'OFFLINE' | 'BYPASSED' | 'account_setup_required';
+  healthState?: 'PROTECTED' | 'DEGRADED' | 'OFFLINE' | 'INACTIVE' | 'ACCOUNT_SETUP_REQUIRED';
   agentVersion?: string;
   isOnline?: boolean;
   isRevoked?: boolean;
@@ -70,6 +83,9 @@ export interface Device {
   configuredPolicyVersion?: number;
   agentActivePolicyVersion?: number | null;
   policySyncStatus?: 'SYNCED' | 'SYNC_PENDING' | 'VERSION_MISMATCH' | 'UNKNOWN';
+  accountMappings?: DeviceAccountMappingDto[];
+  activeChildId?: string | null;
+  mappedAccountSid?: string | null;
 }
 
 export interface DeviceDetails {

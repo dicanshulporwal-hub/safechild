@@ -411,9 +411,8 @@ export const DeviceDetailsPage: React.FC<DeviceDetailsPageProps> = ({ childrenLi
 
             <div className="pt-1">
               <p className="text-[11px] text-slate-500 leading-normal">
-                To switch profiles or designate unmanaged parent accounts, open the SafeBrowse setup
-                utility on the device at{' '}
-                <span className="text-slate-400 font-mono">http://127.0.0.1:8885</span>.
+                To switch profiles or designate unmanaged parent accounts, launch SafeBrowse from
+                the Start Menu on the computer.
               </p>
             </div>
           </div>
@@ -526,6 +525,68 @@ export const DeviceDetailsPage: React.FC<DeviceDetailsPageProps> = ({ childrenLi
             </div>
           </div>
         </div>
+
+        {/* Card 5: Configured Computer Accounts (for Windows) */}
+        {device.platform === 'windows' && (
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 lg:col-span-2">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <Laptop className="w-4 h-4 text-indigo-400" />
+                Configured Computer Accounts
+              </h3>
+              <span className="text-xs text-slate-400">
+                {device.accountMappings?.length || 0} Accounts Detected
+              </span>
+            </div>
+
+            {(!device.accountMappings || device.accountMappings.length === 0) ? (
+              <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center gap-2.5">
+                <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                <span>No computer accounts configured yet. Open SafeBrowse on the PC to assign accounts.</span>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-slate-400 font-semibold uppercase text-[10px]">
+                      <th className="pb-2">Windows Account</th>
+                      <th className="pb-2">Assigned User</th>
+                      <th className="pb-2">Protection State</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {device.accountMappings.map((m) => (
+                      <tr key={m.id || m.windowsSid} className="py-2.5">
+                        <td className="py-2.5 font-medium text-white flex items-center gap-2">
+                          <span className="w-6 h-6 rounded-lg bg-slate-800 flex items-center justify-center text-[10px]">👤</span>
+                          <span>{m.windowsUsername}</span>
+                        </td>
+                        <td className="py-2.5 text-slate-300">
+                          {m.childId ? (
+                            <span className="font-bold text-emerald-400">{m.childName || 'Protected Child'}</span>
+                          ) : (
+                            <span className="text-slate-400">Parent (Unrestricted)</span>
+                          )}
+                        </td>
+                        <td className="py-2.5">
+                          {m.childId ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                              <ShieldCheck className="w-3 h-3" /> Protected
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-800 text-slate-400 border border-slate-700">
+                              Unrestricted
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* --- Rename Modal --- */}

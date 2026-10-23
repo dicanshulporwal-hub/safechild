@@ -162,6 +162,15 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
     const isMultiple = device.hasMultipleSessions || device.healthStatus === 'attention_required' || device.healthState === 'DEGRADED';
     const isBypass = device.protectionStatus === 'PARENT_BYPASS' || device.healthStatus === 'BYPASSED';
 
+    if (device.healthState === 'ACCOUNT_SETUP_REQUIRED' || device.healthStatus === 'account_setup_required') {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30">
+          <AlertTriangle className="w-3.5 h-3.5" />
+          Setup Required
+        </span>
+      );
+    }
+
     if (isMultiple) {
       return (
         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/30">
@@ -456,6 +465,31 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
                     </button>
                   </div>
                 </div>
+
+                {/* Account Mappings Summary for Windows Devices */}
+                {device.platform === 'windows' && (
+                  device.healthState === 'ACCOUNT_SETUP_REQUIRED' || (!device.accountMappings || device.accountMappings.length === 0) ? (
+                    <div className="mt-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl flex items-center gap-2.5 text-xs text-amber-300">
+                      <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                      <span>Setup Incomplete — Finish assigning this computer's Windows users in SafeBrowse app on the PC.</span>
+                    </div>
+                  ) : (
+                    <div className="mt-4 p-3 bg-slate-950/60 border border-slate-800 rounded-xl flex flex-wrap items-center gap-2 text-xs">
+                      <span className="text-slate-400 font-semibold">Configured Users:</span>
+                      {device.accountMappings.map((m, i) => (
+                        <span key={m.id || i} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-800/80 text-xs border border-slate-700/60">
+                          <span className="text-slate-200 font-medium">{m.windowsUsername.replace(/^.*\\/, '')}</span>
+                          <span className="text-slate-500">→</span>
+                          {m.childId ? (
+                            <span className="text-emerald-400 font-bold">{m.childName || 'Child'}</span>
+                          ) : (
+                            <span className="text-slate-400">Parent (Unrestricted)</span>
+                          )}
+                        </span>
+                      ))}
+                    </div>
+                  )
+                )}
               </div>
             );
           })}

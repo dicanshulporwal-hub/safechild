@@ -779,6 +779,23 @@ export class ConfigManager {
   public hasDeviceConfig(): boolean {
     return fs.existsSync(this.getConfigFilePath()) || fs.existsSync(this.getSanitizedConfigFilePath());
   }
+
+  public async clearDeviceConfig(): Promise<void> {
+    try {
+      if (fs.existsSync(this.getConfigFilePath())) {
+        fs.unlinkSync(this.getConfigFilePath());
+      }
+    } catch {}
+    try {
+      if (fs.existsSync(this.getSanitizedConfigFilePath())) {
+        fs.unlinkSync(this.getSanitizedConfigFilePath());
+      }
+    } catch {}
+  }
+
+  public async deleteDeviceConfig(): Promise<void> {
+    await this.clearDeviceConfig();
+  }
 }
 
 export const configManager = new ConfigManager();

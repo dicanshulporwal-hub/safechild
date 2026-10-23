@@ -85,6 +85,8 @@ deviceRouter.post('/heartbeat', deviceAuthMiddleware, async (req: AuthenticatedD
       platform,
       agentVersion,
       mappedAccountName,
+      mappedAccountSid,
+      activeChildId,
       hasMultipleSessions,
       protectionStatus,
     } = req.body;
@@ -97,6 +99,8 @@ deviceRouter.post('/heartbeat', deviceAuthMiddleware, async (req: AuthenticatedD
       platform: platform || 'windows',
       agentVersion: agentVersion || '1.0.0',
       mappedAccountName,
+      mappedAccountSid,
+      activeChildId,
       hasMultipleSessions,
       protectionStatus,
     });
@@ -315,6 +319,70 @@ deviceRouter.post('/:id/diagnostics', authMiddleware, requireVerifiedEmail, asyn
     });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// Helper to authenticate either Device or Parent for account mappings
+async function deviceOrParentAuth(req: any, res: Response, next: any) {
+  const deviceId = req.params.id || req.params.deviceId;
+  const tokenHeader = req.headers['x-device-token'] as string;
+  const authHeader = req.headers.authorization;
+
+  // 1. Try Device Token
+  if (tokenHeader || (authHeader && authHeader.startsWith('Bearer dtk_'))) {
+    return deviceAuthMiddleware(req, res, next);
+  }
+
+  // 2. Try Parent JWT
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    return authMiddleware(req, res, async () => {
+      try {
+        const family = await rbacService.getFamilyForDevice(deviceId);
+        if (!family || !(await rbacService.getFamilyMembership(req.userId!, family.id))) {
+          return res.status(403).json({ error: 'Forbidden. You do not belong to the family that owns this device.' });
+        }
+        if (req.method === 'PUT' || req.method === 'POST') {
+          const hasPerm = await rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.DEVICE_MANAGE);
+          if (!hasPerm) {
+            return res.status(403).json({ error: 'Forbidden. Insufficient permissions to manage device accounts.' });
+          }
+        } else {
+          const hasPerm = await rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.DEVICE_READ);
+          if (!hasPerm) {
+            return res.status(403).json({ error: 'Forbidden. Insufficient permissions to read device accounts.' });
+          }
+        }
+        next();
+      } catch (err: any) {
+        return res.status(500).json({ error: err.message });
+      }
+    });
+  }
+
+  return res.status(401).json({ error: 'Unauthorized. Device token or parent credentials required.' });
+}
+
+// Sync device account mappings (Device or Parent auth)
+deviceRouter.put('/:id/account-mappings', deviceOrParentAuth, async (req: any, res: Response) => {
+  try {
+    const { mappings } = req.body;
+    if (!Array.isArray(mappings)) {
+      return res.status(400).json({ error: 'Invalid request: mappings array is required.' });
+    }
+    const result = await deviceService.syncDeviceAccountMappings(req.params.id, mappings);
+    res.json(result);
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Get device account mappings (Device or Parent auth)
+deviceRouter.get('/:id/account-mappings', deviceOrParentAuth, async (req: any, res: Response) => {
+  try {
+    const mappings = await deviceService.getDeviceAccountMappings(req.params.id);
+    res.json({ mappings });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
   }
 });
 

@@ -5,6 +5,7 @@ import {
   DevicePlatform,
   HeartbeatPayload,
   HeartbeatResponse,
+  DeviceAccountMappingDto,
 } from '@safebrowse/shared';
 import { HealthState } from '@safebrowse/protocol';
 import crypto from 'crypto';
@@ -18,7 +19,7 @@ export const DEVICE_OFFLINE_THRESHOLD_SECONDS = 120;
 export interface ExtendedDevice extends Device {
   isRevoked?: boolean;
   revokedAt?: string | null;
-  healthState: HealthState;
+  healthState: HealthState | 'ACCOUNT_SETUP_REQUIRED';
   childName?: string;
   isOnline?: boolean;
   enforcementActive?: boolean;
@@ -29,6 +30,9 @@ export interface ExtendedDevice extends Device {
   agentActivePolicyVersion?: number | null;
   policySyncStatus?: 'SYNCED' | 'SYNC_PENDING' | 'VERSION_MISMATCH' | 'UNKNOWN';
   capabilities?: any;
+  accountMappings?: DeviceAccountMappingDto[];
+  activeChildId?: string | null;
+  mappedAccountSid?: string | null;
 }
 
 export class DeviceService {
@@ -236,6 +240,22 @@ export class DeviceService {
     const multiSessions = payload.hasMultipleSessions !== undefined ? Boolean(payload.hasMultipleSessions) : device.hasMultipleSessions;
     const protStatus = payload.protectionStatus || device.protectionStatus || (computedHealthState === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN');
 
+    // Section 12: Validate activeChildId belongs to a stored mapping for this device
+    let activeChildIdToPersist: string | null = null;
+    const reqActiveChildId = (payload as any).activeChildId;
+    if (reqActiveChildId) {
+      const validMapping = await prisma.deviceAccountMapping.findFirst({
+        where: {
+          deviceId: device.id,
+          childId: reqActiveChildId,
+          enabled: true,
+        },
+      });
+      if (validMapping) {
+        activeChildIdToPersist = validMapping.childId;
+      }
+    }
+
     await prisma.device.update({
       where: { id: device.id },
       data: {
@@ -247,6 +267,8 @@ export class DeviceService {
         healthState: computedHealthState,
         healthStatus: computedHealthStatus,
         mappedAccountName: mappedAccount,
+        mappedAccountSid: (payload as any).mappedAccountSid || device.mappedAccountSid,
+        activeChildId: activeChildIdToPersist !== null ? activeChildIdToPersist : device.activeChildId,
         hasMultipleSessions: multiSessions,
         protectionStatus: protStatus,
         ...(caps
@@ -272,6 +294,7 @@ export class DeviceService {
         activePolicyVersion: payload.activePolicyVersion,
         lastHeartbeatAt: now.toISOString(),
         mappedAccountName: payload.mappedAccountName,
+        activeChildId: activeChildIdToPersist || device.activeChildId,
         hasMultipleSessions: Boolean(payload.hasMultipleSessions),
       },
       parentId: device.parentId,
@@ -359,6 +382,9 @@ export class DeviceService {
         child: {
           select: { name: true, policy: { select: { version: true } } },
         },
+        accountMappings: {
+          include: { child: { select: { id: true, name: true } } },
+        },
       },
     });
     if (!dev) return null;
@@ -367,11 +393,18 @@ export class DeviceService {
     const lastHb = dev.lastHeartbeatAt.getTime();
     const elapsedSeconds = (now - lastHb) / 1000;
     const isOnline = elapsedSeconds < DEVICE_OFFLINE_THRESHOLD_SECONDS && !dev.isRevoked;
-    let state: HealthState = (dev.healthState as any) || 'PROTECTED';
+    let state: any = (dev.healthState as any) || 'PROTECTED';
     if (dev.isRevoked) {
       state = 'INACTIVE';
     } else if (!isOnline) {
       state = 'OFFLINE';
+    } else if (
+      dev.platform.toLowerCase() === 'windows' &&
+      (!dev.accountMappings || dev.accountMappings.length === 0) &&
+      !dev.mappedAccountName &&
+      !dev.activeChildId
+    ) {
+      state = 'ACCOUNT_SETUP_REQUIRED';
     }
 
     const configuredVersion = dev.child?.policy?.version ?? 1;
@@ -385,6 +418,19 @@ export class DeviceService {
         policySyncStatus = 'VERSION_MISMATCH';
       }
     }
+
+    const mappingsDto: DeviceAccountMappingDto[] = (dev.accountMappings || []).map((m: any) => ({
+      id: m.id,
+      deviceId: m.deviceId,
+      familyId: m.familyId,
+      windowsSid: m.windowsSid,
+      windowsUsername: m.windowsUsername,
+      childId: m.childId,
+      childName: m.child?.name || null,
+      enabled: m.enabled,
+      createdAt: m.createdAt.toISOString(),
+      updatedAt: m.updatedAt.toISOString(),
+    }));
 
     return {
       id: dev.id,
@@ -402,7 +448,7 @@ export class DeviceService {
       configuredPolicyVersion: configuredVersion,
       agentActivePolicyVersion: dev.activePolicyVersion ?? null,
       policySyncStatus,
-      healthStatus: (state === 'OFFLINE' || state === 'INACTIVE' ? 'inactive' : dev.healthStatus) as any,
+      healthStatus: (state === 'OFFLINE' || state === 'INACTIVE' ? 'inactive' : (state === 'ACCOUNT_SETUP_REQUIRED' ? 'account_setup_required' : dev.healthStatus)) as any,
       healthState: state,
       isOnline,
       enforcementActive: dev.enforcementActive,
@@ -410,7 +456,10 @@ export class DeviceService {
       agentVersion: dev.agentVersion,
       windowsAccountName: dev.mappedAccountName || '',
       hasMultipleSessions: dev.hasMultipleSessions || false,
-      protectionStatus: dev.protectionStatus || (state === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN'),
+      protectionStatus: state === 'ACCOUNT_SETUP_REQUIRED' ? 'ACCOUNT_SETUP_REQUIRED' : (dev.protectionStatus || (state === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN')),
+      accountMappings: mappingsDto,
+      activeChildId: dev.activeChildId || null,
+      mappedAccountSid: dev.mappedAccountSid || null,
       capabilities: {
         activityTelemetryAvailable: dev.activityTelemetryAvailable,
         appUsageAvailable: dev.appUsageAvailable,
@@ -433,29 +482,66 @@ export class DeviceService {
   }
 
   public async getDevicesForChild(childId: string): Promise<ExtendedDevice[]> {
+    const child = await prisma.child.findUnique({
+      where: { id: childId },
+      select: { id: true, name: true, familyId: true, policy: { select: { version: true } } },
+    });
+    if (!child) return [];
+
     const now = Date.now();
-    const list = await prisma.device.findMany({
-      where: { childId },
+    // Return device when:
+    // 1) Active DeviceAccountMapping for this child (childId && enabled)
+    // OR 2) device.childId == childId (Android or legacy Windows fallback)
+    // AND device.familyId == child.familyId
+    const candidateDevices = await prisma.device.findMany({
+      where: {
+        familyId: child.familyId,
+        OR: [
+          { childId: child.id },
+          {
+            accountMappings: {
+              some: {
+                childId: child.id,
+                enabled: true,
+              },
+            },
+          },
+        ],
+      },
       include: {
         child: {
           select: { name: true, policy: { select: { version: true } } },
+        },
+        accountMappings: {
+          include: { child: { select: { id: true, name: true } } },
         },
       },
       orderBy: { createdAt: 'desc' },
     });
 
-    return list.map((dev: any) => {
+    return candidateDevices.map((dev: any) => {
       const lastHb = dev.lastHeartbeatAt.getTime();
       const elapsedSeconds = (now - lastHb) / 1000;
       const isOnline = elapsedSeconds < DEVICE_OFFLINE_THRESHOLD_SECONDS && !dev.isRevoked;
-      let state: HealthState = (dev.healthState as any) || 'PROTECTED';
+      let state: any = (dev.healthState as any) || 'PROTECTED';
       if (dev.isRevoked) {
         state = 'INACTIVE';
       } else if (!isOnline) {
         state = 'OFFLINE';
+      } else if (
+        dev.platform.toLowerCase() === 'windows' &&
+        (!dev.accountMappings || dev.accountMappings.length === 0) &&
+        !dev.mappedAccountName &&
+        !dev.activeChildId
+      ) {
+        state = 'ACCOUNT_SETUP_REQUIRED';
       }
 
-      const configuredVersion = dev.child?.policy?.version ?? 1;
+      // Check for child-specific account mapping name
+      const childMapping = (dev.accountMappings || []).find((m: any) => m.childId === childId && m.enabled);
+      const specificAccountName = childMapping ? childMapping.windowsUsername : (dev.mappedAccountName || '');
+
+      const configuredVersion = child.policy?.version ?? 1;
       let policySyncStatus: 'SYNCED' | 'SYNC_PENDING' | 'VERSION_MISMATCH' | 'UNKNOWN' = 'UNKNOWN';
       if (dev.activePolicyVersion != null && configuredVersion != null) {
         if (dev.activePolicyVersion === configuredVersion) {
@@ -467,10 +553,23 @@ export class DeviceService {
         }
       }
 
+      const mappingsDto: DeviceAccountMappingDto[] = (dev.accountMappings || []).map((m: any) => ({
+        id: m.id,
+        deviceId: m.deviceId,
+        familyId: m.familyId,
+        windowsSid: m.windowsSid,
+        windowsUsername: m.windowsUsername,
+        childId: m.childId,
+        childName: m.child?.name || null,
+        enabled: m.enabled,
+        createdAt: m.createdAt.toISOString(),
+        updatedAt: m.updatedAt.toISOString(),
+      }));
+
       return {
         id: dev.id,
-        childId: dev.childId,
-        childName: dev.child?.name,
+        childId: child.id,
+        childName: child.name,
         parentId: dev.parentId,
         familyId: dev.familyId,
         name: dev.name,
@@ -483,15 +582,18 @@ export class DeviceService {
         configuredPolicyVersion: configuredVersion,
         agentActivePolicyVersion: dev.activePolicyVersion ?? null,
         policySyncStatus,
-        healthStatus: (state === 'OFFLINE' || state === 'INACTIVE' ? 'inactive' : dev.healthStatus) as any,
+        healthStatus: (state === 'OFFLINE' || state === 'INACTIVE' ? 'inactive' : (state === 'ACCOUNT_SETUP_REQUIRED' ? 'account_setup_required' : dev.healthStatus)) as any,
         healthState: state,
         isOnline,
         enforcementActive: dev.enforcementActive,
         isRevoked: dev.isRevoked,
         agentVersion: dev.agentVersion,
-        windowsAccountName: dev.mappedAccountName || '',
+        windowsAccountName: specificAccountName,
         hasMultipleSessions: dev.hasMultipleSessions || false,
-        protectionStatus: dev.protectionStatus || (state === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN'),
+        protectionStatus: state === 'ACCOUNT_SETUP_REQUIRED' ? 'ACCOUNT_SETUP_REQUIRED' : (dev.protectionStatus || (state === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN')),
+        accountMappings: mappingsDto,
+        activeChildId: dev.activeChildId || null,
+        mappedAccountSid: dev.mappedAccountSid || null,
         capabilities: {
           activityTelemetryAvailable: dev.activityTelemetryAvailable,
           appUsageAvailable: dev.appUsageAvailable,
@@ -518,6 +620,9 @@ export class DeviceService {
         child: {
           select: { name: true, policy: { select: { version: true } } },
         },
+        accountMappings: {
+          include: { child: { select: { id: true, name: true } } },
+        },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -526,11 +631,18 @@ export class DeviceService {
       const lastHb = dev.lastHeartbeatAt.getTime();
       const elapsedSeconds = (now - lastHb) / 1000;
       const isOnline = elapsedSeconds < DEVICE_OFFLINE_THRESHOLD_SECONDS && !dev.isRevoked;
-      let state: HealthState = (dev.healthState as any) || 'PROTECTED';
+      let state: any = (dev.healthState as any) || 'PROTECTED';
       if (dev.isRevoked) {
         state = 'INACTIVE';
       } else if (!isOnline) {
         state = 'OFFLINE';
+      } else if (
+        dev.platform.toLowerCase() === 'windows' &&
+        (!dev.accountMappings || dev.accountMappings.length === 0) &&
+        !dev.mappedAccountName &&
+        !dev.activeChildId
+      ) {
+        state = 'ACCOUNT_SETUP_REQUIRED';
       }
 
       const configuredVersion = dev.child?.policy?.version ?? 1;
@@ -544,6 +656,19 @@ export class DeviceService {
           policySyncStatus = 'VERSION_MISMATCH';
         }
       }
+
+      const mappingsDto: DeviceAccountMappingDto[] = (dev.accountMappings || []).map((m: any) => ({
+        id: m.id,
+        deviceId: m.deviceId,
+        familyId: m.familyId,
+        windowsSid: m.windowsSid,
+        windowsUsername: m.windowsUsername,
+        childId: m.childId,
+        childName: m.child?.name || null,
+        enabled: m.enabled,
+        createdAt: m.createdAt.toISOString(),
+        updatedAt: m.updatedAt.toISOString(),
+      }));
 
       return {
         id: dev.id,
@@ -561,7 +686,7 @@ export class DeviceService {
         configuredPolicyVersion: configuredVersion,
         agentActivePolicyVersion: dev.activePolicyVersion ?? null,
         policySyncStatus,
-        healthStatus: (state === 'OFFLINE' || state === 'INACTIVE' ? 'inactive' : dev.healthStatus) as any,
+        healthStatus: (state === 'OFFLINE' || state === 'INACTIVE' ? 'inactive' : (state === 'ACCOUNT_SETUP_REQUIRED' ? 'account_setup_required' : dev.healthStatus)) as any,
         healthState: state,
         isOnline,
         enforcementActive: dev.enforcementActive,
@@ -569,7 +694,10 @@ export class DeviceService {
         agentVersion: dev.agentVersion,
         windowsAccountName: dev.mappedAccountName || '',
         hasMultipleSessions: dev.hasMultipleSessions || false,
-        protectionStatus: dev.protectionStatus || (state === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN'),
+        protectionStatus: state === 'ACCOUNT_SETUP_REQUIRED' ? 'ACCOUNT_SETUP_REQUIRED' : (dev.protectionStatus || (state === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN')),
+        accountMappings: mappingsDto,
+        activeChildId: dev.activeChildId || null,
+        mappedAccountSid: dev.mappedAccountSid || null,
         capabilities: {
           activityTelemetryAvailable: dev.activityTelemetryAvailable,
           appUsageAvailable: dev.appUsageAvailable,
@@ -582,6 +710,136 @@ export class DeviceService {
         },
       };
     });
+  }
+
+  public async syncDeviceAccountMappings(
+    deviceId: string,
+    mappings: Array<{ windowsSid: string; windowsUsername: string; childId: string | null; enabled?: boolean }>
+  ): Promise<{ success: boolean; count: number; mappings: DeviceAccountMappingDto[] }> {
+    if (!Array.isArray(mappings)) {
+      throw new Error('Invalid mappings: expected an array.');
+    }
+
+    const device = await prisma.device.findUnique({
+      where: { id: deviceId },
+    });
+    if (!device) {
+      throw new Error('Device not found.');
+    }
+    if (device.isRevoked) {
+      throw new Error('Device credentials have been revoked.');
+    }
+
+    const seenSids = new Set<string>();
+    const sidRegex = /^S-[0-9]-[0-9]+(-[0-9]+)+$/i;
+
+    for (const m of mappings) {
+      if (!m || !m.windowsSid) {
+        throw new Error('Mapping entry is missing a valid Windows SID.');
+      }
+      const cleanSid = m.windowsSid.trim().toUpperCase();
+      if (!sidRegex.test(cleanSid)) {
+        throw new Error(`Invalid Windows SID format: '${m.windowsSid}'.`);
+      }
+      if (seenSids.has(cleanSid)) {
+        throw new Error(`Duplicate mapping detected for Windows SID: ${cleanSid}`);
+      }
+      seenSids.add(cleanSid);
+
+      if (m.childId) {
+        const child = await prisma.child.findUnique({
+          where: { id: m.childId },
+        });
+        if (!child || child.familyId !== device.familyId) {
+          throw new Error(`Child '${m.childId}' does not belong to this device's family.`);
+        }
+      }
+    }
+
+    const syncedMappings = await prisma.$transaction(async (tx) => {
+      await tx.deviceAccountMapping.deleteMany({
+        where: { deviceId },
+      });
+
+      const results = [];
+      for (const m of mappings) {
+        const record = await tx.deviceAccountMapping.create({
+          data: {
+            deviceId,
+            familyId: device.familyId,
+            windowsSid: m.windowsSid.trim().toUpperCase(),
+            windowsUsername: (m.windowsUsername || '').trim(),
+            childId: m.childId || null,
+            enabled: m.enabled !== false,
+          },
+          include: {
+            child: { select: { id: true, name: true } },
+          },
+        });
+        results.push({
+          id: record.id,
+          deviceId: record.deviceId,
+          familyId: record.familyId,
+          windowsSid: record.windowsSid,
+          windowsUsername: record.windowsUsername,
+          childId: record.childId,
+          childName: record.child?.name || null,
+          enabled: record.enabled,
+          createdAt: record.createdAt.toISOString(),
+          updatedAt: record.updatedAt.toISOString(),
+        });
+      }
+
+      const firstManaged = results.find((r) => r.childId && r.enabled);
+      await tx.device.update({
+        where: { id: deviceId },
+        data: {
+          ...(firstManaged ? { childId: firstManaged.childId! } : {}),
+          updatedAt: new Date(),
+        },
+      });
+
+      return results;
+    });
+
+    wsManager.broadcast({
+      type: 'DEVICE_HEALTH_CHANGED',
+      payload: {
+        deviceId,
+        accountMappings: syncedMappings,
+      },
+      parentId: device.parentId,
+      childId: device.childId,
+    });
+
+    return {
+      success: true,
+      count: syncedMappings.length,
+      mappings: syncedMappings,
+    };
+  }
+
+  public async getDeviceAccountMappings(deviceId: string): Promise<DeviceAccountMappingDto[]> {
+    const list = await prisma.deviceAccountMapping.findMany({
+      where: { deviceId },
+      include: {
+        child: { select: { id: true, name: true } },
+      },
+      orderBy: { windowsUsername: 'asc' },
+    });
+
+    return list.map((record) => ({
+      id: record.id,
+      deviceId: record.deviceId,
+      familyId: record.familyId,
+      windowsSid: record.windowsSid,
+      windowsUsername: record.windowsUsername,
+      childId: record.childId,
+      childName: record.child?.name || null,
+      enabled: record.enabled,
+      createdAt: record.createdAt.toISOString(),
+      updatedAt: record.updatedAt.toISOString(),
+    }));
   }
 
   public async getFamilyProfilesForDevice(deviceId: string): Promise<Array<{ id: string; name: string; age: number | null }>> {
@@ -763,6 +1021,11 @@ export class DeviceService {
             policy: true,
           },
         },
+        accountMappings: {
+          include: {
+            child: { select: { id: true, name: true } },
+          },
+        },
       },
     });
     if (!device) throw new Error('Device not found.');
@@ -785,11 +1048,18 @@ export class DeviceService {
     const elapsedSeconds = (now - device.lastHeartbeatAt.getTime()) / 1000;
     const isOnline = elapsedSeconds < DEVICE_OFFLINE_THRESHOLD_SECONDS && !device.isRevoked;
 
-    let computedHealthState: HealthState = (device.healthState as any) || 'PROTECTED';
+    let computedHealthState: HealthState | 'ACCOUNT_SETUP_REQUIRED' = (device.healthState as any) || 'PROTECTED';
     if (device.isRevoked) {
       computedHealthState = 'INACTIVE';
     } else if (!isOnline) {
       computedHealthState = 'OFFLINE';
+    } else if (
+      device.platform.toLowerCase() === 'windows' &&
+      (!device.accountMappings || device.accountMappings.length === 0) &&
+      !device.mappedAccountName &&
+      !device.activeChildId
+    ) {
+      computedHealthState = 'ACCOUNT_SETUP_REQUIRED';
     }
 
     const configuredVersion = device.child.policy?.version ?? 1;
@@ -804,6 +1074,19 @@ export class DeviceService {
       }
     }
 
+    const mappingsDto: DeviceAccountMappingDto[] = (device.accountMappings || []).map((m: any) => ({
+      id: m.id,
+      deviceId: m.deviceId,
+      familyId: m.familyId,
+      windowsSid: m.windowsSid,
+      windowsUsername: m.windowsUsername,
+      childId: m.childId,
+      childName: m.child?.name || null,
+      enabled: m.enabled,
+      createdAt: m.createdAt.toISOString(),
+      updatedAt: m.updatedAt.toISOString(),
+    }));
+
     return {
       device: {
         id: device.id,
@@ -814,7 +1097,7 @@ export class DeviceService {
         name: device.name,
         platform: device.platform,
         agentVersion: device.agentVersion,
-        healthStatus: (computedHealthState === 'OFFLINE' || computedHealthState === 'INACTIVE') ? 'inactive' : device.healthStatus,
+        healthStatus: (computedHealthState === 'OFFLINE' || computedHealthState === 'INACTIVE') ? 'inactive' : (computedHealthState === 'ACCOUNT_SETUP_REQUIRED' ? 'account_setup_required' : device.healthStatus),
         healthState: computedHealthState,
         isOnline,
         enforcementActive: device.enforcementActive,
@@ -826,7 +1109,10 @@ export class DeviceService {
         policySyncStatus,
         windowsAccountName: device.mappedAccountName || '',
         hasMultipleSessions: device.hasMultipleSessions || false,
-        protectionStatus: device.protectionStatus || (computedHealthState === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN'),
+        protectionStatus: computedHealthState === 'ACCOUNT_SETUP_REQUIRED' ? 'ACCOUNT_SETUP_REQUIRED' : (device.protectionStatus || (computedHealthState === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN')),
+        accountMappings: mappingsDto,
+        activeChildId: device.activeChildId || null,
+        mappedAccountSid: device.mappedAccountSid || null,
         capabilities: {
           activityTelemetryAvailable: device.activityTelemetryAvailable,
           appUsageAvailable: device.appUsageAvailable,
