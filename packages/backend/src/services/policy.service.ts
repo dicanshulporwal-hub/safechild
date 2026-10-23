@@ -110,7 +110,7 @@ export class PolicyService {
       throw new Error('Device not found.');
     }
 
-    let activeChildId = device.childId;
+    let activeChildId = device.childId || device.activeChildId;
     if (targetChildId) {
       const targetChild = await prisma.child.findUnique({
         where: { id: targetChildId },
@@ -118,6 +118,29 @@ export class PolicyService {
       if (targetChild && (targetChild.familyId === device.familyId || targetChild.parentId === device.parentId)) {
         activeChildId = targetChildId;
       }
+    }
+
+    if (!activeChildId) {
+      const mapping = await prisma.deviceAccountMapping.findFirst({
+        where: { deviceId, enabled: true, childId: { not: null } },
+      });
+      if (mapping?.childId) {
+        activeChildId = mapping.childId;
+      }
+    }
+
+    if (!activeChildId) {
+      const familyChildren = await prisma.child.findMany({
+        where: { familyId: device.familyId },
+        take: 2,
+      });
+      if (familyChildren.length === 1) {
+        activeChildId = familyChildren[0].id;
+      }
+    }
+
+    if (!activeChildId) {
+      throw new Error('Device is not assigned to a child profile and no target child was specified.');
     }
 
     const policy = await this.getPolicyForChild(activeChildId);

@@ -40,6 +40,25 @@ jobs:
       - name: Build Windows agent
         run: npm run build:windows
 
+      - name: Verify PowerShell Account Discovery Script Syntax (AST Parser Gate)
+        shell: pwsh
+        run: |
+          $scriptLines = & node -e "const { WindowsAccountManager } = require('./packages/agent-windows/dist/account-manager.js'); console.log(WindowsAccountManager.getDiscoveryPowerShellScript());"
+          if (-not $scriptLines) {
+            Write-Error "Failed to retrieve discovery script from WindowsAccountManager"
+            exit 1
+          }
+          $scriptText = [string]::Join([Environment]::NewLine, $scriptLines)
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseInput($scriptText, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+            Write-Error "PowerShell AST syntax validation FAILED with $($errors.Count) error(s):"
+            $errors | ForEach-Object { Write-Error $_.ToString() }
+            exit 1
+          }
+          Write-Host "PowerShell AST parser gate PASSED: 0 syntax errors in account discovery script."
+
       - name: Run Windows agent automated tests
         timeout-minutes: 10
         run: npm run test --workspace=@safebrowse/agent-windows
@@ -185,7 +204,7 @@ jobs:
           Write-Host "Source Directory: $sourceDir"
           Write-Host "MSI Output: $msiOutput"
 
-          wix build -arch x64 "$wxsPath" -ext WixToolset.Util.wixext -d SourceDir="$sourceDir" -d ProductVersion="1.0.4.5" -o "$msiOutput"
+          wix build -arch x64 "$wxsPath" -ext WixToolset.Util.wixext -d SourceDir="$sourceDir" -d ProductVersion="1.0.4.7" -o "$msiOutput"
           $wixExitCode = $LASTEXITCODE
 
           if ($wixExitCode -ne 0) {

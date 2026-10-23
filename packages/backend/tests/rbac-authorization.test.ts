@@ -122,7 +122,7 @@ describe('SafeBrowse Stage 11 Step 3: System Admin RBAC & Family Authorization S
 
     // Pair Device A
     const pairA = await deviceService.generatePairingCode(ownerAId, childAId);
-    const { device: devA } = await deviceService.pairDevice(pairA.code, 'Device A', 'windows', '1.0.0');
+    const { device: devA } = await deviceService.pairDevice(pairA.code, 'Device A', 'android', '1.0.0');
     deviceAId = devA.id;
     deviceAToken = devA.deviceToken;
 

@@ -542,14 +542,27 @@ class ApiClient {
     return data;
   }
 
-  async createPairingCode(childId: string): Promise<{ code: string; expiresAt: string }> {
+  async createPairingCode(
+    childId?: string,
+    platform: 'android' | 'windows' = 'windows'
+  ): Promise<{ code: string; expiresAt: string; platformIntent?: string }> {
     const res = await fetch(`${API_BASE}/devices/pairing-code`, {
       method: 'POST',
       headers: this.getHeaders(),
-      body: JSON.stringify({ childId }),
+      body: JSON.stringify({ childId: childId || undefined, platform }),
     });
     const data = await this.parseResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to create pairing code');
+    return data;
+  }
+
+  async resetDeviceParentPin(deviceId: string): Promise<{ success: boolean; message: string }> {
+    const res = await fetch(`${API_BASE}/devices/${deviceId}/reset-pin`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+    });
+    const data = await this.parseResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to reset Parent PIN');
     return data;
   }
 

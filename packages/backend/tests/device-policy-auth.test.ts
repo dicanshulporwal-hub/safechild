@@ -116,7 +116,7 @@ describe('SafeBrowse Stage 11 Step 4: Windows Device Policy Authentication & Syn
     childId = childRes.child.id;
 
     const pairing = await deviceService.generatePairingCode(parentUserId, childId);
-    const paired = await deviceService.pairDevice(pairing.code, 'Test Windows PC', 'windows');
+    const paired = await deviceService.pairDevice(pairing.code, 'Test Android Device', 'android');
     deviceId = paired.device.id;
     deviceToken = paired.device.deviceToken;
 
@@ -131,7 +131,7 @@ describe('SafeBrowse Stage 11 Step 4: Windows Device Policy Authentication & Syn
     otherChildId = otherChildRes.child.id;
 
     const otherPairing = await deviceService.generatePairingCode(otherReg.user.id, otherChildId);
-    const otherPaired = await deviceService.pairDevice(otherPairing.code, 'Other Windows PC', 'windows');
+    const otherPaired = await deviceService.pairDevice(otherPairing.code, 'Other Android Device', 'android');
     otherDeviceId = otherPaired.device.id;
     otherDeviceToken = otherPaired.device.deviceToken;
   });
@@ -389,8 +389,8 @@ describe('SafeBrowse Stage 11 Step 4: Windows Device Policy Authentication & Syn
     // 3. Pair device specifically for Priya
     const priyaPairRes = await api('POST', '/api/devices/pair', undefined, {
       code: priyaPairing.code,
-      deviceName: "Priya's Windows Laptop",
-      platform: 'windows',
+      deviceName: "Priya's Android Phone",
+      platform: 'android',
     });
     assert.strictEqual(priyaPairRes.status, 200);
     const priyaDeviceId = priyaPairRes.data.device.id;

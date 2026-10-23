@@ -138,7 +138,7 @@ export interface DeviceAccountMappingDto {
 
 export interface Device {
   id: string;
-  childId: string;
+  childId: string | null;
   parentId: string;
   familyId: string;
   name: string;
@@ -157,10 +157,11 @@ export interface Device {
 
 export interface PairingCode {
   code: string;
-  childId: string;
+  childId: string | null;
   parentId: string;
   familyId: string;
   expiresAt: string;
+  platformIntent?: string;
 }
 
 /**

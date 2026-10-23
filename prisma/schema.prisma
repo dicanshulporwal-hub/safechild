@@ -242,8 +242,8 @@ model Device {
   id              String            @id
   familyId        String
   family          Family            @relation(fields: [familyId], references: [id], onDelete: Cascade)
-  childId         String
-  child           Child             @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
+  childId         String?
+  child           Child?            @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
   parentId        String
   parent          User              @relation(fields: [parentId], references: [id], onDelete: Restrict)
   name            String
@@ -284,7 +284,6 @@ model Device {
   accountMappings   DeviceAccountMapping[]
 
   @@unique([familyId, id])
-  @@unique([familyId, childId, id])
   @@index([familyId])
   @@index([childId])
 }
@@ -337,8 +336,9 @@ model PairingCode {
   code              String   @unique
   familyId          String
   family            Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
-  childId           String
-  child             Child    @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
+  childId           String?
+  child             Child?   @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
+  platformIntent    String?  @default("WINDOWS")
   createdByParentId String
   createdByParent   User     @relation(fields: [createdByParentId], references: [id], onDelete: Restrict)
   expiresAt         DateTime
@@ -355,7 +355,7 @@ model AccessRequest {
   childId          String
   child            Child         @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
   deviceId         String?
-  device           Device?       @relation(fields: [familyId, childId, deviceId], references: [familyId, childId, id], onDelete: Cascade)
+  device           Device?       @relation(fields: [familyId, deviceId], references: [familyId, id], onDelete: Cascade)
   domain           String
   reason           String?
   requestedAt      DateTime      @default(now())
@@ -379,7 +379,7 @@ model ChildUsageRecord {
   childId                 String
   child                   Child    @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
   deviceId                String?
-  device                  Device?  @relation(fields: [familyId, childId, deviceId], references: [familyId, childId, id], onDelete: Cascade)
+  device                  Device?  @relation(fields: [familyId, deviceId], references: [familyId, id], onDelete: Cascade)
   target                  String
   targetType              String   @default("DOMAIN")
   date                    String
@@ -404,7 +404,7 @@ model ActivityEvent {
   childId       String
   child         Child    @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
   deviceId      String?
-  device        Device?  @relation(fields: [familyId, childId, deviceId], references: [familyId, childId, id], onDelete: Cascade)
+  device        Device?  @relation(fields: [familyId, deviceId], references: [familyId, id], onDelete: Cascade)
   clientEventId String?
   domain        String
   category      String
@@ -427,7 +427,7 @@ model UsageSyncReceipt {
   childId          String
   child            Child    @relation(fields: [familyId, childId], references: [familyId, id], onDelete: Cascade)
   deviceId         String
-  device           Device   @relation(fields: [familyId, childId, deviceId], references: [familyId, childId, id], onDelete: Cascade)
+  device           Device   @relation(fields: [familyId, deviceId], references: [familyId, id], onDelete: Cascade)
   targetType       String   @default("DOMAIN")
   target           String
   usageDate        String

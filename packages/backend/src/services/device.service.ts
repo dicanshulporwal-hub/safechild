@@ -15,6 +15,7 @@ import { nanoid } from 'nanoid';
 import { wsManager } from './websocket.service';
 import { notificationService } from './notification.service';
 import { rbacService, FamilyPermission } from './rbac.service';
+import { FamilyRole } from '../types/models';
 
 export const DEVICE_OFFLINE_THRESHOLD_SECONDS = 120;
 
@@ -41,9 +42,15 @@ export class DeviceService {
   private revokedTokenBlacklist: Set<string> = new Set();
 
   /**
-   * Generate cryptographically secure, high-entropy pairing code (canonical 8-character format, e.g. "K8X9M2W7")
+   * Generate cryptographically secure, high-entropy pairing code (canonical 8-character format, e.g. "K8X9M2W7").
+   * For Windows: generates a family-level pairing code (childId is null, platformIntent is 'WINDOWS').
+   * For Android: binds explicitly to the requested child profile.
    */
-  public async generatePairingCode(parentId: string, childId: string): Promise<PairingCode> {
+  public async generatePairingCode(
+    parentId: string,
+    childId?: string | null,
+    options?: { platform?: string; familyId?: string }
+  ): Promise<PairingCode> {
     const chars = PAIRING_CODE_ALPHABET;
     let token = '';
     const bytes = crypto.randomBytes(8);
@@ -51,22 +58,40 @@ export class DeviceService {
       token += chars[bytes[i] % chars.length];
     }
     const code = token;
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 min expiration
 
-    const child = await prisma.child.findUnique({
-      where: { id: childId },
-    });
-    if (!child || !child.familyId) {
-      throw new Error('Mandatory tenancy error: Child must belong to a valid family.');
+    let targetFamilyId: string | null = options?.familyId || null;
+    const isWindows = options?.platform?.toLowerCase() === 'windows' || (!childId && !options?.platform);
+
+    if (childId) {
+      const child = await prisma.child.findUnique({
+        where: { id: childId },
+      });
+      if (!child || !child.familyId) {
+        throw new Error('Mandatory tenancy error: Child must belong to a valid family.');
+      }
+      targetFamilyId = child.familyId;
+    } else {
+      if (!targetFamilyId) {
+        const memberships = await rbacService.getUserFamilyMemberships(parentId);
+        const manageFamily = memberships.find((m) =>
+          m.role === 'OWNER' || m.role === 'PARENT'
+        );
+        if (!manageFamily) {
+          throw new Error('No family found with device management permissions.');
+        }
+        targetFamilyId = manageFamily.familyId;
+      }
     }
 
     const created = await prisma.pairingCode.create({
       data: {
         id: `pair-${nanoid(10)}`,
         code,
-        childId,
+        childId: isWindows ? null : (childId || null),
         createdByParentId: parentId,
-        familyId: child.familyId,
+        familyId: targetFamilyId!,
+        platformIntent: isWindows ? 'WINDOWS' : 'ANDROID',
         expiresAt,
       },
     });
@@ -77,11 +102,14 @@ export class DeviceService {
       parentId: created.createdByParentId,
       familyId: created.familyId,
       expiresAt: created.expiresAt.toISOString(),
+      platformIntent: created.platformIntent || (isWindows ? 'WINDOWS' : 'ANDROID'),
     };
   }
 
   /**
-   * Claim pairing code and issue unique permanent device credentials transactionally
+   * Claim pairing code and issue unique permanent device credentials transactionally.
+   * Windows physical devices belong to the family (Device.childId is null).
+   * Android physical devices remain bound to the paired child.
    */
   public async pairDevice(
     code: string,
@@ -129,24 +157,30 @@ export class DeviceService {
       const deviceId = `dev-${nanoid(10)}`;
       const deviceToken = `dtk_${crypto.randomBytes(32).toString('hex')}`;
 
-      const policy = await tx.policy.findUnique({
-        where: { childId: pairing.childId },
-      });
-      const policyVersion = policy ? policy.version : 1;
+      const isWindows = platform.toLowerCase() === 'windows' || pairing.platformIntent === 'WINDOWS' || !pairing.childId;
+      const effectiveChildId = isWindows ? null : pairing.childId;
 
-      const isWindows = platform.toLowerCase() === 'windows';
+      let policy = null;
+      let policyVersion = 1;
+      if (effectiveChildId) {
+        policy = await tx.policy.findUnique({
+          where: { childId: effectiveChildId },
+        });
+        policyVersion = policy ? policy.version : 1;
+      }
+
       const deviceRecord = await tx.device.create({
         data: {
           id: deviceId,
-          childId: pairing.childId,
+          childId: effectiveChildId,
           parentId: pairing.createdByParentId,
           familyId: pairing.familyId,
-          name: deviceName || `${platform === 'android' ? 'Android Phone' : 'Windows Laptop'}`,
-          platform,
+          name: deviceName || `${isWindows ? 'Windows Laptop' : 'Android Phone'}`,
+          platform: isWindows ? 'windows' : platform,
           deviceToken,
           agentVersion,
           activePolicyVersion: policyVersion,
-          enforcementActive: !isWindows,
+          enforcementActive: false,
           protectionStatus: isWindows ? 'ACCOUNT_SETUP_REQUIRED' : 'ACTIVE',
           healthStatus: isWindows ? 'account_setup_required' : 'protected',
           healthState: isWindows ? 'DEGRADED' : 'PROTECTED',
@@ -187,7 +221,7 @@ export class DeviceService {
         type: 'DEVICE_PAIRED',
         payload: extendedDevice,
         parentId: deviceRecord.parentId,
-        childId: deviceRecord.childId,
+        childId: deviceRecord.childId ?? undefined,
       });
 
       const familyProfiles = await tx.child.findMany({
@@ -238,11 +272,17 @@ export class DeviceService {
       throw new Error('Unauthorized device token.');
     }
 
-    const policy = await prisma.policy.findUnique({
-      where: { childId: device.childId },
-    });
-    const latestVersion = policy ? policy.version : 1;
-    const isPolicyChanged = payload.activePolicyVersion < latestVersion;
+    const targetChildId = (payload as any).activeChildId || device.activeChildId || device.childId;
+    let policy = null;
+    let latestVersion = 1;
+    let isPolicyChanged = false;
+    if (targetChildId) {
+      policy = await prisma.policy.findUnique({
+        where: { childId: targetChildId },
+      });
+      latestVersion = policy ? policy.version : 1;
+      isPolicyChanged = payload.activePolicyVersion < latestVersion;
+    }
     const now = new Date();
 
     let computedHealthState: any = 'PROTECTED';
@@ -329,7 +369,7 @@ export class DeviceService {
         hasMultipleSessions: Boolean(payload.hasMultipleSessions),
       },
       parentId: device.parentId,
-      childId: device.childId,
+      childId: device.childId ?? undefined,
     });
 
     return {
@@ -380,7 +420,7 @@ export class DeviceService {
         healthState: 'OFFLINE',
       },
       parentId: device.parentId,
-      childId: device.childId,
+      childId: device.childId ?? undefined,
     });
   }
 
@@ -422,7 +462,7 @@ export class DeviceService {
         healthState: 'OFFLINE',
       },
       parentId: device.parentId,
-      childId: device.childId,
+      childId: device.childId ?? undefined,
     });
   }
 
@@ -439,7 +479,7 @@ export class DeviceService {
       name: string;
       platform: string;
       familyId: string;
-      childId: string;
+      childId: string | null;
       enforcementActive: boolean;
       healthStatus: string;
       healthState: string;
@@ -477,7 +517,8 @@ export class DeviceService {
 
     const mappingCount = device.accountMappings ? device.accountMappings.length : 0;
     const isWindows = device.platform.toLowerCase() === 'windows';
-    const accountSetupRequired = isWindows && mappingCount === 0 && !device.mappedAccountName && !device.activeChildId;
+    const hasEnabledChildMapping = device.accountMappings?.some((m) => m.childId && m.enabled);
+    const accountSetupRequired = isWindows && !hasEnabledChildMapping && !device.mappedAccountName && !device.activeChildId;
 
     const isValid = !accountSetupRequired;
     return {
@@ -496,6 +537,33 @@ export class DeviceService {
         accountSetupRequired,
         mappingCount,
       },
+    };
+  }
+
+  public async resetParentPin(deviceId: string, parentUserId: string): Promise<{ success: boolean; message: string }> {
+    const device = await prisma.device.findUnique({
+      where: { id: deviceId },
+    });
+    if (!device) {
+      throw new Error('Device not found.');
+    }
+    const hasPerm = await rbacService.hasFamilyPermission(parentUserId, device.familyId, FamilyPermission.DEVICE_MANAGE);
+    if (!hasPerm) {
+      throw new Error('Forbidden: Insufficient permissions to reset device Parent PIN.');
+    }
+
+    wsManager.broadcast({
+      type: 'DEVICE_PIN_RESET',
+      payload: {
+        deviceId: device.id,
+        timestamp: new Date().toISOString(),
+      },
+      parentId: device.parentId,
+    });
+
+    return {
+      success: true,
+      message: 'Parent PIN reset signal broadcasted successfully.',
     };
   }
 
@@ -553,12 +621,39 @@ export class DeviceService {
       state = 'ACCOUNT_SETUP_REQUIRED';
     }
 
-    const configuredVersion = dev.child?.policy?.version ?? 1;
+    let configuredVersion = dev.child?.policy?.version;
+    if (configuredVersion == null) {
+      if (dev.activeChildId) {
+        const activePol = await prisma.policy.findUnique({
+          where: { childId: dev.activeChildId },
+          select: { version: true },
+        });
+        configuredVersion = activePol?.version;
+      }
+      if (configuredVersion == null && dev.accountMappings) {
+        const mappedChild = dev.accountMappings.find((m: any) => m.enabled && m.childId);
+        if (mappedChild?.childId) {
+          const mappedPol = await prisma.policy.findUnique({
+            where: { childId: mappedChild.childId },
+            select: { version: true },
+          });
+          configuredVersion = mappedPol?.version;
+        }
+      }
+      if (configuredVersion == null) {
+        const familyPol = await prisma.policy.findFirst({
+          where: { familyId: dev.familyId },
+          select: { version: true },
+        });
+        configuredVersion = familyPol?.version;
+      }
+    }
+    const finalConfiguredVersion = configuredVersion ?? 1;
     let policySyncStatus: 'SYNCED' | 'SYNC_PENDING' | 'VERSION_MISMATCH' | 'UNKNOWN' = 'UNKNOWN';
-    if (dev.activePolicyVersion != null && configuredVersion != null) {
-      if (dev.activePolicyVersion === configuredVersion) {
+    if (dev.activePolicyVersion != null && finalConfiguredVersion != null) {
+      if (dev.activePolicyVersion === finalConfiguredVersion) {
         policySyncStatus = 'SYNCED';
-      } else if (dev.activePolicyVersion < configuredVersion) {
+      } else if (dev.activePolicyVersion < finalConfiguredVersion) {
         policySyncStatus = 'SYNC_PENDING';
       } else {
         policySyncStatus = 'VERSION_MISMATCH';
@@ -590,8 +685,8 @@ export class DeviceService {
       pairedAt: dev.createdAt.toISOString(),
       lastSyncAt: dev.updatedAt.toISOString(),
       lastHeartbeatAt: dev.lastHeartbeatAt.toISOString(),
-      activePolicyVersion: dev.activePolicyVersion ?? configuredVersion,
-      configuredPolicyVersion: configuredVersion,
+      activePolicyVersion: dev.activePolicyVersion ?? finalConfiguredVersion,
+      configuredPolicyVersion: finalConfiguredVersion,
       agentActivePolicyVersion: dev.activePolicyVersion ?? null,
       policySyncStatus,
       healthStatus: (state === 'OFFLINE' || state === 'INACTIVE' ? 'inactive' : (state === 'ACCOUNT_SETUP_REQUIRED' ? 'account_setup_required' : dev.healthStatus)) as any,
@@ -643,8 +738,14 @@ export class DeviceService {
       where: {
         familyId: child.familyId,
         OR: [
-          { childId: child.id },
+          // Android: normal childId relation
           {
+            platform: { not: 'windows' },
+            childId: child.id,
+          },
+          // Windows: derived EXCLUSIVELY from active DeviceAccountMapping (never Device.childId fallback)
+          {
+            platform: 'windows',
             accountMappings: {
               some: {
                 childId: child.id,
@@ -937,10 +1038,11 @@ export class DeviceService {
       }
 
       const firstManaged = results.find((r) => r.childId && r.enabled);
+      const isWindows = device.platform.toLowerCase() === 'windows';
       await tx.device.update({
         where: { id: deviceId },
         data: {
-          ...(firstManaged ? { childId: firstManaged.childId! } : {}),
+          ...(firstManaged && !isWindows ? { childId: firstManaged.childId! } : {}),
           protectionStatus: firstManaged ? 'MANAGED_CHILD' : 'ACCOUNT_SETUP_REQUIRED',
           healthStatus: firstManaged ? 'protected' : 'account_setup_required',
           healthState: firstManaged ? 'PROTECTED' : 'DEGRADED',
@@ -958,7 +1060,7 @@ export class DeviceService {
         accountMappings: syncedMappings,
       },
       parentId: device.parentId,
-      childId: device.childId,
+      childId: device.childId ?? undefined,
     });
 
     return {
@@ -1047,7 +1149,7 @@ export class DeviceService {
         healthState: 'INACTIVE',
       },
       parentId: device.parentId,
-      childId: device.childId,
+      childId: device.childId ?? undefined,
     });
   }
 
@@ -1086,7 +1188,7 @@ export class DeviceService {
       type: 'DEVICE_HEALTH_CHANGED',
       payload: extended,
       parentId: updated.parentId,
-      childId: updated.childId,
+      childId: updated.childId ?? undefined,
     });
 
     return extended;
@@ -1149,12 +1251,12 @@ export class DeviceService {
       throw new Error('Forbidden. Insufficient permissions to sync device policy.');
     }
 
-    const policy = await prisma.policy.findUnique({ where: { childId: device.childId } });
+    const policy = device.childId ? await prisma.policy.findUnique({ where: { childId: device.childId } }) : null;
 
     wsManager.broadcast({
       type: 'POLICY_UPDATED',
       payload: policy || { version: 1, rules: [] },
-      childId: device.childId,
+      childId: device.childId ?? undefined,
       parentId: device.parentId,
     });
 
@@ -1211,12 +1313,39 @@ export class DeviceService {
       computedHealthState = 'ACCOUNT_SETUP_REQUIRED';
     }
 
-    const configuredVersion = device.child.policy?.version ?? 1;
+    let configuredVersion = device.child?.policy?.version;
+    if (configuredVersion == null) {
+      if (device.activeChildId) {
+        const activePol = await prisma.policy.findUnique({
+          where: { childId: device.activeChildId },
+          select: { version: true },
+        });
+        configuredVersion = activePol?.version;
+      }
+      if (configuredVersion == null && device.accountMappings) {
+        const mappedChild = device.accountMappings.find((m: any) => m.enabled && m.childId);
+        if (mappedChild?.childId) {
+          const mappedPol = await prisma.policy.findUnique({
+            where: { childId: mappedChild.childId },
+            select: { version: true },
+          });
+          configuredVersion = mappedPol?.version;
+        }
+      }
+      if (configuredVersion == null) {
+        const familyPol = await prisma.policy.findFirst({
+          where: { familyId: device.familyId },
+          select: { version: true },
+        });
+        configuredVersion = familyPol?.version;
+      }
+    }
+    const finalConfiguredVersion = configuredVersion ?? 1;
     let policySyncStatus: 'SYNCED' | 'SYNC_PENDING' | 'VERSION_MISMATCH' | 'UNKNOWN' = 'UNKNOWN';
-    if (device.activePolicyVersion != null && configuredVersion != null) {
-      if (device.activePolicyVersion === configuredVersion) {
+    if (device.activePolicyVersion != null && finalConfiguredVersion != null) {
+      if (device.activePolicyVersion === finalConfiguredVersion) {
         policySyncStatus = 'SYNCED';
-      } else if (device.activePolicyVersion < configuredVersion) {
+      } else if (device.activePolicyVersion < finalConfiguredVersion) {
         policySyncStatus = 'SYNC_PENDING';
       } else {
         policySyncStatus = 'VERSION_MISMATCH';
@@ -1240,7 +1369,7 @@ export class DeviceService {
       device: {
         id: device.id,
         childId: device.childId,
-        childName: device.child.name,
+        childName: device.child?.name || 'Unassigned',
         parentId: device.parentId,
         familyId: device.familyId,
         name: device.name,
@@ -1253,7 +1382,7 @@ export class DeviceService {
         isRevoked: device.isRevoked,
         lastHeartbeatAt: device.lastHeartbeatAt.toISOString(),
         pairedAt: device.createdAt.toISOString(),
-        configuredPolicyVersion: configuredVersion,
+        configuredPolicyVersion: finalConfiguredVersion,
         agentActivePolicyVersion: device.activePolicyVersion ?? null,
         policySyncStatus,
         windowsAccountName: device.mappedAccountName || '',
@@ -1273,13 +1402,13 @@ export class DeviceService {
           ...(device.capabilities ? (device.capabilities as object) : {}),
         },
       },
-      child: {
+      child: device.child ? {
         id: device.child.id,
         name: device.child.name,
         age: device.child.age,
         avatar: device.child.avatar,
-      },
-      policy: device.child.policy ? {
+      } : null,
+      policy: device.child?.policy ? {
         version: device.child.policy.version,
         isPaused: device.child.policy.isPaused,
         safeSearch: device.child.policy.safeSearch,

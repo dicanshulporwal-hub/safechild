@@ -4,7 +4,7 @@ import { wsManager } from './websocket.service';
 export interface DeviceConsoleItem {
   familyId: string;
   parentEmail: string;
-  childId: string;
+  childId: string | null;
   childName: string;
   deviceId: string;
   deviceName: string;

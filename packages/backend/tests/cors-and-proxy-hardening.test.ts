@@ -76,8 +76,8 @@ describe('SafeBrowse Backend Hardening: CORS, Trust Proxy & Device Authenticatio
     const pairing = await deviceService.generatePairingCode(parentUserId, childId);
     const pairResult = await deviceService.pairDevice(
       pairing.code,
-      "Leo's Windows Hardened Laptop",
-      'windows',
+      "Leo's Android Tablet",
+      'android',
       '1.1.0'
     );
     deviceId = pairResult.device.id;

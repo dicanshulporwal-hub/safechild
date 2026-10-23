@@ -19,6 +19,8 @@ import {
   CheckCircle,
   Copy,
   Info,
+  Lock,
+  Download,
 } from 'lucide-react';
 
 interface DevicesPageProps {
@@ -35,12 +37,17 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
 
   // Pairing Modal
   const [showPairModal, setShowPairModal] = useState(false);
+  const [pairingPlatform, setPairingPlatform] = useState<'windows' | 'android'>('windows');
   const [selectedChildForPair, setSelectedChildForPair] = useState<string>(
     childrenList[0]?.id || ''
   );
   const [pairingCode, setPairingCode] = useState<string | null>(null);
   const [pairingExpiry, setPairingExpiry] = useState<string | null>(null);
   const [generatingCode, setGeneratingCode] = useState(false);
+
+  // Reset PIN Modal
+  const [resetPinTarget, setResetPinTarget] = useState<Device | null>(null);
+  const [resettingPin, setResettingPin] = useState(false);
 
   // Rename Modal
   const [renameDeviceTarget, setRenameDeviceTarget] = useState<Device | null>(null);
@@ -86,14 +93,15 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
     }
   };
 
-  const handleGeneratePairingCode = async () => {
-    if (!selectedChildForPair) {
+  const handleGeneratePairingCode = async (platform: 'windows' | 'android' = 'windows') => {
+    if (platform === 'android' && !selectedChildForPair) {
       showToast('Please select a child profile first', 'error');
       return;
     }
     setGeneratingCode(true);
     try {
-      const res = await api.createPairingCode(selectedChildForPair);
+      const childId = platform === 'android' ? selectedChildForPair : undefined;
+      const res = await api.createPairingCode(childId, platform);
       setPairingCode(res.code);
       setPairingExpiry(res.expiresAt);
       showToast('8-character pairing code generated!', 'success');
@@ -101,6 +109,21 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
       showToast(e.message || 'Failed to generate pairing code', 'error');
     } finally {
       setGeneratingCode(false);
+    }
+  };
+
+  const handleResetPinSubmit = async () => {
+    if (!resetPinTarget) return;
+    setResettingPin(true);
+    try {
+      await api.resetDeviceParentPin(resetPinTarget.id);
+      showToast(`SafeBrowse Parent PIN cleared for ${resetPinTarget.name}`, 'success');
+      setResetPinTarget(null);
+      await fetchDevices(true);
+    } catch (e: any) {
+      showToast(e.message || 'Failed to reset Parent PIN', 'error');
+    } finally {
+      setResettingPin(false);
     }
   };
 
@@ -251,12 +274,13 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
           <button
             onClick={() => {
               setPairingCode(null);
+              setPairingPlatform('windows');
               setShowPairModal(true);
             }}
             className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl transition flex items-center gap-2 shadow-lg shadow-indigo-600/20"
           >
             <Plus className="w-4 h-4" />
-            <span>Pair New Device</span>
+            <span>Add Windows Computer</span>
           </button>
         </div>
       </div>
@@ -312,11 +336,15 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
             </p>
           </div>
           <button
-            onClick={() => setShowPairModal(true)}
+            onClick={() => {
+              setPairingCode(null);
+              setPairingPlatform('windows');
+              setShowPairModal(true);
+            }}
             className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl transition inline-flex items-center gap-2"
           >
             <Plus className="w-4 h-4" />
-            <span>Generate Pairing Code</span>
+            <span>Add Windows Computer</span>
           </button>
         </div>
       ) : (
@@ -454,16 +482,29 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
                       <Edit2 className="w-3.5 h-3.5" />
                     </button>
 
-                    <button
-                      onClick={() => {
-                        setReassignTarget(device);
-                        setNewChildId(device.childId);
-                      }}
-                      title="Reassign to different child profile"
-                      className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-indigo-300 text-xs font-medium rounded-xl transition border border-slate-700"
-                    >
-                      Reassign
-                    </button>
+                    {device.platform === 'android' && (
+                      <button
+                        onClick={() => {
+                          setReassignTarget(device);
+                          setNewChildId(device.childId || '');
+                        }}
+                        title="Reassign to different child profile"
+                        className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-indigo-300 text-xs font-medium rounded-xl transition border border-slate-700"
+                      >
+                        Reassign
+                      </button>
+                    )}
+
+                    {device.platform === 'windows' && (
+                      <button
+                        onClick={() => setResetPinTarget(device)}
+                        title="Reset SafeBrowse Parent PIN on this computer"
+                        className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-medium rounded-xl transition border border-slate-700 flex items-center gap-1.5"
+                      >
+                        <Lock className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Reset PIN</span>
+                      </button>
+                    )}
 
                     <button
                       onClick={() => setUnpairTarget(device)}
@@ -512,7 +553,7 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-bold text-white flex items-center gap-2">
                 <Laptop className="w-5 h-5 text-indigo-400" />
-                Pair New Windows Device
+                Add Family Device
               </h3>
               <button
                 onClick={() => setShowPairModal(false)}
@@ -522,32 +563,65 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
               </button>
             </div>
 
-            <p className="text-xs text-slate-400 leading-relaxed">
-              Select which child will initially be protected on this device. You can map
-              specific Windows accounts after launching the SafeBrowse installer.
-            </p>
-
-            <div className="space-y-3">
-              <label className="text-xs font-semibold text-slate-300 block">
-                Assign To Child Profile:
-              </label>
-              <select
-                value={selectedChildForPair}
-                onChange={(e) => setSelectedChildForPair(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-indigo-500"
+            {/* Platform Selector Tabs */}
+            <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
+              <button
+                onClick={() => {
+                  setPairingPlatform('windows');
+                  setPairingCode(null);
+                }}
+                className={`flex-1 py-2 font-bold rounded-lg transition flex items-center justify-center gap-1.5 ${
+                  pairingPlatform === 'windows'
+                    ? 'bg-indigo-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-white'
+                }`}
               >
-                {childrenList.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name} {c.age ? `(${c.age} yrs)` : ''}
-                  </option>
-                ))}
-              </select>
+                <Laptop className="w-4 h-4" />
+                <span>Windows PC</span>
+              </button>
+              <button
+                onClick={() => {
+                  setPairingPlatform('android');
+                  setPairingCode(null);
+                }}
+                className={`flex-1 py-2 font-bold rounded-lg transition flex items-center justify-center gap-1.5 ${
+                  pairingPlatform === 'android'
+                    ? 'bg-indigo-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Smartphone className="w-4 h-4" />
+                <span>Android</span>
+              </button>
             </div>
+
+            {pairingPlatform === 'windows' ? (
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Connect a Windows laptop or desktop for your family. Each child who signs into this PC will automatically receive their own age-appropriate protection rules.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Select which child uses this Android smartphone or tablet:
+                </p>
+                <select
+                  value={selectedChildForPair}
+                  onChange={(e) => setSelectedChildForPair(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-indigo-500"
+                >
+                  {childrenList.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} {c.age ? `(${c.age} yrs)` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             {pairingCode ? (
               <div className="bg-slate-950 border border-indigo-500/40 rounded-2xl p-5 text-center space-y-3">
                 <p className="text-[11px] font-semibold text-indigo-400 uppercase tracking-wider">
-                  Your Pairing Code
+                  Your 8-Character Pairing Code
                 </p>
                 <div className="text-3xl font-mono font-black text-white tracking-widest flex items-center justify-center gap-3">
                   <span>{pairingCode}</span>
@@ -560,14 +634,15 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
                   </button>
                 </div>
                 <p className="text-[11px] text-slate-400">
-                  Enter this 8-character code in the SafeBrowse setup window on your child's computer.
-                  Valid for 15 minutes.
+                  {pairingPlatform === 'windows'
+                    ? 'Enter this code into the SafeBrowse setup wizard on your computer. Valid for 15 minutes.'
+                    : "Enter this code in the SafeBrowse app on your child's Android device."}
                 </p>
               </div>
             ) : (
               <button
-                onClick={handleGeneratePairingCode}
-                disabled={generatingCode || !selectedChildForPair}
+                onClick={() => handleGeneratePairingCode(pairingPlatform)}
+                disabled={generatingCode || (pairingPlatform === 'android' && !selectedChildForPair)}
                 className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl transition flex items-center justify-center gap-2 shadow-lg disabled:opacity-50"
               >
                 {generatingCode ? (
@@ -582,8 +657,9 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
             <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl flex items-start gap-2.5 text-[11px] text-slate-400">
               <Info className="w-4 h-4 text-slate-500 flex-shrink-0 mt-0.5" />
               <div>
-                Windows SafeBrowse operates as a local Windows service. Once paired, parents can
-                switch users freely without reinstalling.
+                {pairingPlatform === 'windows'
+                  ? 'Windows computers belong to the family. Once connected, choose who uses each Windows account and set a Parent PIN to prevent tampering.'
+                  : 'Android devices are dedicated to an individual child profile.'}
               </div>
             </div>
 
@@ -593,6 +669,38 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
                 className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium rounded-xl transition"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- Reset PIN Confirm Modal --- */}
+      {resetPinTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-slate-900 border border-amber-500/40 rounded-3xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+            <h3 className="text-base font-bold text-amber-400 flex items-center gap-2">
+              <Lock className="w-5 h-5 text-amber-400" />
+              Reset Parent PIN on {resetPinTarget.name}?
+            </h3>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              This will clear the SafeBrowse Parent PIN on this computer. You will be able to set a new PIN
+              locally on the computer without needing the old PIN.
+            </p>
+
+            <div className="flex justify-end gap-2.5 pt-2">
+              <button
+                onClick={() => setResetPinTarget(null)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium rounded-xl transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleResetPinSubmit}
+                disabled={resettingPin}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold rounded-xl transition disabled:opacity-50"
+              >
+                {resettingPin ? 'Resetting...' : 'Reset Parent PIN'}
               </button>
             </div>
           </div>

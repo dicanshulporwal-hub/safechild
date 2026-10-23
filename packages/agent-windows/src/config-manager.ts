@@ -18,7 +18,7 @@ export interface DeviceConfig {
   deviceId: string;
   deviceToken: string;
   deviceTokenEncrypted?: string;
-  childId: string;
+  childId: string | null;
   parentId: string;
   familyId?: string;
   deviceName: string;
@@ -32,7 +32,7 @@ export interface DeviceConfig {
 export interface SanitizedDeviceConfig {
   deviceId: string;
   deviceName: string;
-  childId: string;
+  childId: string | null;
   parentId: string;
   familyId?: string;
   backendUrl: string;

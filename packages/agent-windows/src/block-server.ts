@@ -79,7 +79,7 @@ export class BlockPageServer {
   private server: http.Server | null = null;
   private redirectServer: http.Server | null = null;
   private backendUrl: string;
-  private defaultChildId: string;
+  private defaultChildId: string | null;
   private deviceId: string;
   private deviceToken: string;
   private activeChildProvider?: () => ActiveChildContext;
@@ -91,7 +91,7 @@ export class BlockPageServer {
 
   constructor(
     backendUrl: string,
-    defaultChildId: string,
+    defaultChildId: string | null,
     deviceId: string,
     activeChildProvider?: () => ActiveChildContext,
     deviceToken: string = ''

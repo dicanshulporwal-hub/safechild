@@ -102,7 +102,7 @@ describe('SafeBrowse Windows Pilot v1.0 — Device Management & Telemetry API Su
     const pairResult = await deviceService.pairDevice(
       pairing.code,
       'Acer Aspire 5',
-      'windows',
+      'android',
       '1.0.0-pilot'
     );
     deviceId = pairResult.device.id;
@@ -125,7 +125,7 @@ describe('SafeBrowse Windows Pilot v1.0 — Device Management & Telemetry API Su
     const dev = res.data.find((d: any) => d.id === deviceId);
     assert.ok(dev, 'Paired device found in device list');
     assert.strictEqual(dev.name, 'Acer Aspire 5');
-    assert.strictEqual(dev.platform, 'windows');
+    assert.strictEqual(dev.platform, 'android');
     assert.strictEqual(dev.childId, childAliceId);
     assert.strictEqual(dev.childName, 'Alice');
     assert.strictEqual(dev.agentVersion, '1.0.0-pilot');

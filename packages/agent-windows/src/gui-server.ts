@@ -16,6 +16,7 @@ import { sessionMonitor } from './session-monitor';
 import { WINDOWS_AGENT_VERSION, BUILD_COMMIT } from './sync-client';
 import { evaluateSystemStatus } from './agent-cli';
 import { networkManager, WindowsNetworkManager, logServiceMessage } from './network-manager';
+import { parentPinManager, ParentPinManager } from './parent-pin-manager';
 import { normalizePairingCode } from '@safebrowse/shared';
 
 const execAsync = promisify(exec);
@@ -27,15 +28,18 @@ export class GuiServer {
   private configMgr: ConfigManager;
   private accountMgr: WindowsAccountManager;
   private networkMgr: WindowsNetworkManager;
+  private pinMgr: ParentPinManager;
 
   constructor(
     customConfigMgr?: ConfigManager,
     customAccountMgr?: WindowsAccountManager,
-    customNetworkMgr?: WindowsNetworkManager
+    customNetworkMgr?: WindowsNetworkManager,
+    customPinMgr?: ParentPinManager
   ) {
     this.configMgr = customConfigMgr || configManager;
     this.accountMgr = customAccountMgr || accountManager;
     this.networkMgr = customNetworkMgr || networkManager;
+    this.pinMgr = customPinMgr || (customConfigMgr ? new ParentPinManager(customConfigMgr) : parentPinManager);
     if (this.networkMgr.setConfigManagerForTesting) {
       this.networkMgr.setConfigManagerForTesting(this.configMgr);
     }
@@ -52,11 +56,50 @@ export class GuiServer {
         // Enable CORS for loopback
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-device-id, x-device-token');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-device-id, x-device-token, x-management-session');
+
+        const origin = req.headers['origin'];
+        if (origin && !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Cross-origin requests forbidden.' }));
+          return;
+        }
+
+        const isPinSet = await this.pinMgr.isPinSet();
+        const sessionToken = req.headers['x-management-session'] as string;
+        const isManagementActive = !isPinSet || Boolean(sessionToken && this.pinMgr.validateSession(sessionToken));
+
+        const checkManagementAuth = async (): Promise<boolean> => {
+          return isManagementActive;
+        };
 
         if (req.method === 'OPTIONS') {
           res.writeHead(200);
           res.end();
+          return;
+        }
+
+        // Endpoint: POST /api/verify-pin (Parent lock unlock)
+        if (pathname === '/api/verify-pin' && req.method === 'POST') {
+          let body = '';
+          req.on('data', (c) => (body += c));
+          req.on('end', async () => {
+            try {
+              const data = JSON.parse(body || '{}');
+              const pin = String(data.pin || '').trim();
+              const result = await this.pinMgr.verifyPin(pin);
+              if (!result.success) {
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: result.error || 'Invalid Parent PIN.' }));
+                return;
+              }
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: true, sessionToken: result.sessionToken }));
+            } catch (e: any) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: e.message }));
+            }
+          });
           return;
         }
 
@@ -81,6 +124,43 @@ export class GuiServer {
               ? 'PROTECTED'
               : 'PARENT_BYPASS';
 
+            if (!isManagementActive) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(
+                JSON.stringify({
+                  isPaired: Boolean(config),
+                  onboardingState: this.configMgr.getOnboardingState(),
+                  onboardingReason: this.configMgr.getOnboardingReason(),
+                  agentVersion: WINDOWS_AGENT_VERSION,
+                  buildCommit: BUILD_COMMIT,
+                  config: config
+                    ? {
+                        deviceName: config.deviceName,
+                        pairedAt: config.pairedAt,
+                      }
+                    : null,
+                  activeSession: {
+                    username: activeSession.username,
+                    isManaged: activePolicy.isManaged,
+                    childName: activePolicy.childName,
+                  },
+                  hasMultipleSessions,
+                  sessionWarning,
+                  activeUsers: multiSessionState.activeUsers,
+                  protectionState,
+                  mappings: mappings.map((m) => ({
+                    windowsUsername: m.windowsUsername,
+                    isManaged: Boolean(m.enabled && m.childId),
+                    childName: m.childName,
+                  })),
+                  systemStatus: systemStatus ? { dnsEnforced: Boolean(systemStatus.dnsEnforced) } : null,
+                  pinConfigured: isPinSet,
+                  managementUnlocked: false,
+                })
+              );
+              return;
+            }
+
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(
               JSON.stringify({
@@ -102,6 +182,7 @@ export class GuiServer {
                   isManaged: activePolicy.isManaged,
                   childId: activePolicy.childId,
                   childName: activePolicy.childName,
+                  sid: activeSession.sid,
                 },
                 hasMultipleSessions,
                 sessionWarning,
@@ -109,6 +190,8 @@ export class GuiServer {
                 protectionState,
                 mappings,
                 systemStatus,
+                pinConfigured: isPinSet,
+                managementUnlocked: true,
               })
             );
           } catch (e: any) {
@@ -312,6 +395,13 @@ export class GuiServer {
         }
 
         if ((pathname === '/api/launch-pair' || pathname === '/api/launch-attach') && req.method === 'POST') {
+          const config = await this.configMgr.loadSanitizedConfig();
+          if (config && isPinSet && !isManagementActive) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'SafeBrowse Parent PIN authentication required.' }));
+            return;
+          }
+
           let body = '';
           req.on('data', (c) => (body += c));
           req.on('end', async () => {
@@ -370,6 +460,12 @@ export class GuiServer {
         }
 
         if ((pathname === '/api/reconfigure' || pathname === '/api/launch-reconfigure') && req.method === 'POST') {
+          if (!await checkManagementAuth()) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'SafeBrowse Parent PIN authentication required.' }));
+            return;
+          }
+
           try {
             const exePath = process.argv[0];
             const isNode = exePath.toLowerCase().endsWith('node.exe') || exePath.toLowerCase().endsWith('node');
@@ -409,6 +505,12 @@ export class GuiServer {
         }
 
         if (pathname === '/api/mappings' && req.method === 'POST') {
+          if (!await checkManagementAuth()) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'SafeBrowse Parent PIN authentication required.' }));
+            return;
+          }
+
           const isAdmin = await this.configMgr.isAdministrator();
           if (!isAdmin && process.platform === 'win32') {
             res.writeHead(403, { 'Content-Type': 'application/json' });
@@ -492,6 +594,12 @@ export class GuiServer {
 
         // Endpoint: POST /api/disconnect (Atomic complete teardown)
         if (pathname === '/api/disconnect' && req.method === 'POST') {
+          if (!await checkManagementAuth()) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'SafeBrowse Parent PIN authentication required to disconnect this computer.' }));
+            return;
+          }
+
           const isAdmin = await this.configMgr.isAdministrator();
           if (!isAdmin && (process.platform === 'win32' || this.configMgr.getPlatform() === 'win32')) {
             res.writeHead(403, { 'Content-Type': 'application/json' });
@@ -533,7 +641,10 @@ export class GuiServer {
             // 5. Clear profile mappings & session caches
             await this.accountMgr.clearProfileMappings();
 
-            // 6. Verify adapter no longer uses 127.0.0.1
+            // 6. Clear Parent PIN verifier & invalidate session
+            await this.pinMgr.clearPin();
+
+            // 7. Verify adapter no longer uses 127.0.0.1
             const inspection = await this.networkMgr.inspectCurrentEnforcement();
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -803,21 +914,21 @@ export class GuiServer {
       </div>
 
       <div class="button-row">
-        <button class="btn btn-primary" onclick="handleGetStarted()">Get Started</button>
+        <button class="btn btn-primary" onclick="handleGetStarted()">Connect This Computer</button>
         <button class="btn btn-secondary" onclick="checkStatusAndNavigate()">View Protection Status</button>
       </div>
     </div>
 
     <!-- SCREEN 2: PAIR FAMILY -->
     <div id="screenPair" class="screen">
-      <h2 style="font-size: 22px; font-weight: 800; margin: 0 0 8px 0;">Attach Device to Family</h2>
+      <h2 style="font-size: 22px; font-weight: 800; margin: 0 0 8px 0;">Connect Computer to Family</h2>
       <p style="color: var(--text-muted); font-size: 14px; margin-bottom: 24px;">
-        Obtain a pairing code from the SafeBrowse Parent Portal (<a href="https://safebrowse.porwal.online" target="_blank" style="color: #60a5fa;">safebrowse.porwal.online</a>) under <strong>Add Device</strong>. Attaching this device requires Administrator approval.
+        Obtain an 8-character pairing code from the SafeBrowse Parent Portal (<a href="https://safebrowse.porwal.online" target="_blank" style="color: #60a5fa;">safebrowse.porwal.online</a>) under <strong>Add Device</strong>. Attaching this device requires Administrator approval.
       </p>
 
       <div class="input-group">
         <label for="pairingCode">Pairing Code</label>
-        <input type="text" id="pairingCode" placeholder="SB-XXXX-XXXX" style="letter-spacing: 2px; font-weight: 700; text-transform: uppercase;">
+        <input type="text" id="pairingCode" placeholder="K8X9-M2W7" style="letter-spacing: 2px; font-weight: 700; text-transform: uppercase;">
       </div>
 
       <div class="input-group">
@@ -826,7 +937,7 @@ export class GuiServer {
       </div>
 
       <div class="button-row">
-        <button class="btn btn-primary" id="btnPair" onclick="launchElevatedPair()">Attach Device</button>
+        <button class="btn btn-primary" id="btnPair" onclick="launchElevatedPair()">Connect Computer</button>
         <button class="btn btn-secondary" onclick="showScreen('screenWelcome')">Back</button>
       </div>
     </div>
@@ -931,16 +1042,81 @@ export class GuiServer {
         <button class="btn btn-secondary" style="border-color: rgba(239, 68, 68, 0.4); color: #fca5a5;" onclick="confirmDisconnect()">Disconnect Device</button>
       </div>
     </div>
+
+    <!-- PARENT PIN UNLOCK MODAL -->
+    <div id="pinModal" style="display:none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 9999; align-items: center; justify-content: center; backdrop-filter: blur(8px);">
+      <div style="background: #111827; border: 1px solid #374151; border-radius: 20px; padding: 28px; max-width: 380px; width: 90%; text-align: center; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5);">
+        <div style="font-size: 32px; margin-bottom: 12px;">🔒</div>
+        <h3 style="margin: 0 0 8px 0; font-size: 18px; font-weight: 800; color: #fff;">Parent Lock</h3>
+        <p style="font-size: 13px; color: #94a3b8; margin-bottom: 20px;">Enter your SafeBrowse Parent PIN to unlock settings.</p>
+        <div style="margin-bottom: 20px;">
+          <input type="password" id="modalPinInput" maxlength="8" inputmode="numeric" placeholder="••••••" style="width: 100%; padding: 12px 16px; background: #0f172a; border: 1px solid #374151; border-radius: 12px; font-size: 20px; text-align: center; color: #fff; letter-spacing: 4px; outline: none;" onkeydown="if(event.key==='Enter') submitPinModal()">
+        </div>
+        <div style="display: flex; gap: 10px;">
+          <button class="btn btn-primary" style="flex: 1;" onclick="submitPinModal()">Unlock</button>
+          <button class="btn btn-secondary" style="flex: 1;" onclick="closePinModal()">Cancel</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script>
+    let managementSessionToken = null;
     let appState = {
       isPaired: false,
       config: null,
       accounts: [],
       familyProfiles: [],
-      mappings: []
+      mappings: [],
+      pinConfigured: false,
+      managementUnlocked: false
     };
+
+    function ensureManagementUnlocked() {
+      return new Promise((resolve) => {
+        if (!appState.pinConfigured || managementSessionToken) {
+          return resolve(true);
+        }
+        const modal = document.getElementById('pinModal');
+        const input = document.getElementById('modalPinInput');
+        if (!modal || !input) return resolve(false);
+        input.value = '';
+        modal.style.display = 'flex';
+        input.focus();
+        window._pinResolver = resolve;
+      });
+    }
+
+    async function submitPinModal() {
+      const input = document.getElementById('modalPinInput');
+      const pin = (input?.value || '').trim();
+      if (!pin) return;
+      try {
+        const res = await fetch('/api/verify-pin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pin })
+        });
+        const data = await res.json();
+        if (res.ok && data.success && data.sessionToken) {
+          managementSessionToken = data.sessionToken;
+          appState.managementUnlocked = true;
+          document.getElementById('pinModal').style.display = 'none';
+          showAlert('Parent Mode unlocked for 5 minutes.');
+          if (window._pinResolver) window._pinResolver(true);
+          loadStatusScreen(true);
+        } else {
+          showAlert(data.error || 'Incorrect SafeBrowse Parent PIN.', true);
+        }
+      } catch (err) {
+        showAlert('Error verifying PIN: ' + err.message, true);
+      }
+    }
+
+    function closePinModal() {
+      document.getElementById('pinModal').style.display = 'none';
+      if (window._pinResolver) window._pinResolver(false);
+    }
 
     function showAlert(msg, isError = false) {
       const b = document.getElementById('alertBox');
@@ -974,6 +1150,9 @@ export class GuiServer {
     }
 
     async function launchElevatedReconfigure() {
+      const unlocked = await ensureManagementUnlocked();
+      if (!unlocked) return;
+
       const btn = document.getElementById('btnReconfigure');
       if (btn) {
         btn.disabled = true;
@@ -982,7 +1161,10 @@ export class GuiServer {
       showAlert('Administrator approval requested... Please approve the Windows UAC prompt to reconfigure accounts.', false);
 
       try {
-        const res = await fetch('/api/reconfigure', { method: 'POST' });
+        const res = await fetch('/api/reconfigure', {
+          method: 'POST',
+          headers: { ...(managementSessionToken ? { 'x-management-session': managementSessionToken } : {}) }
+        });
         const data = await res.json().catch(() => ({}));
         if (res.ok && data.success) {
           if (pollInterval) clearInterval(pollInterval);
@@ -1186,6 +1368,9 @@ export class GuiServer {
     }
 
     async function saveMappings() {
+      const unlocked = await ensureManagementUnlocked();
+      if (!unlocked) return;
+
       const saveBtn = document.getElementById('btnSaveMappings');
       if (saveBtn) {
         saveBtn.disabled = true;
@@ -1210,7 +1395,10 @@ export class GuiServer {
       try {
         const res = await fetch('/api/mappings', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(managementSessionToken ? { 'x-management-session': managementSessionToken } : {})
+          },
           body: JSON.stringify({ mappings })
         });
         const data = await res.json().catch(() => ({}));
@@ -1236,7 +1424,9 @@ export class GuiServer {
     async function loadStatusScreen(silent = false) {
       try {
         const [statRes, accRes] = await Promise.all([
-          fetch('/api/status').then(r => r.json()).catch(() => ({})),
+          fetch('/api/status', {
+            headers: { ...(managementSessionToken ? { 'x-management-session': managementSessionToken } : {}) }
+          }).then(r => r.json()).catch(() => ({})),
           fetch('/api/accounts').then(r => r.json()).catch(() => ({ accounts: [] }))
         ]);
 
@@ -1244,6 +1434,8 @@ export class GuiServer {
         const accounts = accRes.accounts || [];
         appState.mappings = data.mappings || [];
         appState.isPaired = Boolean(data.isPaired);
+        appState.pinConfigured = Boolean(data.pinConfigured);
+        appState.managementUnlocked = Boolean(data.managementUnlocked);
 
         document.getElementById('statUser').innerText = data.activeSession?.username || 'System Console';
         document.getElementById('statUserSid').innerText = data.activeSession?.isManaged ? 'Child account' : 'Parent / unmanaged account';
@@ -1346,13 +1538,20 @@ export class GuiServer {
     }
 
     async function confirmDisconnect() {
+      const unlocked = await ensureManagementUnlocked();
+      if (!unlocked) return;
+
       if (!confirm('Are you sure you want to disconnect this computer from SafeBrowse? Protection will be disabled until reconnected.')) {
         return;
       }
       try {
-        const res = await fetch('/api/disconnect', { method: 'POST' });
+        const res = await fetch('/api/disconnect', {
+          method: 'POST',
+          headers: { ...(managementSessionToken ? { 'x-management-session': managementSessionToken } : {}) }
+        });
         const data = await res.json().catch(() => ({}));
         if (res.ok && data.success) {
+          managementSessionToken = null;
           showAlert('Device disconnected successfully.');
           setTimeout(() => location.reload(), 1000);
         } else {

@@ -48,7 +48,7 @@ export class TimelineService {
       if (device) {
         familyId = device.familyId;
         parentId = device.parentId;
-        if (!event.childId) event.childId = device.childId;
+        if (!event.childId && device.childId) event.childId = device.childId;
       }
     }
 

@@ -7,6 +7,7 @@ import { promisify } from 'util';
 import { configManager, ConfigManager, DeviceConfig } from './config-manager';
 import { accountManager, WindowsAccountManager } from './account-manager';
 import { networkManager, WindowsNetworkManager, logServiceMessage } from './network-manager';
+import { parentPinManager, ParentPinManager } from './parent-pin-manager';
 import { WINDOWS_AGENT_VERSION } from './sync-client';
 import { normalizePairingCode } from '@safebrowse/shared';
 
@@ -18,6 +19,7 @@ export class ElevatedPairServer {
   private configMgr: ConfigManager;
   private accountMgr: WindowsAccountManager;
   private networkMgr: WindowsNetworkManager;
+  private pinMgr: ParentPinManager;
   private idleTimer: NodeJS.Timeout | null = null;
   private prefillCode: string = '';
   private prefillName: string = '';
@@ -26,11 +28,13 @@ export class ElevatedPairServer {
   constructor(
     customConfigMgr?: ConfigManager,
     customAccountMgr?: WindowsAccountManager,
-    customNetworkMgr?: WindowsNetworkManager
+    customNetworkMgr?: WindowsNetworkManager,
+    customPinMgr?: ParentPinManager
   ) {
     this.configMgr = customConfigMgr || configManager;
     this.accountMgr = customAccountMgr || accountManager;
     this.networkMgr = customNetworkMgr || networkManager;
+    this.pinMgr = customPinMgr || (customConfigMgr ? new ParentPinManager(customConfigMgr) : parentPinManager);
     if (this.networkMgr.setConfigManagerForTesting) {
       this.networkMgr.setConfigManagerForTesting(this.configMgr);
     }
@@ -56,6 +60,13 @@ export class ElevatedPairServer {
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+        const origin = req.headers['origin'];
+        if (origin && !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Cross-origin requests forbidden.' }));
+          return;
+        }
 
         if (req.method === 'OPTIONS') {
           res.writeHead(200);
@@ -134,6 +145,7 @@ export class ElevatedPairServer {
             await this.networkMgr.restoreOriginalDns();
             await this.configMgr.deleteDeviceConfig();
             await this.accountMgr.clearProfileMappings();
+            await this.pinMgr.clearPin();
             this.configMgr.setOnboardingState('NOT_CONNECTED');
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, onboardingState: 'NOT_CONNECTED' }));
@@ -351,6 +363,13 @@ export class ElevatedPairServer {
             try {
               const data = JSON.parse(body || '{}');
               const mappings = Array.isArray(data.mappings) ? data.mappings : [];
+              const parentPin = String(data.parentPin || '').trim();
+
+              if (!/^\d{6,8}$/.test(parentPin)) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'SafeBrowse Parent PIN must be between 6 and 8 numeric digits.' }));
+                return;
+              }
 
               const secureConfig = await this.configMgr.loadDeviceConfig();
               if (!secureConfig) {
@@ -358,6 +377,9 @@ export class ElevatedPairServer {
                 res.end(JSON.stringify({ error: 'Device is not paired.' }));
                 return;
               }
+
+              // Step 0: Set SafeBrowse Parent PIN verifier securely
+              await this.pinMgr.setPin(parentPin);
 
               // Step 1: Transition state to ACTIVATING
               this.configMgr.setOnboardingState('ACTIVATING');
@@ -1029,7 +1051,7 @@ export class ElevatedPairServer {
     <div id="screenAccounts" class="screen">
       <h2 style="font-size: 22px; font-weight: 800; margin: 0 0 8px 0;">Who uses this computer?</h2>
       <p style="color: var(--text-muted); font-size: 14px; line-height: 1.6; margin-bottom: 24px;">
-        Choose which child uses each Windows account. Accounts marked <strong>Parent / Don't Protect</strong> will not be filtered.
+        Choose who uses each Windows account. Accounts marked <strong>Parent / Do not protect</strong> will not be filtered.
       </p>
 
       <div id="accountsContainer">
@@ -1039,12 +1061,39 @@ export class ElevatedPairServer {
       </div>
 
       <div class="button-row">
-        <button class="btn btn-primary" id="btnReview" onclick="reviewProtection()">Review Protection</button>
+        <button class="btn btn-primary" id="btnReview" onclick="reviewProtection()">Continue to Parent PIN</button>
         <button class="btn btn-secondary" onclick="showScreen('screenPair')">Back</button>
       </div>
     </div>
 
-    <!-- SCREEN 4: READY TO PROTECT / REVIEW -->
+    <!-- SCREEN 4: SET PARENT PIN -->
+    <div id="screenPin" class="screen">
+      <h2 style="font-size: 22px; font-weight: 800; margin: 0 0 8px 0;">Set SafeBrowse Parent PIN</h2>
+      <p style="color: var(--text-muted); font-size: 14px; line-height: 1.6; margin-bottom: 24px;">
+        Create a 6 to 8 digit PIN. This PIN prevents children from changing settings, switching protection off, or disconnecting SafeBrowse on this computer.
+      </p>
+
+      <div class="input-group">
+        <label for="parentPin">SafeBrowse Parent PIN (6–8 digits)</label>
+        <input type="password" id="parentPin" class="input-code" placeholder="••••••" maxlength="8" pattern="[0-9]*" inputmode="numeric">
+      </div>
+
+      <div class="input-group">
+        <label for="confirmPin">Confirm Parent PIN</label>
+        <input type="password" id="confirmPin" class="input-code" placeholder="••••••" maxlength="8" pattern="[0-9]*" inputmode="numeric">
+      </div>
+
+      <div class="callout" style="margin-top: 16px;">
+        🔒 <strong>Tamper Protection:</strong> Standard child accounts cannot bypass SafeBrowse without this PIN. You can reset it anytime from your online Parent Dashboard.
+      </div>
+
+      <div class="button-row">
+        <button class="btn btn-primary" id="btnPinNext" onclick="validatePinAndProceed()">Continue to Review</button>
+        <button class="btn btn-secondary" onclick="showScreen('screenAccounts')">Back</button>
+      </div>
+    </div>
+
+    <!-- SCREEN 5: READY TO PROTECT / REVIEW -->
     <div id="screenReview" class="screen">
       <h2 style="font-size: 22px; font-weight: 800; margin: 0 0 8px 0;">Ready to Protect</h2>
       <p style="color: var(--text-muted); font-size: 14px; line-height: 1.6; margin-bottom: 24px;">
@@ -1063,8 +1112,8 @@ export class ElevatedPairServer {
       </div>
 
       <div class="button-row">
-        <button class="btn btn-primary" id="btnStartProtection" onclick="finishSetup()">Start Protection</button>
-        <button class="btn btn-secondary" onclick="showScreen('screenAccounts')">Change Accounts</button>
+        <button class="btn btn-primary" id="btnStartProtection" onclick="finishSetup()">Confirm Account Assignments & Activate</button>
+        <button class="btn btn-secondary" onclick="showScreen('screenPin')">Back</button>
       </div>
     </div>
 
@@ -1135,7 +1184,8 @@ export class ElevatedPairServer {
       deviceName: '${prefillName}',
       accounts: [],
       familyProfiles: [],
-      selectedMappings: []
+      selectedMappings: [],
+      parentPin: ''
     };
 
     function showAlert(msg, isError = false) {
@@ -1235,7 +1285,6 @@ export class ElevatedPairServer {
       }
 
       let html = '';
-      const autoPreselect = appState.accounts.length === 1 && appState.familyProfiles.length === 1;
 
       appState.accounts.forEach((acc, idx) => {
         const isCurrent = Boolean(acc.isCurrentConsoleUser);
@@ -1256,10 +1305,10 @@ export class ElevatedPairServer {
             </div>
             <div>
               <select class="account-select" data-sid="\${acc.sid}" data-username="\${displayName}">
-                <option value="">Parent / Don't Protect</option>
+                <option value="" disabled selected>Choose who uses this account...</option>
+                <option value="__PARENT_UNMANAGED__">Parent / Do not protect</option>
                 \${appState.familyProfiles.map(p => {
-                  const selected = autoPreselect ? 'selected' : '';
-                  return \`<option value="\${p.id}" \${selected}>\${p.name}\${p.age ? ' (Age ' + p.age + ')' : ''}</option>\`;
+                  return \`<option value="\${p.id}">\${p.name}\${p.age ? ' (Age ' + p.age + ')' : ''}</option>\`;
                 }).join('')}
               </select>
             </div>
@@ -1273,14 +1322,22 @@ export class ElevatedPairServer {
     function reviewProtection() {
       const selects = document.querySelectorAll('.account-select');
       const mappings = [];
-      const reviewContainer = document.getElementById('reviewContainer');
-      let reviewHtml = '';
+
+      let hasUnselected = false;
+      selects.forEach(sel => {
+        if (!sel.value) hasUnselected = true;
+      });
+      if (hasUnselected) {
+        showAlert('Please choose who uses each account before continuing.', true);
+        return;
+      }
 
       selects.forEach(sel => {
         const sid = sel.getAttribute('data-sid');
         const username = sel.getAttribute('data-username');
-        const childId = sel.value || null;
-        const cleanName = username.replace(/^.*\\\\/, '');
+        const val = sel.value;
+        const isParent = val === '__PARENT_UNMANAGED__';
+        const childId = isParent ? null : (val || null);
 
         let childName = null;
         if (childId) {
@@ -1293,25 +1350,61 @@ export class ElevatedPairServer {
           windowsUsername: username,
           childId: childId,
           childName: childName,
-          enabled: true
+          enabled: Boolean(childId)
         });
+      });
 
+      appState.selectedMappings = mappings;
+      showScreen('screenPin');
+    }
+
+    function validatePinAndProceed() {
+      const pin = (document.getElementById('parentPin')?.value || '').trim();
+      const confirm = (document.getElementById('confirmPin')?.value || '').trim();
+
+      if (!/^\\d{6,8}$/.test(pin)) {
+        showAlert('SafeBrowse Parent PIN must be between 6 and 8 numeric digits.', true);
+        return;
+      }
+      if (pin !== confirm) {
+        showAlert('Parent PINs do not match. Please verify and retry.', true);
+        return;
+      }
+
+      appState.parentPin = pin;
+
+      const reviewContainer = document.getElementById('reviewContainer');
+      let reviewHtml = '';
+
+      appState.selectedMappings.forEach(m => {
+        const cleanName = m.windowsUsername.replace(/^.*\\\\/, '');
         reviewHtml += \`
           <div class="summary-card">
             <div>
               <div style="font-weight: 700; font-size: 14px;">\${cleanName}</div>
               <div style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">
-                \${childId ? 'Used by ' + childName : 'Unrestricted user'}
+                \${m.childId ? 'Protected profile for ' + (m.childName || 'Child') : 'Parent account (Unrestricted)'}
               </div>
             </div>
             <div>
-              \${childId ? '<span class="pill-protected">Protected</span>' : '<span class="pill-parent">Parent (Unrestricted)</span>'}
+              \${m.childId ? '<span class="pill-protected">Protected</span>' : '<span class="pill-parent">Parent (Unrestricted)</span>'}
             </div>
           </div>
         \`;
       });
 
-      appState.selectedMappings = mappings;
+      reviewHtml += \`
+        <div class="summary-card" style="border-color: rgba(37, 99, 235, 0.4); background: rgba(37, 99, 235, 0.1);">
+          <div>
+            <div style="font-weight: 700; font-size: 14px; color: #93c5fd;">Parent Security Lock</div>
+            <div style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">SafeBrowse Parent PIN is configured</div>
+          </div>
+          <div>
+            <span class="pill-protected" style="background: rgba(37, 99, 235, 0.2); border-color: rgba(37, 99, 235, 0.5); color: #93c5fd;">Locked with PIN</span>
+          </div>
+        </div>
+      \`;
+
       reviewContainer.innerHTML = reviewHtml;
       showScreen('screenReview');
     }
@@ -1326,7 +1419,10 @@ export class ElevatedPairServer {
         const res = await fetch('/api/finish-setup', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mappings: appState.selectedMappings })
+          body: JSON.stringify({
+            mappings: appState.selectedMappings,
+            parentPin: appState.parentPin
+          })
         });
 
         const data = await res.json().catch(() => ({}));
@@ -1336,12 +1432,12 @@ export class ElevatedPairServer {
         } else {
           showAlert(data.error || 'Failed to finish setup. Please retry.', true);
           btn.disabled = false;
-          btn.innerText = 'Start Protection';
+          btn.innerText = 'Confirm Account Assignments & Activate';
         }
       } catch (err) {
         showAlert('Error finishing setup: ' + err.message, true);
         btn.disabled = false;
-        btn.innerText = 'Start Protection';
+        btn.innerText = 'Confirm Account Assignments & Activate';
       }
     }
 

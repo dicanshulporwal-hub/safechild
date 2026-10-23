@@ -139,8 +139,8 @@ describe('SafeBrowse Stage C.4.1: Pairing Code UX Consistency & Integration Suit
     // 2. Exact generated code passed to claim endpoint
     const claimRes = await api('POST', '/api/devices/claim', {}, {
       code: generatedCode,
-      deviceName: 'Family Living Room Laptop',
-      platform: 'windows',
+      deviceName: "Rahul's Android Phone",
+      platform: 'android',
       agentVersion: '1.0.4-validation',
     });
 
@@ -157,8 +157,8 @@ describe('SafeBrowse Stage C.4.1: Pairing Code UX Consistency & Integration Suit
       where: { id: deviceId },
     });
     assert.ok(createdDevice, 'Device record must exist in DB');
-    assert.strictEqual(createdDevice.name, 'Family Living Room Laptop');
-    assert.strictEqual(createdDevice.platform, 'windows');
+    assert.strictEqual(createdDevice.name, "Rahul's Android Phone");
+    assert.strictEqual(createdDevice.platform, 'android');
 
     // 5. Code consumed atomically
     const dbRecordAfter = await prisma.pairingCode.findUnique({

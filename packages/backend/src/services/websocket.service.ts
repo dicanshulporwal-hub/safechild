@@ -14,7 +14,8 @@ export type SocketEventType =
   | 'NOTIFICATION_CREATED'
   | 'TIMELINE_EVENT'
   | 'USAGE_UPDATED'
-  | 'ACTIVITY_LOGGED';
+  | 'ACTIVITY_LOGGED'
+  | 'DEVICE_PIN_RESET';
 
 export interface SocketMessage {
   type: SocketEventType;
@@ -91,7 +92,7 @@ export class WebSocketManager {
           });
           if (device && device.deviceToken === deviceToken && !device.isRevoked) {
             clientInfo.deviceId = device.id;
-            clientInfo.childId = device.childId;
+            clientInfo.childId = device.childId ?? undefined;
             clientInfo.parentId = device.parentId;
             clientInfo.familyId = device.familyId;
             clientInfo.type = 'device';
@@ -136,7 +137,7 @@ export class WebSocketManager {
               });
               if (device && device.deviceToken === dTok && !device.isRevoked) {
                 clientInfo.deviceId = device.id;
-                clientInfo.childId = device.childId;
+                clientInfo.childId = device.childId ?? undefined;
                 clientInfo.parentId = device.parentId;
                 clientInfo.familyId = device.familyId;
                 clientInfo.type = 'device';

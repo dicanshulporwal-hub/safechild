@@ -146,7 +146,7 @@ describe('SafeBrowse Stage 11 Step 4: User Account Enable/Disable Test Suite', (
     childId = child.id;
 
     const pair = await deviceService.generatePairingCode(parentId, childId);
-    const { device } = await deviceService.pairDevice(pair.code, 'Windows Agent Laptop', 'windows', '1.0.0');
+    const { device } = await deviceService.pairDevice(pair.code, 'Child Android Phone', 'android', '1.0.0');
     deviceId = device.id;
     deviceToken = device.deviceToken;
 
@@ -351,7 +351,7 @@ describe('SafeBrowse Stage 11 Step 4: User Account Enable/Disable Test Suite', (
         'x-device-id': deviceId,
         'x-device-token': deviceToken,
       },
-      { activePolicyVersion: 1, enforcementActive: true, platform: 'windows', agentVersion: '1.0.0', deviceId }
+      { activePolicyVersion: 1, enforcementActive: true, platform: 'android', agentVersion: '1.0.0', deviceId }
     );
     assert.strictEqual(hbRes.status, 200);
     assert.strictEqual(hbRes.body.status, 'ok');

@@ -50,14 +50,14 @@ describe('SafeBrowse Backend Service Integration Tests', () => {
 
     const { device, policy } = await deviceService.pairDevice(
       pairing.code,
-      "Rahul's Windows Laptop",
-      'windows',
+      "Rahul's Android Phone",
+      'android',
       '1.0.0'
     );
 
     assert.ok(device);
-    assert.strictEqual(device.name, "Rahul's Windows Laptop");
-    assert.strictEqual(device.platform, 'windows');
+    assert.strictEqual(device.name, "Rahul's Android Phone");
+    assert.strictEqual(device.platform, 'android');
     assert.strictEqual(device.childId, childId);
     assert.ok(policy);
     deviceId = device.id;

@@ -488,13 +488,8 @@ export class WindowsAccountManager {
     return results;
   }
 
-  /**
-   * Executes merged PowerShell query on Windows for local accounts, active console user,
-   * explorer.exe interactive session owners, and ProfileList accounts (AzureAD/Entra/Domain).
-   */
-  private async queryWindowsAccountsViaPowerShell(): Promise<WindowsAccount[]> {
-    const psPath = configManager.getPowerShellPath();
-    const psScript = [
+  public static getDiscoveryPowerShellScript(): string {
+    return [
       "$ErrorActionPreference = 'SilentlyContinue'",
       '$found = @{}',
       'function Add-Account($name, $sid, $disabled = $false) {',
@@ -541,8 +536,8 @@ export class WindowsAccountManager {
       '        $nt = New-Object System.Security.Principal.NTAccount($fullUser)',
       '        $sidVal = $nt.Translate([System.Security.Principal.SecurityIdentifier]).Value',
       '        Add-Account $fullUser $sidVal $false',
-      '      } catch {}',
-      '    }',
+      '      }',
+      '    } catch {}',
       '  }',
       '} catch {}',
       '# 4. Human profile SIDs from Registry ProfileList (S-1-5-21-* for Local/Domain, S-1-12-1-* for AzureAD/Entra)',
@@ -572,6 +567,15 @@ export class WindowsAccountManager {
       '} catch {}',
       '@($found.Values) | ConvertTo-Json -Compress',
     ].join('\n');
+  }
+
+  /**
+   * Executes merged PowerShell query on Windows for local accounts, active console user,
+   * explorer.exe interactive session owners, and ProfileList accounts (AzureAD/Entra/Domain).
+   */
+  private async queryWindowsAccountsViaPowerShell(): Promise<WindowsAccount[]> {
+    const psPath = configManager.getPowerShellPath();
+    const psScript = WindowsAccountManager.getDiscoveryPowerShellScript();
 
     try {
       const { stdout } = await execFileAsync(psPath, [

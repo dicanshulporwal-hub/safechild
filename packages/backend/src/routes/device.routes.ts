@@ -7,10 +7,11 @@ import { pairingRateLimiter } from '../middleware/rate-limiter';
 import { deviceAuthMiddleware, AuthenticatedDeviceRequest } from '../middleware/deviceAuth';
 import { rbacService, FamilyPermission } from '../services/rbac.service';
 import { wsManager } from '../services/websocket.service';
+import { FamilyRole } from '../types/models';
 
 export const deviceRouter = Router();
 
-// Generate pairing code for a child (Parent auth required + Email Verified + Rate Limiting + Family Permission)
+// Generate pairing code (Windows family-level or Android child-level)
 deviceRouter.post(
   '/pairing-code',
   authMiddleware,
@@ -18,26 +19,51 @@ deviceRouter.post(
   pairingRateLimiter,
   async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const { childId } = req.body;
-      if (!childId) {
-        return res.status(400).json({ error: 'childId is required.' });
+      const { childId, platform, familyId } = req.body;
+      const isWindows = platform?.toLowerCase() === 'windows' || (!childId && !platform);
+
+      let targetFamilyId: string | null = familyId || null;
+
+      if (childId) {
+        const child = await childService.getChild(childId);
+        if (!child) {
+          return res.status(404).json({ error: 'Child profile not found.' });
+        }
+        const family = await rbacService.getFamilyForChild(child.id);
+        if (!family || !(await rbacService.getFamilyMembership(req.userId!, family.id))) {
+          return res.status(403).json({ error: 'Forbidden: You do not belong to this family.' });
+        }
+        if (!(await rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.DEVICE_MANAGE))) {
+          return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to pair new devices.' });
+        }
+        targetFamilyId = family.id;
+      } else {
+        // Windows family-level pairing code (childId is optional/null)
+        const memberships = await rbacService.getUserFamilyMemberships(req.userId!);
+        if (targetFamilyId) {
+          const match = memberships.find((m) => m.familyId === targetFamilyId);
+          if (!match) {
+            return res.status(403).json({ error: 'Forbidden: You do not belong to this family.' });
+          }
+        } else {
+          const manageFamily = memberships.find((m) =>
+            m.role === 'OWNER' || m.role === 'PARENT'
+          );
+          if (!manageFamily) {
+            return res.status(403).json({ error: 'Forbidden: No family found with management permissions.' });
+          }
+          targetFamilyId = manageFamily.familyId;
+        }
+
+        if (!(await rbacService.hasFamilyPermission(req.userId!, targetFamilyId, FamilyPermission.DEVICE_MANAGE))) {
+          return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to pair new devices.' });
+        }
       }
 
-      const child = await childService.getChild(childId);
-      if (!child) {
-        return res.status(404).json({ error: 'Child profile not found.' });
-      }
-
-      const family = await rbacService.getFamilyForChild(child.id);
-      if (!family || !(await rbacService.getFamilyMembership(req.userId!, family.id))) {
-        return res.status(403).json({ error: 'Forbidden: You do not belong to this family.' });
-      }
-
-      if (!(await rbacService.hasFamilyPermission(req.userId!, family.id, FamilyPermission.DEVICE_MANAGE))) {
-        return res.status(403).json({ error: 'Forbidden: Insufficient family permissions to pair new devices.' });
-      }
-
-      const pairing = await deviceService.generatePairingCode(req.userId!, childId);
+      const pairing = await deviceService.generatePairingCode(req.userId!, childId || null, {
+        platform: isWindows ? 'windows' : 'android',
+        familyId: targetFamilyId,
+      });
       res.json(pairing);
     } catch (e: any) {
       const status = e.message.includes('Forbidden') ? 403 : 400;
@@ -418,6 +444,19 @@ deviceRouter.post('/:id/unpair', deviceOrParentAuth, async (req: any, res: Respo
 
     res.json({ success: true, message: 'Device disconnected and credentials revoked.' });
   } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Reset device Parent PIN (Parent auth required)
+deviceRouter.post('/:id/reset-pin', authMiddleware, requireVerifiedEmail, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const result = await deviceService.resetParentPin(req.params.id, req.userId!);
+    res.json(result);
+  } catch (e: any) {
+    if (e.message.startsWith('Forbidden') || e.message.includes('Forbidden')) {
+      return res.status(403).json({ error: e.message });
+    }
     res.status(400).json({ error: e.message });
   }
 });

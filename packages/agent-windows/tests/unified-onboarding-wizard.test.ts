@@ -199,6 +199,7 @@ describe('SafeBrowse Windows Stage C.4 — Unified Onboarding Wizard & Cloud Syn
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        parentPin: '123456',
         mappings: [
           {
             windowsSid: 'S-1-5-21-1000-1001',

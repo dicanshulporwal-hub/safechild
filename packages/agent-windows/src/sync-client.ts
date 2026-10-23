@@ -14,7 +14,7 @@ export const WINDOWS_AGENT_VERSION = '1.0.4-validation';
 export interface DeviceConfig {
   deviceId: string;
   deviceToken: string;
-  childId: string;
+  childId: string | null;
   parentId: string;
   deviceName: string;
   backendUrl: string;

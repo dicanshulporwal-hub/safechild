@@ -357,8 +357,8 @@ describe('SafeBrowse Stage 11 Step 3F: Real PostgreSQL API Integration & E2E Sui
 
     const pairRes = await api('POST', '/api/devices/pair', {
       code: pairingCode,
-      deviceName: "Aarav's Windows Laptop",
-      platform: 'windows',
+      deviceName: "Aarav's Android Tablet",
+      platform: 'android',
       agentVersion: '1.0.0',
     });
 
@@ -730,29 +730,19 @@ describe('SafeBrowse Stage 11 Step 3F: Real PostgreSQL API Integration & E2E Sui
     assert.strictEqual(foreignKeyViolated, true);
   });
 
-  // 25. Database composite foreign key mismatch: same family, wrong child device reference (Requirement 6 & 7)
-  it('25. should reject device belonging to another child in the same family at database engine level', async () => {
-    // Create Child 2 in same family
-    const child2 = await prisma.child.create({
-      data: {
-        id: `child-2-${nanoid(6)}`,
-        familyId,
-        parentId: coParentUserId,
-        name: 'Priya',
-      },
-    });
-
-    let wrongChildDeviceViolated = false;
+  // 25. Database composite foreign key mismatch: family-level device tenancy (Requirement 6 & 7)
+  it('25. should reject device belonging to another family or invalid device at database engine level', async () => {
+    let wrongFamilyDeviceViolated = false;
     try {
-      // Attempt to associate AccessRequest for Child 2 with Child 1's device
+      // Attempt to associate AccessRequest for Child 1 (in familyId) with a non-existent device
       await prisma.$executeRaw`
         INSERT INTO "AccessRequest" ("id", "familyId", "childId", "deviceId", "domain", "status", "requestedAt")
-        VALUES ('req-wrong-child-dev', ${familyId}, ${child2.id}, ${deviceId}, 'youtube.com', 'PENDING'::"RequestStatus", NOW());
+        VALUES ('req-wrong-fam-dev', ${familyId}, ${childId}, 'dev-invalid-device-999', 'youtube.com', 'PENDING'::"RequestStatus", NOW());
       `;
     } catch {
-      wrongChildDeviceViolated = true;
+      wrongFamilyDeviceViolated = true;
     }
-    assert.strictEqual(wrongChildDeviceViolated, true);
+    assert.strictEqual(wrongFamilyDeviceViolated, true);
   });
 
   // 26. Database constraint: Zero owners rejection by constraint trigger (Requirement 7)

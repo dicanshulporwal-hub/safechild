@@ -933,7 +933,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const cacheFile = path.join(tmpDir, 'hb-test', `policy-${config.deviceId}.json`);
     fs.writeFileSync(
       cacheFile,
-      JSON.stringify(makeMockPolicy({ version: 2, childId: config.childId })),
+      JSON.stringify(makeMockPolicy({ version: 2, childId: config.childId ?? undefined })),
       'utf8'
     );
     // Reload policy into client

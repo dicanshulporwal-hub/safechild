@@ -1,0 +1,200 @@
+import * as fs from 'fs';
+import * as path from 'path';
+import * as crypto from 'crypto';
+import { configManager, ConfigManager } from './config-manager';
+import { logServiceMessage } from './network-manager';
+
+export interface PinVerifierRecord {
+  salt: string;
+  verifier: string;
+  kdf: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ManagementSession {
+  token: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export class ParentPinManager {
+  private configMgr: ConfigManager;
+  private customPinFilePath: string | null = null;
+  private activeSession: ManagementSession | null = null;
+  public static readonly SESSION_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+  constructor(customConfigMgr?: ConfigManager, customPinFilePath?: string) {
+    this.configMgr = customConfigMgr || configManager;
+    this.customPinFilePath = customPinFilePath || null;
+  }
+
+  private getPinFilePath(): string {
+    if (this.customPinFilePath) {
+      return this.customPinFilePath;
+    }
+    return path.join(this.configMgr.getSecureDir(), 'parent-pin.json');
+  }
+
+  /**
+   * Returns true if a Parent PIN has been created and persisted.
+   */
+  public async isPinSet(): Promise<boolean> {
+    try {
+      const pinPath = this.getPinFilePath();
+      if (!fs.existsSync(pinPath)) {
+        return false;
+      }
+      const raw = fs.readFileSync(pinPath, 'utf8');
+      const data = JSON.parse(raw);
+      return Boolean(data && data.salt && data.verifier);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Sets or changes the SafeBrowse Parent PIN using a salted KDF verifier.
+   * PIN must be 6 to 8 digits. Never persists plaintext PIN.
+   */
+  public async setPin(pin: string): Promise<void> {
+    const cleanPin = String(pin || '').trim();
+    if (!/^\d{6,8}$/.test(cleanPin)) {
+      throw new Error('SafeBrowse Parent PIN must be between 6 and 8 numeric digits.');
+    }
+
+    const salt = crypto.randomBytes(32).toString('hex');
+    const verifier = crypto
+      .pbkdf2Sync(cleanPin, salt, 100000, 32, 'sha256')
+      .toString('hex');
+
+    const record: PinVerifierRecord = {
+      salt,
+      verifier,
+      kdf: 'pbkdf2-sha256-100k',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const pinPath = this.getPinFilePath();
+    const dir = path.dirname(pinPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    const tempPath = `${pinPath}.tmp.${Date.now()}`;
+    fs.writeFileSync(tempPath, JSON.stringify(record, null, 2), 'utf8');
+    fs.renameSync(tempPath, pinPath);
+
+    // Apply strict ACLs on Windows: SYSTEM & Administrators only
+    if (process.platform === 'win32' || this.configMgr.getPlatform() === 'win32') {
+      try {
+        this.configMgr.applyWindowsAcls(pinPath, 'secure');
+      } catch (aclErr: any) {
+        logServiceMessage('WARN', `[ParentPinManager] ACL warning: ${aclErr.message}`);
+      }
+    }
+
+    // Invalidate existing sessions on PIN change
+    this.invalidateSession();
+    logServiceMessage('INFO', '[ParentPinManager] SafeBrowse Parent PIN verifier securely stored.');
+  }
+
+  /**
+   * Verifies the entered PIN against the salted KDF verifier.
+   * On success, generates a short-lived in-memory management session token.
+   */
+  public async verifyPin(
+    pin: string
+  ): Promise<{ success: boolean; sessionToken?: string; error?: string }> {
+    const cleanPin = String(pin || '').trim();
+    if (!/^\d{6,8}$/.test(cleanPin)) {
+      return { success: false, error: 'Invalid PIN format. PIN must be 6-8 digits.' };
+    }
+
+    const pinPath = this.getPinFilePath();
+    if (!fs.existsSync(pinPath)) {
+      return { success: false, error: 'NO_PIN_CONFIGURED' };
+    }
+
+    let record: PinVerifierRecord;
+    try {
+      const raw = fs.readFileSync(pinPath, 'utf8');
+      record = JSON.parse(raw);
+      if (!record || !record.salt || !record.verifier) {
+        return { success: false, error: 'Corrupted PIN verifier record.' };
+      }
+    } catch {
+      return { success: false, error: 'Failed to read PIN verifier.' };
+    }
+
+    const candidateHash = crypto
+      .pbkdf2Sync(cleanPin, record.salt, 100000, 32, 'sha256')
+      .toString('hex');
+
+    const expectedBuf = Buffer.from(record.verifier, 'utf8');
+    const candidateBuf = Buffer.from(candidateHash, 'utf8');
+
+    if (
+      expectedBuf.length !== candidateBuf.length ||
+      !crypto.timingSafeEqual(expectedBuf, candidateBuf)
+    ) {
+      logServiceMessage('WARN', '[ParentPinManager] Parent PIN verification failed (incorrect PIN entered).');
+      return { success: false, error: 'Incorrect SafeBrowse Parent PIN.' };
+    }
+
+    // Generate short-lived management session
+    const token = `mgmt_${crypto.randomBytes(24).toString('hex')}`;
+    const now = Date.now();
+    this.activeSession = {
+      token,
+      createdAt: now,
+      expiresAt: now + ParentPinManager.SESSION_TTL_MS,
+    };
+
+    logServiceMessage('INFO', '[ParentPinManager] Parent PIN verified. Temporary management session unlocked.');
+    return { success: true, sessionToken: token };
+  }
+
+  /**
+   * Validates an active in-memory management session token.
+   * Returns false if token is expired, invalid, or absent.
+   */
+  public validateSession(sessionToken?: string): boolean {
+    if (!sessionToken || !this.activeSession) {
+      return false;
+    }
+    if (this.activeSession.token !== sessionToken) {
+      return false;
+    }
+    if (Date.now() > this.activeSession.expiresAt) {
+      this.invalidateSession();
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Invalidates the active management session (e.g. on timeout, lock, switch user, or logout).
+   */
+  public invalidateSession(sessionToken?: string): void {
+    if (!sessionToken || (this.activeSession && this.activeSession.token === sessionToken)) {
+      this.activeSession = null;
+    }
+  }
+
+  /**
+   * Resets PIN using cloud-authorized reset or disconnect workflow.
+   */
+  public async clearPin(): Promise<void> {
+    this.invalidateSession();
+    try {
+      const pinPath = this.getPinFilePath();
+      if (fs.existsSync(pinPath)) {
+        fs.unlinkSync(pinPath);
+      }
+    } catch {}
+  }
+}
+
+export const parentPinManager = new ParentPinManager();

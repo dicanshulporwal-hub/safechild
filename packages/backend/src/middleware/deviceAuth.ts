@@ -87,9 +87,31 @@ export async function deviceAuthMiddleware(
       }
     }
 
+    let activeChildId = (targetChildId as string) || (device.childId ?? undefined);
+    if (!activeChildId) {
+      activeChildId = device.activeChildId ?? undefined;
+    }
+    if (!activeChildId) {
+      const mapping = await prisma.deviceAccountMapping.findFirst({
+        where: { deviceId: device.id, enabled: true, childId: { not: null } },
+      });
+      if (mapping?.childId) {
+        activeChildId = mapping.childId;
+      }
+    }
+    if (!activeChildId) {
+      const familyChildren = await prisma.child.findMany({
+        where: { familyId: device.familyId },
+        take: 2,
+      });
+      if (familyChildren.length === 1) {
+        activeChildId = familyChildren[0].id;
+      }
+    }
+
     req.device = device as any;
     req.deviceId = device.id;
-    req.childId = (targetChildId as string) || device.childId;
+    req.childId = activeChildId;
 
     next();
   } catch (err: any) {
