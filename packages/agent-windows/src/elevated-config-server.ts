@@ -73,7 +73,7 @@ export class ElevatedConfigServer {
             const markedAccounts = accounts.map((acc: WindowsAccount) => ({
               ...acc,
               isCurrentConsoleUser:
-                (activeSession.sid && acc.sid === activeSession.sid) ||
+                (activeSession.sid && acc.sid.toUpperCase() === activeSession.sid.toUpperCase()) ||
                 (activeSession.username && acc.name.toLowerCase() === activeSession.username.toLowerCase()),
             }));
 

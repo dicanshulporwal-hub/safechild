@@ -96,6 +96,7 @@ export class WindowsAccountManager {
   private customBaseDir: string | null = null;
   private mockAccounts: WindowsAccount[] | null = null;
   private mockConsoleSid: string | null = null;
+  private mockConsoleUsername: string | null = null;
   private mockInteractiveSessions: string[] | null = null;
 
   constructor(customBaseDir?: string) {
@@ -108,8 +109,16 @@ export class WindowsAccountManager {
     this.mockAccounts = accounts;
   }
 
-  public setMockConsoleSidForTesting(sid: string | null): void {
+  public setMockConsoleSidForTesting(sid: string | null, username?: string | null): void {
     this.mockConsoleSid = sid;
+    if (username !== undefined) {
+      this.mockConsoleUsername = username;
+    }
+  }
+
+  public setMockConsoleSessionForTesting(sid: string | null, username: string | null = null): void {
+    this.mockConsoleSid = sid;
+    this.mockConsoleUsername = username;
   }
 
   private customStagingDir: string | null = null;
@@ -312,10 +321,15 @@ export class WindowsAccountManager {
     }
 
     const upperName = (name || '').toUpperCase().trim();
+    const cleanSid = sid ? sid.trim().toUpperCase() : '';
 
     // Standard Windows Well-Known SIDs for system identities
-    if (sid) {
-      const cleanSid = sid.trim().toUpperCase();
+    if (cleanSid) {
+      // AzureAD / Microsoft Entra SIDs always start with S-1-12-1- -> NEVER filter as service account
+      if (cleanSid.startsWith('S-1-12-1-')) {
+        return false;
+      }
+
       if (
         cleanSid === 'S-1-5-18' || // Local System
         cleanSid === 'S-1-5-19' || // Local Service
@@ -343,6 +357,11 @@ export class WindowsAccountManager {
       }
     }
 
+    // AzureAD / Entra qualified names are human interactive accounts
+    if (upperName.startsWith('AZUREAD\\') || upperName.startsWith('AZURE AD\\')) {
+      return false;
+    }
+
     const filteredNames = [
       'SYSTEM',
       'LOCAL SERVICE',
@@ -359,12 +378,17 @@ export class WindowsAccountManager {
     }
 
     if (
+      upperName.startsWith('NT SERVICE\\') ||
+      upperName.startsWith('NT AUTHORITY\\') ||
       upperName.startsWith('DWM-') ||
+      upperName.startsWith('DWM\\') ||
       upperName.startsWith('UMFD-') ||
+      upperName.startsWith('UMFD\\') ||
       upperName.startsWith('IUSR') ||
       upperName.startsWith('IIS_') ||
       upperName.startsWith('WDAG') ||
-      upperName.includes('SERVICE') ||
+      upperName === 'SERVICE' ||
+      upperName.startsWith('SERVICE_') ||
       upperName.includes('SANDBOX')
     ) {
       return true;
@@ -374,33 +398,180 @@ export class WindowsAccountManager {
   }
 
   /**
-   * Securely discovers interactive local and Microsoft user accounts on Windows.
-   * Strips out service accounts, system accounts, and utility identities.
+   * Securely discovers interactive human Windows user accounts.
+   * Merges:
+   * 1. Local human accounts (Win32_UserAccount)
+   * 2. Active console session identity (Win32_ComputerSystem / NTAccount)
+   * 3. Logged-in interactive users (explorer.exe owners)
+   * 4. AzureAD / Microsoft Entra / Domain accounts with local profiles (ProfileList S-1-12-1-* and S-1-5-21-*)
+   * Deduplicates by authoritative Windows SID and excludes system/service identities.
    */
   public async discoverAccounts(): Promise<WindowsAccount[]> {
-    if (this.mockAccounts) {
-      const filtered = this.mockAccounts.filter(
-        (acc) => !this.isSystemOrServiceAccount(acc.name, acc.sid, acc.disabled)
-      );
-      filtered.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
-      return filtered;
-    }
+    const accountMap = new Map<string, WindowsAccount>(); // Key: uppercase SID
 
-    if (process.platform !== 'win32') {
-      // Non-Windows simulation: return test accounts for development / testing
-      return [
+    // 1. Enumerate base accounts (mock, native Windows PowerShell, or cross-platform simulation)
+    if (this.mockAccounts) {
+      for (const acc of this.mockAccounts) {
+        if (!acc || !acc.sid) continue;
+        const cleanSid = acc.sid.trim().toUpperCase();
+        if (!this.isSystemOrServiceAccount(acc.name, acc.sid, acc.disabled)) {
+          accountMap.set(cleanSid, {
+            name: acc.name,
+            sid: acc.sid,
+            disabled: Boolean(acc.disabled),
+            isCurrentConsoleUser: acc.isCurrentConsoleUser,
+          });
+        }
+      }
+    } else if (process.platform === 'win32') {
+      const psAccounts = await this.queryWindowsAccountsViaPowerShell();
+      for (const acc of psAccounts) {
+        if (!acc || !acc.sid) continue;
+        const cleanSid = acc.sid.trim().toUpperCase();
+        if (!this.isSystemOrServiceAccount(acc.name, acc.sid, acc.disabled)) {
+          accountMap.set(cleanSid, acc);
+        }
+      }
+    } else {
+      // Non-Windows simulation when not explicitly mocked
+      const defaultSimulated: WindowsAccount[] = [
         { name: 'acer', sid: 'S-1-5-21-1000-1000-1000-1000', disabled: false },
         { name: 'Manjari', sid: 'S-1-5-21-1000-1000-1000-1001', disabled: false },
         { name: 'Rahul', sid: 'S-1-5-21-1000-1000-1000-1002', disabled: false },
       ];
+      for (const acc of defaultSimulated) {
+        accountMap.set(acc.sid.toUpperCase(), acc);
+      }
     }
 
+    // 2. Active Console Identity (Mandatory Source B)
+    // Always include the active console session user if valid and not a system/service identity
+    try {
+      const activeSession = await this.getActiveConsoleSession();
+      if (activeSession.sid && activeSession.username) {
+        const cleanSid = activeSession.sid.trim().toUpperCase();
+        if (!this.isSystemOrServiceAccount(activeSession.username, activeSession.sid, false)) {
+          const existing = accountMap.get(cleanSid);
+          if (existing) {
+            existing.isCurrentConsoleUser = true;
+            // Prefer domain-qualified/full name (e.g. AzureAD\AnshulPorwal) if existing is short name
+            if (activeSession.username.includes('\\') && !existing.name.includes('\\')) {
+              existing.name = activeSession.username;
+            }
+          } else {
+            accountMap.set(cleanSid, {
+              name: activeSession.username,
+              sid: activeSession.sid,
+              disabled: false,
+              isCurrentConsoleUser: true,
+            });
+          }
+        }
+      }
+    } catch (e: any) {
+      console.warn(`[AccountManager] Warning fetching active console session during discovery: ${e.message}`);
+    }
+
+    // 3. Mark current console user flag for matching account if not already set
+    try {
+      const activeSession = await this.getActiveConsoleSession();
+      if (activeSession.sid) {
+        const entry = accountMap.get(activeSession.sid.trim().toUpperCase());
+        if (entry) {
+          entry.isCurrentConsoleUser = true;
+        }
+      }
+    } catch {}
+
+    const results = Array.from(accountMap.values());
+    results.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+    return results;
+  }
+
+  /**
+   * Executes merged PowerShell query on Windows for local accounts, active console user,
+   * explorer.exe interactive session owners, and ProfileList accounts (AzureAD/Entra/Domain).
+   */
+  private async queryWindowsAccountsViaPowerShell(): Promise<WindowsAccount[]> {
     const psPath = configManager.getPowerShellPath();
     const psScript = [
       "$ErrorActionPreference = 'SilentlyContinue'",
-      '$users = @(Get-CimInstance Win32_UserAccount -Filter "LocalAccount = True" | Select-Object Name, SID, Disabled)',
-      '$users | ConvertTo-Json -Compress',
-    ].join('; ');
+      '$found = @{}',
+      'function Add-Account($name, $sid, $disabled = $false) {',
+      '  if (-not $name -or -not $sid) { return }',
+      '  $s = $sid.ToString().Trim().ToUpper()',
+      '  if ($s.Length -lt 5) { return }',
+      '  if (-not $found.ContainsKey($s)) {',
+      '    $found[$s] = [PSCustomObject]@{',
+      '      Name = $name.ToString().Trim()',
+      '      SID = $s',
+      '      Disabled = [bool]$disabled',
+      '    }',
+      '  }',
+      '}',
+      '# 1. Local human accounts via CIM',
+      'try {',
+      "  $localUsers = Get-CimInstance Win32_UserAccount -Filter 'LocalAccount = True'",
+      '  foreach ($u in $localUsers) {',
+      '    if ($u -and $u.SID) {',
+      '      $dName = if ($u.Caption) { $u.Caption } else { $u.Name }',
+      '      Add-Account $dName $u.SID $u.Disabled',
+      '    }',
+      '  }',
+      '} catch {}',
+      '# 2. Active console session via Win32_ComputerSystem',
+      'try {',
+      '  $csUser = (Get-CimInstance Win32_ComputerSystem | Select-Object -ExpandProperty UserName)',
+      '  if ($csUser) {',
+      '    try {',
+      '      $nt = New-Object System.Security.Principal.NTAccount($csUser)',
+      '      $sidVal = $nt.Translate([System.Security.Principal.SecurityIdentifier]).Value',
+      '      Add-Account $csUser $sidVal $false',
+      '    } catch {}',
+      '  }',
+      '} catch {}',
+      '# 3. Logged-in interactive users via explorer.exe process owners',
+      'try {',
+      "  $explorers = Get-CimInstance Win32_Process -Filter \"Name = 'explorer.exe'\"",
+      '  foreach ($exp in $explorers) {',
+      '    try {',
+      '      $owner = Invoke-CimMethod -InputObject $exp -MethodName GetOwner',
+      '      if ($owner -and $owner.User) {',
+      '        $fullUser = if ($owner.Domain) { "$($owner.Domain)\\$($owner.User)" } else { $owner.User }',
+      '        $nt = New-Object System.Security.Principal.NTAccount($fullUser)',
+      '        $sidVal = $nt.Translate([System.Security.Principal.SecurityIdentifier]).Value',
+      '        Add-Account $fullUser $sidVal $false',
+      '      } catch {}',
+      '    }',
+      '  }',
+      '} catch {}',
+      '# 4. Human profile SIDs from Registry ProfileList (S-1-5-21-* for Local/Domain, S-1-12-1-* for AzureAD/Entra)',
+      'try {',
+      "  $profKeys = Get-ChildItem 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList'",
+      '  foreach ($k in $profKeys) {',
+      '    $sidStr = $k.PSChildName',
+      "    if ($sidStr -match '^S-1-5-21-' -or $sidStr -match '^S-1-12-1-') {",
+      '      try {',
+      '        $secId = New-Object System.Security.Principal.SecurityIdentifier($sidStr)',
+      '        $resolvedName = $secId.Translate([System.Security.Principal.NTAccount]).Value',
+      '        Add-Account $resolvedName $sidStr $false',
+      '      } catch {',
+      '        try {',
+      '          $prop = Get-ItemProperty $k.PSPath',
+      '          $pPath = $prop.ProfileImagePath',
+      '          if ($pPath) {',
+      '            $leaf = Split-Path $pPath -Leaf',
+      "            if ($leaf -and $leaf -notmatch '^(default|public|all users|systemprofile|localservice|networkservice)$') {",
+      '              Add-Account $leaf $sidStr $false',
+      '            }',
+      '          }',
+      '        } catch {}',
+      '      }',
+      '    }',
+      '  }',
+      '} catch {}',
+      '@($found.Values) | ConvertTo-Json -Compress',
+    ].join('\n');
 
     try {
       const { stdout } = await execFileAsync(psPath, [
@@ -414,9 +585,7 @@ export class WindowsAccountManager {
       ]);
 
       const trimmed = (stdout || '').trim();
-      if (!trimmed) {
-        return [];
-      }
+      if (!trimmed) return [];
 
       let parsed: any;
       try {
@@ -430,13 +599,9 @@ export class WindowsAccountManager {
 
       for (const item of list) {
         if (!item || !item.Name || !item.SID) continue;
-        const name = String(item.Name);
-        const sid = String(item.SID);
+        const name = String(item.Name).trim();
+        const sid = String(item.SID).trim();
         const disabled = Boolean(item.Disabled);
-
-        if (this.isSystemOrServiceAccount(name, sid, disabled)) {
-          continue;
-        }
 
         accounts.push({
           name,
@@ -445,10 +610,9 @@ export class WindowsAccountManager {
         });
       }
 
-      accounts.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
       return accounts;
     } catch (err: any) {
-      console.warn(`[AccountManager] Failed to discover Windows accounts via WMI: ${err.message}`);
+      console.warn(`[AccountManager] Failed to discover Windows accounts via PowerShell: ${err.message}`);
       return [];
     }
   }
@@ -885,11 +1049,14 @@ export class WindowsAccountManager {
     const mappings = await this.loadProfileMappings();
     const cleanName = username.trim().toLowerCase();
     return (
-      mappings.find(
-        (m) =>
-          (m.windowsUsername || '').trim().toLowerCase() === cleanName ||
-          (m.windowsUsername || '').trim().toLowerCase().endsWith(`\\${cleanName}`)
-      ) || null
+      mappings.find((m) => {
+        const mappingName = (m.windowsUsername || '').trim().toLowerCase();
+        return (
+          mappingName === cleanName ||
+          mappingName.endsWith(`\\${cleanName}`) ||
+          cleanName.endsWith(`\\${mappingName}`)
+        );
+      }) || null
     );
   }
 
@@ -903,7 +1070,7 @@ export class WindowsAccountManager {
       const mapping = await this.getMappingForSid(this.mockConsoleSid);
       return {
         sid: this.mockConsoleSid,
-        username: mapping?.windowsUsername || 'ConsoleUser',
+        username: this.mockConsoleUsername || mapping?.windowsUsername || 'ConsoleUser',
       };
     }
 

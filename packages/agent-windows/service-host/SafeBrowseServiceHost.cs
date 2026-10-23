@@ -555,10 +555,6 @@ namespace SafeBrowse
                                         {
                                             System.Security.Principal.NTAccount account = (System.Security.Principal.NTAccount)sidObj.Translate(typeof(System.Security.Principal.NTAccount));
                                             username = account.Value;
-                                            if (username.Contains("\\"))
-                                            {
-                                                username = username.Substring(username.LastIndexOf('\\') + 1);
-                                            }
                                         }
                                         catch { }
                                     }
