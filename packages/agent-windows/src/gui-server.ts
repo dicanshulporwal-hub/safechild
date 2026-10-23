@@ -16,6 +16,7 @@ import { sessionMonitor } from './session-monitor';
 import { WINDOWS_AGENT_VERSION, BUILD_COMMIT } from './sync-client';
 import { evaluateSystemStatus } from './agent-cli';
 import { logServiceMessage } from './network-manager';
+import { normalizePairingCode } from '@safebrowse/shared';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);

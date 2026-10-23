@@ -57,7 +57,7 @@ class PairingActivity : AppCompatActivity() {
         layout.addView(title)
 
         val desc = TextView(this).apply {
-            text = "Enter the 6-digit pairing code shown on your parent's dashboard."
+            text = "Enter the 8-character pairing code shown on your parent's dashboard."
             textSize = 14f
             setTextColor(0xFF94A3B8.toInt())
             setPadding(0, 0, 0, 48)
@@ -65,7 +65,7 @@ class PairingActivity : AppCompatActivity() {
         layout.addView(desc)
 
         val codeInput = EditText(this).apply {
-            hint = "e.g. SB-8921"
+            hint = "e.g. K8X9-M2W7"
             setHintTextColor(0xFF64748B.toInt())
             setTextColor(0xFFFFFFFF.toInt())
             setBackgroundColor(0xFF1E293B.toInt())

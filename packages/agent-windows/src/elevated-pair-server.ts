@@ -8,6 +8,7 @@ import { configManager, ConfigManager, DeviceConfig } from './config-manager';
 import { accountManager, WindowsAccountManager } from './account-manager';
 import { logServiceMessage } from './network-manager';
 import { WINDOWS_AGENT_VERSION } from './sync-client';
+import { normalizePairingCode } from '@safebrowse/shared';
 
 const execAsync = promisify(exec);
 
@@ -888,12 +889,12 @@ export class ElevatedPairServer {
     <div id="screenPair" class="screen">
       <h2 style="font-size: 22px; font-weight: 800; margin: 0 0 8px 0;">Connect to your family</h2>
       <p style="color: var(--text-muted); font-size: 14px; line-height: 1.6; margin-bottom: 24px;">
-        Enter the 6-digit pairing code from your <strong>Parent Dashboard</strong> (<a href="https://safebrowse.porwal.online" target="_blank" style="color: #60a5fa; text-decoration: underline;">safebrowse.porwal.online</a>) under <strong>Add Device</strong>.
+        Enter the 8-character code shown in your <strong>Parent Dashboard</strong> (<a href="https://safebrowse.porwal.online" target="_blank" style="color: #60a5fa; text-decoration: underline;">safebrowse.porwal.online</a>) under <strong>Add Device</strong>.
       </p>
 
       <div class="input-group">
         <label for="pairingCode">Pairing Code</label>
-        <input type="text" id="pairingCode" class="input-code" placeholder="123456" maxlength="8" value="${prefillCode}" autofocus>
+        <input type="text" id="pairingCode" class="input-code" placeholder="K8X9-M2W7" maxlength="16" value="${prefillCode}" autofocus oninput="this.value = this.value.toUpperCase()">
       </div>
 
       <div class="input-group">
@@ -1001,12 +1002,22 @@ export class ElevatedPairServer {
 
     async function submitPairing() {
       const codeInput = document.getElementById('pairingCode');
-      const code = (codeInput?.value || '').trim();
+      const rawCode = (codeInput?.value || '').trim();
       const name = (document.getElementById('deviceName')?.value || '').trim() || 'Family Laptop';
       const btn = document.getElementById('btnPair');
 
-      if (!code) {
-        showAlert('Please enter the 6-digit pairing code from your Parent Dashboard.', true);
+      let clean = rawCode.toUpperCase().replace(/[\s-]+/g, '');
+      if (clean.startsWith('SB')) {
+        clean = clean.slice(2);
+      }
+
+      if (!rawCode) {
+        showAlert('Please enter the 8-character code shown in your Parent Dashboard.', true);
+        return;
+      }
+
+      if (clean.length !== 8) {
+        showAlert('Please enter a valid 8-character pairing code (e.g. K8X9-M2W7).', true);
         return;
       }
 
@@ -1018,7 +1029,7 @@ export class ElevatedPairServer {
         const res = await fetch('/api/claim-and-pair', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code, deviceName: name })
+          body: JSON.stringify({ code: clean, deviceName: name })
         });
 
         const data = await res.json().catch(() => ({}));

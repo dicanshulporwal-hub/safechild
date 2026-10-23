@@ -57,8 +57,13 @@ export const PairDeviceModal: React.FC<PairDeviceModalProps> = ({
     fetchCode();
   }, [childId]);
 
+  const formattedCode =
+    pairingCode.length === 8 && !pairingCode.includes('-')
+      ? `${pairingCode.slice(0, 4)}-${pairingCode.slice(4)}`
+      : pairingCode;
+
   const copyToClipboard = () => {
-    navigator.clipboard.writeText(pairingCode);
+    navigator.clipboard.writeText(formattedCode);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -154,7 +159,7 @@ export const PairDeviceModal: React.FC<PairDeviceModalProps> = ({
                   <ol className="text-[12px] text-slate-300 space-y-1.5 pl-4 list-decimal leading-relaxed">
                     <li>Download and run the installer on the computer</li>
                     <li>Click <strong>Yes</strong> when Windows asks for permission (UAC)</li>
-                    <li>Enter the 6-digit code below when prompted</li>
+                    <li>Enter the 8-character code below when prompted</li>
                   </ol>
                 </>
               ) : (
@@ -173,7 +178,7 @@ export const PairDeviceModal: React.FC<PairDeviceModalProps> = ({
 
                   <ol className="text-[12px] text-slate-300 space-y-1.5 pl-4 list-decimal leading-relaxed">
                     <li>Install and open SafeBrowse on the Android device</li>
-                    <li>Scan the QR code or enter the 6-digit code below</li>
+                    <li>Scan the QR code or enter the 8-character code below</li>
                     <li>Follow the on-screen steps to enable VPN protection</li>
                   </ol>
                 </>
@@ -186,7 +191,7 @@ export const PairDeviceModal: React.FC<PairDeviceModalProps> = ({
                 <span className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center text-[11px] font-black">
                   2
                 </span>
-                <span>Enter This 6-Digit Code</span>
+                <span>Enter This 8-Character Code</span>
               </div>
 
               <div className="flex flex-col sm:flex-row items-center gap-4">
@@ -198,7 +203,7 @@ export const PairDeviceModal: React.FC<PairDeviceModalProps> = ({
 
                 <div className="flex-1 text-center sm:text-left">
                   <div className="text-3xl font-black text-emerald-400 tracking-wider font-mono my-0.5">
-                    {pairingCode}
+                    {formattedCode}
                   </div>
                   <p className="text-[11px] text-slate-400 mb-2">Code expires in 10 minutes</p>
 
@@ -225,7 +230,7 @@ export const PairDeviceModal: React.FC<PairDeviceModalProps> = ({
                 <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-[11px] text-slate-400 flex items-start gap-2">
                   <ShieldCheck className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
                   <span>
-                    Enter this code when SafeBrowse asks for it on the computer. SafeBrowse will ask who uses each Windows account. That's all!
+                    Enter this code on the child's computer. SafeBrowse will ask who uses each Windows account. That's all!
                   </span>
                 </div>
               )}

@@ -5,7 +5,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "test": "tsc -p tsconfig.json && ts-node tests/policy.test.ts"
+    "test": "tsc -p tsconfig.json && ts-node tests/policy.test.ts && ts-node tests/pairing.test.ts"
   },
   "dependencies": {},
   "devDependencies": {

@@ -14,7 +14,7 @@ if "%~1"=="" (
     echo.
     echo Please provide the pairing code displayed in the SafeBrowse Parent Portal.
     echo.
-    set /p PAIR_CODE="Enter Pairing Code (e.g. SB-123456): "
+    set /p PAIR_CODE="Enter Pairing Code (e.g. K8X9-M2W7): "
 ) else (
     set PAIR_CODE=%~1
 )

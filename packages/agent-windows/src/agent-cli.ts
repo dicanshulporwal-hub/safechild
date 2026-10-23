@@ -9,6 +9,7 @@ import { accountManager } from './account-manager';
 import { sessionMonitor } from './session-monitor';
 import { activityReporter } from './activity-reporter';
 import { guiServer } from './gui-server';
+import { normalizePairingCode } from '@safebrowse/shared';
 import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
@@ -26,7 +27,7 @@ async function pairDevice(args: string[]): Promise<void> {
   const pairIdx = args.indexOf('--pair') !== -1 ? args.indexOf('--pair') : args.indexOf('--pairing-code');
   const code = args[pairIdx + 1];
   if (!code || code.startsWith('-')) {
-    console.error('[SafeBrowse] FAILURE: Pairing code must be provided. E.g.: --pair SB-123456');
+    console.error('[SafeBrowse] FAILURE: Pairing code must be provided. E.g.: --pair K8X9-M2W7');
     process.exit(1);
   }
 
@@ -58,7 +59,7 @@ async function pairDevice(args: string[]): Promise<void> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        code,
+        code: normalizePairingCode(code),
         deviceName: name,
         platform: 'windows',
         agentVersion: WINDOWS_AGENT_VERSION,

@@ -163,6 +163,43 @@ export interface PairingCode {
   expiresAt: string;
 }
 
+/**
+ * Ambiguity-safe uppercase alphabet for SafeBrowse pairing codes.
+ * Excludes visually ambiguous characters: 0, O, 1, I.
+ */
+export const PAIRING_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+
+/**
+ * Normalizes user-entered or legacy pairing codes into canonical 8-character format:
+ * - trim whitespace
+ * - convert to uppercase
+ * - remove spaces and hyphens
+ * - strip optional legacy 'SB' or 'SB-' prefix
+ * Examples:
+ *   "SB-K8X9-M2W7" -> "K8X9M2W7"
+ *   "k8x9 - m2w7"  -> "K8X9M2W7"
+ *   "K8X9M2W7"     -> "K8X9M2W7"
+ */
+export function normalizePairingCode(rawCode: string): string {
+  if (!rawCode || typeof rawCode !== 'string') return '';
+  let clean = rawCode.trim().toUpperCase().replace(/[\s-]+/g, '');
+  if (clean.startsWith('SB')) {
+    clean = clean.slice(2);
+  }
+  return clean;
+}
+
+/**
+ * Formats a canonical 8-character pairing code for user-friendly display (e.g. "K8X9-M2W7").
+ */
+export function formatPairingCode(code: string): string {
+  const norm = normalizePairingCode(code);
+  if (norm.length === 8) {
+    return `${norm.slice(0, 4)}-${norm.slice(4)}`;
+  }
+  return (code || '').trim().toUpperCase();
+}
+
 export type AccessRequestStatus = 'PENDING' | 'APPROVED' | 'DENIED' | 'EXPIRED';
 
 export type TemporaryApprovalDuration = '15m' | '30m' | '1h' | 'today' | 'always';

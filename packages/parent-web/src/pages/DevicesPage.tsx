@@ -96,7 +96,7 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
       const res = await api.createPairingCode(selectedChildForPair);
       setPairingCode(res.code);
       setPairingExpiry(res.expiresAt);
-      showToast('6-digit pairing code generated!', 'success');
+      showToast('8-character pairing code generated!', 'success');
     } catch (e: any) {
       showToast(e.message || 'Failed to generate pairing code', 'error');
     } finally {

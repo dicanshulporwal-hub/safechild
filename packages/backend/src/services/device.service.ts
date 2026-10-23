@@ -6,6 +6,8 @@ import {
   HeartbeatPayload,
   HeartbeatResponse,
   DeviceAccountMappingDto,
+  PAIRING_CODE_ALPHABET,
+  normalizePairingCode,
 } from '@safebrowse/shared';
 import { HealthState } from '@safebrowse/protocol';
 import crypto from 'crypto';
@@ -39,16 +41,16 @@ export class DeviceService {
   private revokedTokenBlacklist: Set<string> = new Set();
 
   /**
-   * Generate cryptographically secure, high-entropy pairing code (e.g. "SB-K8X9-M2W7")
+   * Generate cryptographically secure, high-entropy pairing code (canonical 8-character format, e.g. "K8X9M2W7")
    */
   public async generatePairingCode(parentId: string, childId: string): Promise<PairingCode> {
-    const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+    const chars = PAIRING_CODE_ALPHABET;
     let token = '';
     const bytes = crypto.randomBytes(8);
     for (let i = 0; i < 8; i++) {
       token += chars[bytes[i] % chars.length];
     }
-    const code = `SB-${token.slice(0, 4)}-${token.slice(4, 8)}`;
+    const code = token;
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     const child = await prisma.child.findUnique({
@@ -87,20 +89,41 @@ export class DeviceService {
     platform: DevicePlatform,
     agentVersion: string = '1.0.0'
   ): Promise<{ device: ExtendedDevice; policy: any }> {
-    const cleanCode = code.trim().toUpperCase();
+    const rawClean = (code || '').trim().toUpperCase();
+    const normalized = normalizePairingCode(code);
+
+    const candidates = Array.from(
+      new Set(
+        [
+          normalized,
+          rawClean,
+          normalized.length === 8 ? `${normalized.slice(0, 4)}-${normalized.slice(4)}` : null,
+          normalized.length === 8 ? `SB-${normalized.slice(0, 4)}-${normalized.slice(4)}` : null,
+          normalized.length === 8 ? `SB${normalized}` : null,
+        ].filter((c): c is string => typeof c === 'string' && c.length > 0)
+      )
+    );
+
+    const pairing = await prisma.pairingCode.findFirst({
+      where: { code: { in: candidates } },
+    });
+
+    if (!pairing) {
+      throw new Error('Invalid or expired pairing code.');
+    }
+
+    if (pairing.expiresAt.getTime() <= Date.now()) {
+      await prisma.pairingCode.delete({ where: { id: pairing.id } }).catch(() => {});
+      throw new Error('Pairing code has expired. Please generate a new one.');
+    }
 
     return prisma.$transaction(async (tx) => {
-      const pairing = await tx.pairingCode.findUnique({
-        where: { code: cleanCode },
+      // Re-verify and atomically consume pairing code inside transaction
+      const active = await tx.pairingCode.findUnique({
+        where: { id: pairing.id },
       });
-
-      if (!pairing) {
+      if (!active) {
         throw new Error('Invalid or expired pairing code.');
-      }
-
-      if (pairing.expiresAt.getTime() <= Date.now()) {
-        await tx.pairingCode.delete({ where: { id: pairing.id } });
-        throw new Error('Pairing code has expired. Please generate a new one.');
       }
 
       const deviceId = `dev-${nanoid(10)}`;

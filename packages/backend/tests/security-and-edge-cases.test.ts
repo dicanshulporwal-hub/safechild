@@ -153,7 +153,7 @@ describe('SafeBrowse Security, Edge Cases & Threat Model Test Suite', () => {
       const { child } = await childService.createChild(reg.user.id, 'Pair Child', 10, undefined, familyReg.id);
       const pairing = await deviceService.generatePairingCode(reg.user.id, child.id);
 
-      assert.match(pairing.code, /^SB-[2-9A-Z]{4}-[2-9A-Z]{4}$/);
+      assert.match(pairing.code, /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}$/);
 
       const { device } = await deviceService.pairDevice(pairing.code, 'New Phone', 'android');
       assert.ok(device.deviceToken.startsWith('dtk_'));

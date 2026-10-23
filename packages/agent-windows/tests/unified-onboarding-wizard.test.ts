@@ -20,6 +20,7 @@ describe('SafeBrowse Windows Stage C.4 — Unified Onboarding Wizard & Cloud Syn
   let mockBackendUrl: string = '';
   let syncedCloudMappings: any = null;
   let receivedHeartbeat: any = null;
+  let receivedClaimBody: any = null;
 
   beforeEach(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-wizard-test-'));
@@ -36,6 +37,7 @@ describe('SafeBrowse Windows Stage C.4 — Unified Onboarding Wizard & Cloud Syn
 
     syncedCloudMappings = null;
     receivedHeartbeat = null;
+    receivedClaimBody = null;
 
     // Start mock backend cloud server
     await new Promise<void>((resolve) => {
@@ -43,19 +45,24 @@ describe('SafeBrowse Windows Stage C.4 — Unified Onboarding Wizard & Cloud Syn
         const parsed = new URL(req.url || '', `http://127.0.0.1:${mockCloudPort}`);
 
         if (parsed.pathname === '/api/devices/claim' && req.method === 'POST') {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(
-            JSON.stringify({
-              device: {
-                id: 'dev-laptop-123',
-                deviceToken: 'dtk_mock_token_777',
-                childId: 'child-manjari',
-                parentId: 'parent-anshul',
-                name: 'Anshul Laptop',
-              },
-              policy: { version: 1, rules: [] },
-            })
-          );
+          let body = '';
+          req.on('data', (c) => (body += c));
+          req.on('end', () => {
+            receivedClaimBody = JSON.parse(body || '{}');
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(
+              JSON.stringify({
+                device: {
+                  id: 'dev-laptop-123',
+                  deviceToken: 'dtk_mock_token_777',
+                  childId: 'child-manjari',
+                  parentId: 'parent-anshul',
+                  name: 'Anshul Laptop',
+                },
+                policy: { version: 1, rules: [] },
+              })
+            );
+          });
           return;
         }
 
@@ -158,12 +165,12 @@ describe('SafeBrowse Windows Stage C.4 — Unified Onboarding Wizard & Cloud Syn
     const pairServer = new ElevatedPairServer(testConfigMgr, accountMgr);
     const pairPort = await pairServer.start(0);
 
-    // Screen 2: Submit pairing code
+    // Screen 2: Submit pairing code (testing canonical 8-character format K8X9M2W7)
     const claimRes = await fetch(`http://127.0.0.1:${pairPort}/api/claim-and-pair`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        code: '123456',
+        code: 'K8X9M2W7',
         deviceName: 'Living Room PC',
         backendUrl: mockBackendUrl,
       }),
@@ -172,6 +179,7 @@ describe('SafeBrowse Windows Stage C.4 — Unified Onboarding Wizard & Cloud Syn
     const claimData: any = await claimRes.json();
     assert.strictEqual(claimData.success, true);
     assert.strictEqual(claimData.device.deviceId, 'dev-laptop-123');
+    assert.strictEqual(receivedClaimBody.code, 'K8X9M2W7');
 
     // Screen 3: Fetch discovered accounts & family profiles
     const accountsRes = await fetch(`http://127.0.0.1:${pairPort}/api/accounts`);

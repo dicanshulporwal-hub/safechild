@@ -46,7 +46,7 @@ const FAQ_KNOWLEDGE_BASE = [
   {
     keywords: ['pair', 'device', 'laptop', 'phone', 'install', 'setup', 'code', 'connect'],
     answer:
-      'To pair a child device:\n1. Click **"Pair New Device"** in the child workspace to generate a 6-digit code (e.g. `SB-K8X9-M2W7`).\n2. **Windows**: Run `SafeBrowseChild.exe --pair SB-XXXXXX` on the child\'s PC.\n3. **Android**: Enter the code in the SafeBrowse Android App and allow VPN permissions.\n4. The device links in seconds with offline policy caching.',
+      'To pair a child device:\n1. Click **"Pair New Device"** in the child workspace to generate an 8-character code (e.g. `K8X9-M2W7`).\n2. **Windows**: Enter the code in the SafeBrowse setup wizard on the child\'s PC.\n3. **Android**: Enter the code in the SafeBrowse Android App and allow VPN permissions.\n4. The device links in seconds with offline policy caching.',
     action: { label: 'Pair New Device', path: '/dashboard' },
   },
   {
