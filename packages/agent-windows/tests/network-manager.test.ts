@@ -1,10 +1,11 @@
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as dgram from 'dgram';
 import { WindowsNetworkManager, TargetAdapterInfo, AdapterDnsQueryResult } from '../src/network-manager';
+import { configManager } from '../src/config-manager';
 import { computeEngineStatus } from '../src/agent-cli';
 
 /**
@@ -48,6 +49,13 @@ function createMockDnsServer(): Promise<{ port: number; close: () => Promise<voi
 }
 
 describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () => {
+  before(() => {
+    configManager.setOnboardingState('PROTECTED');
+  });
+
+  after(() => {
+    configManager.clearDeviceConfig();
+  });
   it('1. should create DNS backup on call', async () => {
     const backupPath = path.join(os.tmpdir(), 'sb-test-backup-isolated-' + Date.now() + '.json');
     const net = new WindowsNetworkManager(backupPath);

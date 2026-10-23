@@ -17,6 +17,35 @@ import { promisify } from 'util';
 
 const execAsync = promisify(exec);
 
+async function verifyDeviceWithBackend(
+  cfg: DeviceConfig
+): Promise<'VALID' | 'REVOKED' | 'NOT_FOUND' | 'FAMILY_MISMATCH' | 'AUTH_FAILED' | 'ACCOUNT_SETUP_REQUIRED' | 'OFFLINE'> {
+  try {
+    const res = await fetch(`${cfg.backendUrl}/api/devices/verify`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-device-id': cfg.deviceId,
+        'x-device-token': cfg.deviceToken,
+      },
+      body: JSON.stringify({
+        deviceId: cfg.deviceId,
+        deviceToken: cfg.deviceToken,
+        familyId: cfg.familyId,
+      }),
+    });
+    if (!res.ok) {
+      if (res.status === 404) return 'NOT_FOUND';
+      if (res.status === 401 || res.status === 403) return 'AUTH_FAILED';
+      return 'OFFLINE';
+    }
+    const data: any = await res.json().catch(() => ({}));
+    return (data.status as any) || 'AUTH_FAILED';
+  } catch {
+    return 'OFFLINE';
+  }
+}
+
 async function pairDevice(args: string[]): Promise<void> {
   const isAdmin = await configManager.isAdministrator();
   if (!isAdmin && process.platform === 'win32') {
@@ -344,14 +373,20 @@ async function runServiceMode(): Promise<void> {
 
   // Await valid pairing credentials if not yet paired
   let config = await configManager.loadDeviceConfig();
-  while (!config) {
-    if (isShuttingDown) return;
+  if (!config) {
+    configManager.setOnboardingState('NOT_CONNECTED');
+    try {
+      await networkManager.restoreOriginalDns();
+    } catch {}
     logServiceMessage(
       'INFO',
-      '[SafeBrowse Service] Awaiting device pairing. Please run: SafeBrowseChild-Pilot.exe --pair <CODE>'
+      '[SafeBrowse Service] Device is not paired (NOT_CONNECTED). SafeBrowse service standing by in fail-safe bypass mode.'
     );
-    await new Promise((r) => setTimeout(r, 5000));
-    config = await configManager.loadDeviceConfig();
+    while (!config) {
+      if (isShuttingDown) return;
+      await new Promise((r) => setTimeout(r, 5000));
+      config = await configManager.loadDeviceConfig();
+    }
   }
 
   logServiceMessage(
@@ -359,6 +394,74 @@ async function runServiceMode(): Promise<void> {
     `[SafeBrowse Service] Active configuration loaded for device: ${config.deviceName} (${config.deviceId})`
   );
   logServiceMessage('INFO', `[SafeBrowse Service] Backend: ${config.backendUrl}`);
+
+  // Boot & Upgrade Device Verification Gate
+  const vStatus = await verifyDeviceWithBackend(config);
+  if (vStatus === 'VALID') {
+    const hasMappings = await accountManager.hasProfileMappings();
+    if (!hasMappings) {
+      configManager.setOnboardingState('ACCOUNT_SETUP_REQUIRED');
+      try {
+        await networkManager.restoreOriginalDns();
+      } catch {}
+      logServiceMessage(
+        'WARN',
+        '[SafeBrowse Service] [ACCOUNT_SETUP_REQUIRED] Device association is valid, but account mappings are missing. SafeBrowse will remain non-enforcing until accounts are configured.'
+      );
+    } else {
+      configManager.setOnboardingState('PROTECTED');
+      logServiceMessage(
+        'INFO',
+        `[SafeBrowse Service] [OK] Device identity verified: ${config.deviceName} (${config.deviceId}). Protection active.`
+      );
+    }
+  } else if (vStatus === 'ACCOUNT_SETUP_REQUIRED') {
+    configManager.setOnboardingState('ACCOUNT_SETUP_REQUIRED');
+    try {
+      await networkManager.restoreOriginalDns();
+    } catch {}
+    logServiceMessage(
+      'WARN',
+      '[SafeBrowse Service] [ACCOUNT_SETUP_REQUIRED] Cloud reports account setup is required. SafeBrowse will remain non-enforcing.'
+    );
+  } else if (vStatus === 'REVOKED') {
+    configManager.setOnboardingState('ATTENTION_REQUIRED', 'DEVICE_REVOKED');
+    try {
+      await networkManager.restoreOriginalDns();
+    } catch {}
+    logServiceMessage(
+      'WARN',
+      '[SafeBrowse Service] [ATTENTION_REQUIRED] Device credentials have been revoked. DNS enforcement disabled. Administrator must reconnect computer.'
+    );
+  } else if (vStatus === 'NOT_FOUND') {
+    configManager.setOnboardingState('ATTENTION_REQUIRED', 'DEVICE_NOT_FOUND');
+    try {
+      await networkManager.restoreOriginalDns();
+    } catch {}
+    logServiceMessage(
+      'WARN',
+      '[SafeBrowse Service] [ATTENTION_REQUIRED] Device was removed from SafeBrowse cloud. DNS enforcement disabled. Administrator must reconnect computer.'
+    );
+  } else if (vStatus === 'FAMILY_MISMATCH' || vStatus === 'AUTH_FAILED') {
+    configManager.setOnboardingState('ATTENTION_REQUIRED', vStatus);
+    try {
+      await networkManager.restoreOriginalDns();
+    } catch {}
+    logServiceMessage(
+      'WARN',
+      `[SafeBrowse Service] [ATTENTION_REQUIRED] Device identity verification failed: ${vStatus}. DNS enforcement disabled.`
+    );
+  } else if (vStatus === 'OFFLINE') {
+    const currentState = configManager.getOnboardingState();
+    if (currentState === 'PROTECTED') {
+      logServiceMessage('INFO', '[SafeBrowse Service] Cloud offline at boot; preserving cached protected enforcement.');
+    } else {
+      try {
+        await networkManager.restoreOriginalDns();
+      } catch {}
+      logServiceMessage('WARN', '[SafeBrowse Service] Cloud offline at boot and onboarding was not previously completed. Remaining fail-safe.');
+    }
+  }
 
   // 1. Initialize Sync Client
   syncClient = new PolicySyncClient(
@@ -490,25 +593,34 @@ async function runServiceMode(): Promise<void> {
   sessionMonitor.start();
 
   // 4. Fail-Safe Network DNS Activation (Initial Attempt)
-  currentEngineStatus = 'ENFORCING';
-  const netActivation = await networkManager.activateFailSafeDns(activeDnsPort, 1);
-  lastNetSuccess = netActivation.success;
-  lastNetReason = netActivation.reason;
-  currentEngineStatus = computeEngineStatus(lastNetSuccess, lastNetReason, syncClient.getPolicyStatus());
+  let netActivation: any = null;
+  if (configManager.getOnboardingState() === 'PROTECTED') {
+    currentEngineStatus = 'ENFORCING';
+    netActivation = await networkManager.activateFailSafeDns(activeDnsPort, 1);
+    lastNetSuccess = netActivation.success;
+    lastNetReason = netActivation.reason;
+    currentEngineStatus = computeEngineStatus(lastNetSuccess, lastNetReason, syncClient.getPolicyStatus());
 
-  if (netActivation.success) {
-    const ifaceStr =
-      netActivation.interfaceIndexes && netActivation.interfaceIndexes.length > 0
-        ? ` (Adapters: ${netActivation.interfaceIndexes.join(', ')})`
-        : '';
+    if (netActivation.success) {
+      const ifaceStr =
+        netActivation.interfaceIndexes && netActivation.interfaceIndexes.length > 0
+          ? ` (Adapters: ${netActivation.interfaceIndexes.join(', ')})`
+          : '';
+      logServiceMessage(
+        'INFO',
+        `[SafeBrowse Service] [OK] Network adapter DNS successfully bound to SafeBrowse local resolver${ifaceStr}.`
+      );
+    } else {
+      logServiceMessage(
+        'WARN',
+        `[SafeBrowse Service] [${currentEngineStatus}] Warning: Fail-safe DNS activation deferred: ${netActivation.message}`
+      );
+    }
+  } else {
+    currentEngineStatus = 'DEGRADED_DNS_NOT_ENFORCED';
     logServiceMessage(
       'INFO',
-      `[SafeBrowse Service] [OK] Network adapter DNS successfully bound to SafeBrowse local resolver${ifaceStr}.`
-    );
-  } else {
-    logServiceMessage(
-      'WARN',
-      `[SafeBrowse Service] [${currentEngineStatus}] Warning: Fail-safe DNS activation deferred: ${netActivation.message}`
+      `[SafeBrowse Service] System DNS enforcement deferred: device onboarding state is '${configManager.getOnboardingState()}'. System DNS remains fail-safe.`
     );
   }
 
@@ -573,7 +685,7 @@ async function runServiceMode(): Promise<void> {
   });
 
   // Network-Arrival Retry Loop (bounded backoff: 5s, 10s, 15s, 30s, 30s for initial route arrival)
-  if (!netActivation.success && netActivation.reason === 'NO_NETWORK_ROUTE') {
+  if (netActivation && !netActivation.success && netActivation.reason === 'NO_NETWORK_ROUTE') {
     const retryDelays = [5000, 10000, 15000, 30000, 30000];
     networkManager
       .activateFailSafeDnsWithRetry({
@@ -775,6 +887,11 @@ async function showStatus(): Promise<void> {
   console.log('==================================================');
   console.log(`Agent Version:   ${WINDOWS_AGENT_VERSION}`);
   console.log(`Build Commit:    ${BUILD_COMMIT}`);
+  console.log(`Onboarding State:${configManager.getOnboardingState()}`);
+  const stateReason = configManager.getOnboardingReason();
+  if (stateReason) {
+    console.log(`State Reason:    ${stateReason}`);
+  }
   console.log(`Data Directory:  ${configManager.getBaseDir()}`);
   console.log(`Config File:     ${configManager.getConfigFilePath()}`);
   console.log(`Logs Directory:  ${configManager.getLogsDir()}`);

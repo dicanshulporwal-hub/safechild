@@ -36,7 +36,7 @@ android {
         applicationId = "com.safebrowse.child"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
+        versionCode = 5
         versionName = "1.0.4-validation"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

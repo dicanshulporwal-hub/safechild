@@ -76,6 +76,20 @@ deviceRouter.post('/pair', pairingRateLimiter, async (req, res) => {
   }
 });
 
+// Device Identity Verification Gate (Public/Authenticated verification for client boot & upgrade safety)
+deviceRouter.post('/verify', async (req: any, res: Response) => {
+  try {
+    const deviceId = (req.body?.deviceId || req.headers['x-device-id']) as string;
+    const deviceToken = (req.body?.deviceToken || req.headers['x-device-token']) as string;
+    const familyId = req.body?.familyId as string | undefined;
+
+    const result = await deviceService.verifyDevice({ deviceId, deviceToken, familyId });
+    res.json(result);
+  } catch (e: any) {
+    res.status(500).json({ status: 'AUTH_FAILED', error: e.message });
+  }
+});
+
 // Periodic heartbeat from child agent (Device authentication required)
 deviceRouter.post('/heartbeat', deviceAuthMiddleware, async (req: AuthenticatedDeviceRequest, res) => {
   try {
@@ -381,6 +395,28 @@ deviceRouter.get('/:id/account-mappings', deviceOrParentAuth, async (req: any, r
   try {
     const mappings = await deviceService.getDeviceAccountMappings(req.params.id);
     res.json({ mappings });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Unpair device atomically (Device token or Parent JWT)
+deviceRouter.post('/:id/unpair', deviceOrParentAuth, async (req: any, res: Response) => {
+  try {
+    const deviceId = req.params.id;
+    const deviceToken = (req.headers['x-device-token'] || req.body?.deviceToken) as string;
+
+    if (req.device) {
+      await deviceService.unpairDeviceByToken(deviceId, req.device.deviceToken);
+    } else if (req.userId) {
+      await deviceService.removeDevice(deviceId, req.userId);
+    } else if (deviceToken) {
+      await deviceService.unpairDeviceByToken(deviceId, deviceToken);
+    } else {
+      return res.status(401).json({ error: 'Authentication required to unpair device.' });
+    }
+
+    res.json({ success: true, message: 'Device disconnected and credentials revoked.' });
   } catch (e: any) {
     res.status(400).json({ error: e.message });
   }

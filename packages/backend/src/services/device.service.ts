@@ -134,6 +134,7 @@ export class DeviceService {
       });
       const policyVersion = policy ? policy.version : 1;
 
+      const isWindows = platform.toLowerCase() === 'windows';
       const deviceRecord = await tx.device.create({
         data: {
           id: deviceId,
@@ -145,10 +146,10 @@ export class DeviceService {
           deviceToken,
           agentVersion,
           activePolicyVersion: policyVersion,
-          enforcementActive: true,
-          protectionStatus: 'ACTIVE',
-          healthStatus: 'protected',
-          healthState: 'PROTECTED',
+          enforcementActive: !isWindows,
+          protectionStatus: isWindows ? 'ACCOUNT_SETUP_REQUIRED' : 'ACTIVE',
+          healthStatus: isWindows ? 'account_setup_required' : 'protected',
+          healthState: isWindows ? 'DEGRADED' : 'PROTECTED',
           isRevoked: false,
         },
       });
@@ -174,12 +175,12 @@ export class DeviceService {
         agentActivePolicyVersion: policyVersion,
         policySyncStatus: 'SYNCED',
         healthStatus: deviceRecord.healthStatus as any,
-        healthState: 'PROTECTED',
+        healthState: (isWindows ? 'ACCOUNT_SETUP_REQUIRED' : 'PROTECTED') as any,
         isRevoked: false,
         agentVersion: deviceRecord.agentVersion,
         windowsAccountName: '',
         hasMultipleSessions: false,
-        protectionStatus: 'ACTIVE',
+        protectionStatus: isWindows ? 'ACCOUNT_SETUP_REQUIRED' : 'ACTIVE',
       };
 
       wsManager.broadcast({
@@ -261,7 +262,14 @@ export class DeviceService {
     const caps = (payload as any).capabilities;
     const mappedAccount = payload.mappedAccountName !== undefined ? payload.mappedAccountName : device.mappedAccountName;
     const multiSessions = payload.hasMultipleSessions !== undefined ? Boolean(payload.hasMultipleSessions) : device.hasMultipleSessions;
-    const protStatus = payload.protectionStatus || device.protectionStatus || (computedHealthState === 'PROTECTED' ? 'MANAGED_CHILD' : 'UNKNOWN');
+    let protStatus = payload.protectionStatus;
+    if (!protStatus) {
+      if (computedHealthState === 'PROTECTED') {
+        protStatus = 'PROTECTED';
+      } else {
+        protStatus = device.protectionStatus || 'UNKNOWN';
+      }
+    }
 
     // Section 12: Validate activeChildId belongs to a stored mapping for this device
     let activeChildIdToPersist: string | null = null;
@@ -374,6 +382,121 @@ export class DeviceService {
       parentId: device.parentId,
       childId: device.childId,
     });
+  }
+
+  public isDeviceTokenRevoked(token: string): boolean {
+    return this.revokedTokenBlacklist.has(token);
+  }
+
+  public async unpairDeviceByToken(deviceId: string, deviceToken: string): Promise<void> {
+    const device = await prisma.device.findUnique({ where: { id: deviceId } });
+    if (!device) {
+      throw new Error('Device not found.');
+    }
+
+    if (device.deviceToken !== deviceToken) {
+      throw new Error('Unauthorized device token.');
+    }
+
+    if (device.deviceToken) {
+      this.revokedTokenBlacklist.add(device.deviceToken);
+    }
+
+    await prisma.device.update({
+      where: { id: deviceId },
+      data: {
+        isRevoked: true,
+        healthState: 'OFFLINE',
+        healthStatus: 'inactive',
+        protectionStatus: 'DISCONNECTED',
+        enforcementActive: false,
+        deviceToken: `revoked_${nanoid(16)}`,
+      },
+    });
+
+    wsManager.broadcast({
+      type: 'DEVICE_REVOKED',
+      payload: {
+        deviceId: device.id,
+        isRevoked: true,
+        healthState: 'OFFLINE',
+      },
+      parentId: device.parentId,
+      childId: device.childId,
+    });
+  }
+
+  public async verifyDevice(params: {
+    deviceId: string;
+    deviceToken: string;
+    familyId?: string;
+  }): Promise<{
+    status: 'VALID' | 'REVOKED' | 'NOT_FOUND' | 'FAMILY_MISMATCH' | 'AUTH_FAILED' | 'ACCOUNT_SETUP_REQUIRED';
+    valid: boolean;
+    message?: string;
+    device?: {
+      id: string;
+      name: string;
+      platform: string;
+      familyId: string;
+      childId: string;
+      enforcementActive: boolean;
+      healthStatus: string;
+      healthState: string;
+      accountSetupRequired: boolean;
+      mappingCount: number;
+    };
+  }> {
+    const { deviceId, deviceToken, familyId } = params;
+    if (!deviceId || !deviceToken) {
+      return { status: 'AUTH_FAILED', valid: false, message: 'Missing device credentials.' };
+    }
+
+    const device = await prisma.device.findUnique({
+      where: { id: deviceId },
+      include: {
+        accountMappings: true,
+      },
+    });
+
+    if (!device) {
+      return { status: 'NOT_FOUND', valid: false, message: 'Device was not found in SafeBrowse cloud.' };
+    }
+
+    if (device.isRevoked || (device.deviceToken && this.revokedTokenBlacklist.has(device.deviceToken))) {
+      return { status: 'REVOKED', valid: false, message: 'Device credentials have been revoked.' };
+    }
+
+    if (device.deviceToken !== deviceToken) {
+      return { status: 'AUTH_FAILED', valid: false, message: 'Device authentication token mismatch.' };
+    }
+
+    if (familyId && device.familyId !== familyId) {
+      return { status: 'FAMILY_MISMATCH', valid: false, message: 'Device belongs to a different family.' };
+    }
+
+    const mappingCount = device.accountMappings ? device.accountMappings.length : 0;
+    const isWindows = device.platform.toLowerCase() === 'windows';
+    const accountSetupRequired = isWindows && mappingCount === 0 && !device.mappedAccountName && !device.activeChildId;
+
+    const isValid = !accountSetupRequired;
+    return {
+      status: accountSetupRequired ? 'ACCOUNT_SETUP_REQUIRED' : 'VALID',
+      valid: isValid,
+      message: accountSetupRequired ? 'Device account setup is required.' : 'Device credentials and association are valid.',
+      device: {
+        id: device.id,
+        name: device.name,
+        platform: device.platform,
+        familyId: device.familyId,
+        childId: device.childId,
+        enforcementActive: device.enforcementActive,
+        healthStatus: device.healthStatus,
+        healthState: device.healthState,
+        accountSetupRequired,
+        mappingCount,
+      },
+    };
   }
 
   public async rotateDeviceToken(deviceId: string, currentToken: string): Promise<{ newDeviceToken: string }> {
@@ -818,6 +941,9 @@ export class DeviceService {
         where: { id: deviceId },
         data: {
           ...(firstManaged ? { childId: firstManaged.childId! } : {}),
+          protectionStatus: firstManaged ? 'MANAGED_CHILD' : 'ACCOUNT_SETUP_REQUIRED',
+          healthStatus: firstManaged ? 'protected' : 'account_setup_required',
+          healthState: firstManaged ? 'PROTECTED' : 'DEGRADED',
           updatedAt: new Date(),
         },
       });

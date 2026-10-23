@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { prisma } from '../db/prisma';
 import { Device } from '@safebrowse/shared';
+import { deviceService } from '../services/device.service';
 
 export interface AuthenticatedDeviceRequest extends Request {
   device?: Device;
@@ -65,7 +66,7 @@ export async function deviceAuthMiddleware(
       return res.status(401).json({ error: 'Device authentication failed: Device not found.' });
     }
 
-    if (device.isRevoked) {
+    if (device.isRevoked || deviceService.isDeviceTokenRevoked(deviceToken.trim())) {
       return res.status(403).json({ error: 'Forbidden: Device credentials have been revoked.' });
     }
 

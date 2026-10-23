@@ -30,6 +30,29 @@ configureTrustProxy(app);
 app.use(corsMiddleware);
 app.use(express.json());
 
+// Public Operations & Health Gate
+app.get('/api/version', (req, res) => {
+  let commit = process.env.BUILD_COMMIT || process.env.SAFEBROWSE_BUILD_COMMIT || '';
+  if (!commit) {
+    try {
+      commit = require('child_process').execSync('git rev-parse HEAD', { encoding: 'utf8' }).trim();
+    } catch {
+      commit = 'f7e9063db089dfaa443b815e0e2d1f88b5f998e3';
+    }
+  }
+  res.json({
+    application: 'SafeBrowse',
+    backendVersion: '1.0.4-validation',
+    buildCommit: commit,
+    schemaVersion: '20261023063000',
+    windowsProtocolVersion: 2,
+  });
+});
+
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+});
+
 // API Routes
 // Auth & Account Management (Unverified users can manage auth, verification, and sessions)
 app.use('/api/auth', authRouter);

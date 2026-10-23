@@ -5,16 +5,28 @@ import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 
+export type OnboardingState =
+  | 'NOT_CONNECTED'
+  | 'CONNECTING'
+  | 'ACCOUNT_SETUP_REQUIRED'
+  | 'ACTIVATING'
+  | 'PROTECTED'
+  | 'ATTENTION_REQUIRED'
+  | 'DISCONNECTED';
+
 export interface DeviceConfig {
   deviceId: string;
   deviceToken: string;
   deviceTokenEncrypted?: string;
   childId: string;
   parentId: string;
+  familyId?: string;
   deviceName: string;
   backendUrl: string;
   pairedAt?: string;
   migratedAt?: string;
+  onboardingState?: OnboardingState;
+  onboardingReason?: string;
 }
 
 export interface SanitizedDeviceConfig {
@@ -22,9 +34,12 @@ export interface SanitizedDeviceConfig {
   deviceName: string;
   childId: string;
   parentId: string;
+  familyId?: string;
   backendUrl: string;
   pairedAt?: string;
   isPaired: boolean;
+  onboardingState?: OnboardingState;
+  onboardingReason?: string;
 }
 
 export class ConfigManager {
@@ -593,15 +608,101 @@ export class ConfigManager {
         deviceTokenEncrypted: data.deviceTokenEncrypted,
         childId: data.childId,
         parentId: data.parentId,
+        familyId: data.familyId,
         deviceName: data.deviceName || 'Windows Laptop',
         backendUrl,
         pairedAt: data.pairedAt,
         migratedAt: data.migratedAt,
+        onboardingState: data.onboardingState,
+        onboardingReason: data.onboardingReason,
       };
     } catch (e: any) {
       console.error(`[ConfigManager] Error reading ${configPath}: ${e.message}`);
       return null;
     }
+  }
+
+  private inMemoryOnboardingState: OnboardingState | null = null;
+  private inMemoryOnboardingReason: string | null = null;
+
+  public getOnboardingState(): OnboardingState {
+    if (this.inMemoryOnboardingState) {
+      return this.inMemoryOnboardingState;
+    }
+    const sanitized = this.loadSanitizedConfigSync();
+    if (sanitized && sanitized.onboardingState) {
+      return sanitized.onboardingState;
+    }
+    if (sanitized && sanitized.isPaired) {
+      return 'PROTECTED';
+    }
+    return 'NOT_CONNECTED';
+  }
+
+  public getOnboardingReason(): string | undefined {
+    if (this.inMemoryOnboardingReason) {
+      return this.inMemoryOnboardingReason;
+    }
+    const sanitized = this.loadSanitizedConfigSync();
+    return sanitized?.onboardingReason;
+  }
+
+  public setOnboardingState(state: OnboardingState, reason?: string): void {
+    this.inMemoryOnboardingState = state;
+    this.inMemoryOnboardingReason = reason || null;
+
+    try {
+      const sanitizedPath = this.getSanitizedConfigFilePath();
+      if (fs.existsSync(sanitizedPath)) {
+        const raw = fs.readFileSync(sanitizedPath, 'utf8');
+        const data = JSON.parse(raw);
+        if (data && typeof data === 'object') {
+          data.onboardingState = state;
+          data.onboardingReason = reason;
+          data.isPaired = state === 'PROTECTED';
+          fs.writeFileSync(sanitizedPath, JSON.stringify(data, null, 2), 'utf8');
+        }
+      }
+    } catch {}
+
+    try {
+      const securePath = this.getConfigFilePath();
+      if (fs.existsSync(securePath)) {
+        const raw = fs.readFileSync(securePath, 'utf8');
+        const data = JSON.parse(raw);
+        if (data && typeof data === 'object') {
+          data.onboardingState = state;
+          data.onboardingReason = reason;
+          fs.writeFileSync(securePath, JSON.stringify(data, null, 2), 'utf8');
+        }
+      }
+    } catch {}
+  }
+
+  public loadSanitizedConfigSync(): SanitizedDeviceConfig | null {
+    const sanitizedPath = this.getSanitizedConfigFilePath();
+    if (fs.existsSync(sanitizedPath)) {
+      try {
+        const raw = fs.readFileSync(sanitizedPath, 'utf8');
+        const data = JSON.parse(raw);
+        if (data && data.deviceId) {
+          const state: OnboardingState = data.onboardingState || (data.isPaired ? 'PROTECTED' : 'ACCOUNT_SETUP_REQUIRED');
+          return {
+            deviceId: data.deviceId,
+            deviceName: data.deviceName || 'Windows Laptop',
+            childId: data.childId || '',
+            parentId: data.parentId || '',
+            familyId: data.familyId,
+            backendUrl: data.backendUrl || ConfigManager.DEFAULT_PILOT_URL,
+            pairedAt: data.pairedAt,
+            isPaired: true,
+            onboardingState: state,
+            onboardingReason: data.onboardingReason,
+          };
+        }
+      } catch {}
+    }
+    return null;
   }
 
   /**
@@ -614,41 +715,24 @@ export class ConfigManager {
     try {
       const full = await this.loadDeviceConfig();
       if (full) {
+        const state: OnboardingState = full.onboardingState || (this.inMemoryOnboardingState || 'PROTECTED');
         return {
           deviceId: full.deviceId,
           deviceName: full.deviceName,
           childId: full.childId,
           parentId: full.parentId,
+          familyId: full.familyId,
           backendUrl: full.backendUrl,
           pairedAt: full.pairedAt,
           isPaired: true,
+          onboardingState: state,
+          onboardingReason: full.onboardingReason,
         };
       }
     } catch {}
 
     // 2. If unelevated or full config unreadable, load sanitized config from state/
-    const sanitizedPath = this.getSanitizedConfigFilePath();
-    if (fs.existsSync(sanitizedPath)) {
-      try {
-        const raw = fs.readFileSync(sanitizedPath, 'utf8');
-        const data = JSON.parse(raw);
-        if (data && data.deviceId) {
-          return {
-            deviceId: data.deviceId,
-            deviceName: data.deviceName || 'Windows Laptop',
-            childId: data.childId || '',
-            parentId: data.parentId || '',
-            backendUrl: data.backendUrl || ConfigManager.DEFAULT_PILOT_URL,
-            pairedAt: data.pairedAt,
-            isPaired: true,
-          };
-        }
-      } catch (err: any) {
-        console.warn(`[ConfigManager] Error reading ${sanitizedPath}: ${err.message}`);
-      }
-    }
-
-    return null;
+    return this.loadSanitizedConfigSync();
   }
 
   /**
@@ -674,14 +758,19 @@ export class ConfigManager {
       throw new Error('DPAPI machine-scope encryption failed to produce ciphertext.');
     }
 
+    const state: OnboardingState = config.onboardingState || 'ACCOUNT_SETUP_REQUIRED';
+
     const recordToSave: any = {
       deviceId: config.deviceId,
       deviceTokenEncrypted: encryptedToken,
       childId: config.childId,
       parentId: config.parentId,
+      familyId: config.familyId,
       deviceName: config.deviceName,
       backendUrl: validatedUrl,
       pairedAt: config.pairedAt || new Date().toISOString(),
+      onboardingState: state,
+      onboardingReason: config.onboardingReason,
     };
 
     if (config.migratedAt) {
@@ -701,14 +790,20 @@ export class ConfigManager {
       deviceName: config.deviceName || 'Windows Laptop',
       childId: config.childId || '',
       parentId: config.parentId || '',
+      familyId: config.familyId,
       backendUrl: validatedUrl,
       pairedAt: recordToSave.pairedAt,
       isPaired: true,
+      onboardingState: state,
+      onboardingReason: config.onboardingReason,
     };
     const sanitizedPath = this.getSanitizedConfigFilePath();
     const tempSanitizedPath = `${sanitizedPath}.tmp.${Date.now()}`;
     fs.writeFileSync(tempSanitizedPath, JSON.stringify(sanitizedRecord, null, 2), 'utf8');
     fs.renameSync(tempSanitizedPath, sanitizedPath);
+
+    this.inMemoryOnboardingState = state;
+    this.inMemoryOnboardingReason = config.onboardingReason || null;
 
     console.log(`[ConfigManager] Device configuration persisted securely at: ${configPath}`);
   }
@@ -781,6 +876,8 @@ export class ConfigManager {
   }
 
   public async clearDeviceConfig(): Promise<void> {
+    this.inMemoryOnboardingState = 'DISCONNECTED';
+    this.inMemoryOnboardingReason = null;
     try {
       if (fs.existsSync(this.getConfigFilePath())) {
         fs.unlinkSync(this.getConfigFilePath());

@@ -163,9 +163,17 @@ export class WindowsNetworkManager {
   private consecutiveHealthFailures = 0;
   private maxConsecutiveHealthFailures = 3;
   private upstreamSyncHandler: ((upstreams: string[]) => void) | null = null;
+  private configMgr = configManager;
 
-  constructor(customBackupFile?: string) {
-    this.backupFile = customBackupFile || configManager.getNetworkBackupFilePath();
+  constructor(customBackupFile?: string, configMgr?: any) {
+    if (configMgr) {
+      this.configMgr = configMgr;
+    }
+    this.backupFile = customBackupFile || this.configMgr.getNetworkBackupFilePath();
+  }
+
+  public setConfigManagerForTesting(mgr: any): void {
+    this.configMgr = mgr;
   }
 
   public setUpstreamSyncHandler(handler: ((upstreams: string[]) => void) | null): void {
@@ -1457,6 +1465,18 @@ export class WindowsNetworkManager {
       };
     }
 
+    const onboardingState = this.configMgr.getOnboardingState();
+    if (onboardingState !== 'ACTIVATING' && onboardingState !== 'PROTECTED') {
+      const msg = `Activation aborted: device onboarding state is '${onboardingState}'. SafeBrowse will not modify adapter DNS until onboarding completes.`;
+      logServiceMessage('WARN', `[NetworkManager] [WARN] ${msg}`);
+      return {
+        success: false,
+        message: msg,
+        interfaceIndexes: [],
+        reason: 'NO_NETWORK_ROUTE',
+      };
+    }
+
     logServiceMessage('INFO', `[NetworkManager] Initiating fail-safe network activation (attempt ${attempt})...`);
 
     // 1. Identify target internet-facing adapters having an IPv4 default gateway
@@ -1905,6 +1925,16 @@ export class WindowsNetworkManager {
         enforcedIndexes: [],
         unenforcedIndexes: [],
         message: 'Reconciliation aborted: service shutdown/restoration in progress',
+      };
+    }
+
+    const onboardingState = this.configMgr.getOnboardingState();
+    if (onboardingState !== 'ACTIVATING' && onboardingState !== 'PROTECTED') {
+      return {
+        status: 'SKIPPED',
+        enforcedIndexes: [],
+        unenforcedIndexes: [],
+        message: `Reconciliation skipped: device onboarding state is '${onboardingState}'. SafeBrowse will not modify adapter DNS.`,
       };
     }
 
@@ -2506,6 +2536,17 @@ export class WindowsNetworkManager {
       throw e;
     } finally {
       this.isRestoring = false;
+    }
+  }
+
+  public async flushDnsCache(): Promise<void> {
+    if (this.getPlatform() === 'win32') {
+      try {
+        await this.executePowerShell('$ErrorActionPreference = \'SilentlyContinue\'; Clear-DnsClientCache');
+      } catch {}
+      try {
+        await execFileAsync('ipconfig', ['/flushdns']);
+      } catch {}
     }
   }
 }

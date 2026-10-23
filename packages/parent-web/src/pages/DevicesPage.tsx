@@ -166,7 +166,16 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
       return (
         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30">
           <AlertTriangle className="w-3.5 h-3.5" />
-          Setup Required
+          Setup In Progress
+        </span>
+      );
+    }
+
+    if (device.protectionStatus === 'ACTIVATING' || device.healthStatus === 'syncing' || (device as any).healthState === 'ACTIVATING') {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-sky-500/15 text-sky-400 border border-sky-500/30">
+          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+          Activating
         </span>
       );
     }
@@ -538,7 +547,7 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
             {pairingCode ? (
               <div className="bg-slate-950 border border-indigo-500/40 rounded-2xl p-5 text-center space-y-3">
                 <p className="text-[11px] font-semibold text-indigo-400 uppercase tracking-wider">
-                  Your 6-Digit Pairing Code
+                  Your Pairing Code
                 </p>
                 <div className="text-3xl font-mono font-black text-white tracking-widest flex items-center justify-center gap-3">
                   <span>{pairingCode}</span>
@@ -551,8 +560,7 @@ export const DevicesPage: React.FC<DevicesPageProps> = ({ childrenList }) => {
                   </button>
                 </div>
                 <p className="text-[11px] text-slate-400">
-                  Enter this code in the SafeBrowse Windows Setup window (or at{' '}
-                  <span className="font-mono text-slate-300">http://127.0.0.1:8885</span>).
+                  Enter this 8-character code in the SafeBrowse setup window on your child's computer.
                   Valid for 15 minutes.
                 </p>
               </div>

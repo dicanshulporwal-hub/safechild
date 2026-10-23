@@ -6,7 +6,7 @@ import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import { configManager, ConfigManager, DeviceConfig } from './config-manager';
 import { accountManager, WindowsAccountManager } from './account-manager';
-import { logServiceMessage } from './network-manager';
+import { networkManager, WindowsNetworkManager, logServiceMessage } from './network-manager';
 import { WINDOWS_AGENT_VERSION } from './sync-client';
 import { normalizePairingCode } from '@safebrowse/shared';
 
@@ -17,14 +17,23 @@ export class ElevatedPairServer {
   private port: number = 8887;
   private configMgr: ConfigManager;
   private accountMgr: WindowsAccountManager;
+  private networkMgr: WindowsNetworkManager;
   private idleTimer: NodeJS.Timeout | null = null;
   private prefillCode: string = '';
   private prefillName: string = '';
   private autoCloseTimer: NodeJS.Timeout | null = null;
 
-  constructor(customConfigMgr?: ConfigManager, customAccountMgr?: WindowsAccountManager) {
+  constructor(
+    customConfigMgr?: ConfigManager,
+    customAccountMgr?: WindowsAccountManager,
+    customNetworkMgr?: WindowsNetworkManager
+  ) {
     this.configMgr = customConfigMgr || configManager;
     this.accountMgr = customAccountMgr || accountManager;
+    this.networkMgr = customNetworkMgr || networkManager;
+    if (this.networkMgr.setConfigManagerForTesting) {
+      this.networkMgr.setConfigManagerForTesting(this.configMgr);
+    }
   }
 
   public getPort(): number {
@@ -58,6 +67,9 @@ export class ElevatedPairServer {
         if (pathname === '/api/status' && req.method === 'GET') {
           const isAdmin = await this.configMgr.isAdministrator();
           const sanitized = await this.configMgr.loadSanitizedConfig();
+          const onboardingState = this.configMgr.getOnboardingState();
+          const onboardingReason = this.configMgr.getOnboardingReason();
+          const hasMappings = await this.accountMgr.hasProfileMappings();
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(
             JSON.stringify({
@@ -65,8 +77,70 @@ export class ElevatedPairServer {
               isPaired: Boolean(sanitized),
               deviceId: sanitized?.deviceId || null,
               deviceName: sanitized?.deviceName || null,
+              onboardingState,
+              onboardingReason,
+              hasMappings,
             })
           );
+          return;
+        }
+
+        // Endpoint: GET /api/version-check (Cloud Deployment Version Gate)
+        if (pathname === '/api/version-check' && req.method === 'GET') {
+          const rawBackendUrl =
+            (parsed.query?.backendUrl as string) ||
+            (parsed.query?.url as string) ||
+            ConfigManager.DEFAULT_PILOT_URL;
+          try {
+            const backendUrl = this.configMgr.validateBackendUrl(rawBackendUrl);
+            const vRes = await fetch(`${backendUrl}/api/version`);
+            if (!vRes.ok) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ compatible: false, error: 'SafeBrowse service needs an update. Please try again shortly.' }));
+              return;
+            }
+            const vData: any = await vRes.json();
+            const protocolVer = Number(vData.windowsProtocolVersion || 1);
+            if (protocolVer < 2) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(
+                JSON.stringify({
+                  compatible: false,
+                  windowsProtocolVersion: protocolVer,
+                  error: 'Production backend is running an older protocol (version 1). Please update production backend before pairing.',
+                  versionInfo: vData,
+                })
+              );
+              return;
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ compatible: true, windowsProtocolVersion: protocolVer, versionInfo: vData }));
+          } catch (vErr: any) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ compatible: false, error: 'SafeBrowse service needs an update. Please try again shortly.' }));
+          }
+          return;
+        }
+
+        // Endpoint: POST /api/reconnect (Clears stale validation credentials and resets state to NOT_CONNECTED)
+        if (pathname === '/api/reconnect' && req.method === 'POST') {
+          const isAdmin = await this.configMgr.isAdministrator();
+          if (!isAdmin && (process.platform === 'win32' || this.configMgr.getPlatform() === 'win32')) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Administrator elevation required.' }));
+            return;
+          }
+          try {
+            await this.networkMgr.restoreOriginalDns();
+            await this.configMgr.deleteDeviceConfig();
+            await this.accountMgr.clearProfileMappings();
+            this.configMgr.setOnboardingState('NOT_CONNECTED');
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, onboardingState: 'NOT_CONNECTED' }));
+          } catch (rErr: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: rErr.message }));
+          }
           return;
         }
 
@@ -106,6 +180,23 @@ export class ElevatedPairServer {
                 res.end(JSON.stringify({ error: `Invalid backend URL: ${urlErr.message}` }));
                 return;
               }
+
+              // 0. Cloud Version Gate check before claim
+              try {
+                const vRes = await fetch(`${backendUrl}/api/version`);
+                if (vRes.ok) {
+                  const vData: any = await vRes.json().catch(() => ({}));
+                  if (Number(vData.windowsProtocolVersion || 1) < 2) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(
+                      JSON.stringify({
+                        error: 'SafeBrowse service needs an update. Please try again shortly.',
+                      })
+                    );
+                    return;
+                  }
+                }
+              } catch {}
 
               // 1. Claim pairing code from SafeBrowse cloud backend
               let claimRes: Response;
@@ -157,9 +248,11 @@ export class ElevatedPairServer {
                 deviceToken: dev.deviceToken,
                 childId: dev.childId,
                 parentId: dev.parentId,
+                familyId: dev.familyId,
                 deviceName: dev.name || deviceName,
                 backendUrl,
                 pairedAt: new Date().toISOString(),
+                onboardingState: 'ACCOUNT_SETUP_REQUIRED',
               };
 
               try {
@@ -190,23 +283,19 @@ export class ElevatedPairServer {
                 logServiceMessage('INFO', `[ElevatedPairServer] Pre-caching family profiles note: ${profErr.message}`);
               }
 
-              // 5. Start and verify SafeBrowseChildService
-              const serviceResult = await this.startAndVerifyService();
-
-              // 6. Trigger initial policy sync
-              await this.triggerInitialPolicySync(backendUrl, dev.id, dev.deviceToken, dev.childId);
-
-              // 7. Return success to client
+              // 5. Return success to client with state ACCOUNT_SETUP_REQUIRED
+              // Note: System DNS remains DHCP/untouched until account mapping and activation complete.
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(
                 JSON.stringify({
                   success: true,
                   message: 'Device attached successfully.',
+                  state: 'ACCOUNT_SETUP_REQUIRED',
                   device: {
                     deviceId: dev.id,
                     deviceName: dev.name || deviceName,
                     childId: dev.childId,
-                    serviceStatus: serviceResult.message,
+                    familyId: dev.familyId,
                   },
                 })
               );
@@ -270,7 +359,10 @@ export class ElevatedPairServer {
                 return;
               }
 
-              // 1. Persist mappings locally to config.json
+              // Step 1: Transition state to ACTIVATING
+              this.configMgr.setOnboardingState('ACTIVATING');
+
+              // Step 2: Persist mappings locally to config.json
               await this.accountMgr.saveProfileMappingsTransaction(
                 mappings,
                 secureConfig.deviceId,
@@ -278,19 +370,18 @@ export class ElevatedPairServer {
                 { isElevated: true }
               );
 
-              // 2. Sync mappings to backend: PUT /api/devices/:deviceId/account-mappings
-              try {
-                await this.accountMgr.syncAccountMappingsToCloud(
-                  secureConfig.backendUrl,
-                  secureConfig.deviceId,
-                  secureConfig.deviceToken,
-                  mappings
-                );
-              } catch (syncErr: any) {
-                logServiceMessage('WARN', `[ElevatedPairServer] Cloud mapping sync warning: ${syncErr.message}`);
+              // Step 3: Sync mappings to backend: PUT /api/devices/:deviceId/account-mappings
+              const syncResult = await this.accountMgr.syncAccountMappingsToCloud(
+                secureConfig.backendUrl,
+                secureConfig.deviceId,
+                secureConfig.deviceToken,
+                mappings
+              );
+              if (!syncResult || !syncResult.success) {
+                throw new Error('Failed to synchronize account mappings with SafeBrowse cloud.');
               }
 
-              // 3. Fetch policies for all mapped children
+              // Step 4: Fetch policies for all mapped children
               for (const m of mappings) {
                 if (m.childId && m.enabled) {
                   try {
@@ -304,7 +395,26 @@ export class ElevatedPairServer {
                 }
               }
 
-              // 4. Send heartbeat with active context
+              // Step 5: Start & verify SafeBrowse background service
+              await this.startAndVerifyService();
+
+              // Step 6: Fail-Safe Network DNS Activation (127.0.0.1)
+              const netActivation = await this.networkMgr.activateFailSafeDns(53, 1);
+              if (!netActivation.success) {
+                await this.networkMgr.restoreOriginalDns();
+                this.configMgr.setOnboardingState('ATTENTION_REQUIRED', netActivation.message || 'DNS activation failed');
+                throw new Error(`DNS activation failed: ${netActivation.message}. Windows networking restored to original safe settings.`);
+              }
+
+              // Step 7: Verify Resolver Health
+              const healthy = await this.networkMgr.verifyEndToEndResolverHealth(53, { timeoutMs: 2000 });
+              if (!healthy) {
+                await this.networkMgr.restoreOriginalDns();
+                this.configMgr.setOnboardingState('ATTENTION_REQUIRED', 'Resolver health check failed');
+                throw new Error('Local DNS proxy did not respond healthy. Windows networking restored to original safe settings.');
+              }
+
+              // Step 8: Send initial heartbeat with active context
               try {
                 const activeSession = await this.accountMgr.getActiveConsoleSession();
                 const activeMapping = mappings.find((m: any) => m.windowsSid === activeSession.sid && m.enabled);
@@ -331,9 +441,16 @@ export class ElevatedPairServer {
                 });
               } catch {}
 
+              // Step 9: Transition to PROTECTED
+              this.configMgr.setOnboardingState('PROTECTED');
+
               res.writeHead(200, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ success: true }));
+              res.end(JSON.stringify({ success: true, state: 'PROTECTED' }));
             } catch (e: any) {
+              try {
+                await this.networkMgr.restoreOriginalDns();
+              } catch {}
+              this.configMgr.setOnboardingState('ATTENTION_REQUIRED', e.message);
               res.writeHead(400, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: e.message }));
             }
@@ -970,6 +1087,46 @@ export class ElevatedPairServer {
       </div>
     </div>
 
+    <!-- SCREEN 6: ATTENTION REQUIRED / RECONNECT -->
+    <div id="screenAttention" class="screen">
+      <div style="text-align: center; padding: 20px 0;">
+        <div style="width: 64px; height: 64px; border-radius: 50%; background: rgba(245, 158, 11, 0.2); border: 2px solid var(--warning); color: var(--warning); font-size: 32px; display: flex; align-items: center; justify-content: center; margin: 0 auto 20px;">
+          ⚠️
+        </div>
+        <h2 style="font-size: 24px; font-weight: 800; margin: 0 0 10px 0;">Reconnect This Computer</h2>
+        <p style="color: var(--text-muted); font-size: 15px; line-height: 1.6; max-width: 500px; margin: 0 auto 20px;" id="attentionMessage">
+          This computer requires reconnection to your SafeBrowse family account. Protection has been paused safely to ensure your internet connection works.
+        </p>
+
+        <div class="callout" style="text-align: left; max-width: 520px; margin: 0 auto 28px;">
+          Click Reconnect below to enter a fresh pairing code from your Parent Dashboard (<a href="https://safebrowse.porwal.online" target="_blank" style="color: #60a5fa; text-decoration: underline;">safebrowse.porwal.online</a>).
+        </div>
+
+        <div class="button-row" style="max-width: 360px; margin: 0 auto;">
+          <button class="btn btn-primary" id="btnReconnect" onclick="reconnectComputer()">Reconnect This Computer</button>
+          <button class="btn btn-secondary" onclick="cancelSetup()">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- SCREEN 7: ALREADY CONNECTED -->
+    <div id="screenAlreadyConnected" class="screen">
+      <div style="text-align: center; padding: 20px 0;">
+        <div style="width: 64px; height: 64px; border-radius: 50%; background: rgba(34, 197, 94, 0.2); border: 2px solid var(--success); color: var(--success); font-size: 32px; display: flex; align-items: center; justify-content: center; margin: 0 auto 20px;">
+          ✓
+        </div>
+        <h2 style="font-size: 24px; font-weight: 800; margin: 0 0 10px 0;">This Computer is Protected</h2>
+        <p style="color: var(--text-muted); font-size: 15px; line-height: 1.6; max-width: 500px; margin: 0 auto 24px;">
+          SafeBrowse is active and actively filtering internet content for your family.
+        </p>
+
+        <div class="button-row" style="max-width: 420px; margin: 0 auto;">
+          <button class="btn btn-primary" onclick="loadAccountsScreen().then(() => showScreen('screenAccounts'))">Reconfigure Accounts</button>
+          <button class="btn btn-secondary" onclick="closeSetup()">Close</button>
+        </div>
+      </div>
+    </div>
+
   </div>
 
   <script>
@@ -1188,6 +1345,26 @@ export class ElevatedPairServer {
       }
     }
 
+    async function reconnectComputer() {
+      const btn = document.getElementById('btnReconnect');
+      btn.disabled = true;
+      btn.innerText = 'Resetting connection...';
+      try {
+        const res = await fetch('/api/reconnect', { method: 'POST' });
+        if (res.ok) {
+          showScreen('screenPair');
+        } else {
+          showAlert('Failed to reset connection state. Please retry.', true);
+          btn.disabled = false;
+          btn.innerText = 'Reconnect This Computer';
+        }
+      } catch (e) {
+        showAlert('Error: ' + e.message, true);
+        btn.disabled = false;
+        btn.innerText = 'Reconnect This Computer';
+      }
+    }
+
     async function cancelSetup() {
       try {
         await fetch('/api/cancel', { method: 'POST' });
@@ -1201,6 +1378,39 @@ export class ElevatedPairServer {
       } catch {}
       window.close();
     }
+
+    window.addEventListener('DOMContentLoaded', async () => {
+      // 1. Version check against cloud
+      try {
+        const vRes = await fetch('/api/version-check');
+        const vData = await vRes.json();
+        if (!vData.compatible) {
+          showAlert(vData.error || 'SafeBrowse service needs an update. Please try again shortly.', true);
+          const btn = document.getElementById('btnPair');
+          if (btn) btn.disabled = true;
+        }
+      } catch {}
+
+      // 2. Setup state check
+      try {
+        const sRes = await fetch('/api/status');
+        const sData = await sRes.json();
+        if (sData.onboardingState === 'ATTENTION_REQUIRED') {
+          showScreen('screenAttention');
+          if (sData.onboardingReason) {
+            const el = document.getElementById('attentionMessage');
+            if (el) el.innerText = 'Device status: ' + sData.onboardingReason + '. Please reconnect this computer to your SafeBrowse family account.';
+          }
+        } else if (sData.onboardingState === 'ACCOUNT_SETUP_REQUIRED') {
+          appState.deviceId = sData.deviceId;
+          appState.deviceName = sData.deviceName || 'Family Laptop';
+          await loadAccountsScreen();
+          showScreen('screenAccounts');
+        } else if (sData.onboardingState === 'PROTECTED') {
+          showScreen('screenAlreadyConnected');
+        }
+      } catch {}
+    });
   </script>
 </body>
 </html>`;

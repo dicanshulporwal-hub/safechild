@@ -20,7 +20,7 @@ import {
   StatusEvaluation,
   ServiceQueryResult,
 } from '../src/agent-cli';
-import { ConfigManager } from '../src/config-manager';
+import { ConfigManager, configManager } from '../src/config-manager';
 
 function makeMockRule(domain: string, action: 'BLOCK' | 'ALLOW' = 'BLOCK'): PolicyRule {
   return {
@@ -117,9 +117,11 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
   const tmpDir = path.join(os.tmpdir(), `sb-recovery-tests-${Date.now()}`);
   before(() => {
     fs.mkdirSync(tmpDir, { recursive: true });
+    configManager.setOnboardingState('PROTECTED');
   });
 
   after(() => {
+    configManager.clearDeviceConfig();
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch {}

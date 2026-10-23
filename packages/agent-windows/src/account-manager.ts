@@ -1411,6 +1411,32 @@ export class WindowsAccountManager {
       };
     }
   }
+
+  public async hasProfileMappings(): Promise<boolean> {
+    const mappings = await this.loadProfileMappings();
+    return Array.isArray(mappings) && mappings.length > 0;
+  }
+
+  public async clearProfileMappings(): Promise<void> {
+    try {
+      const mappingsPath = this.getMappingsFilePath();
+      if (fs.existsSync(mappingsPath)) {
+        fs.unlinkSync(mappingsPath);
+      }
+    } catch {}
+    try {
+      const activeSessionPath = this.getActiveSessionFilePath();
+      if (fs.existsSync(activeSessionPath)) {
+        fs.unlinkSync(activeSessionPath);
+      }
+    } catch {}
+    try {
+      const cachePath = path.join(this.getStateDir(), 'family-profiles-cache.json');
+      if (fs.existsSync(cachePath)) {
+        fs.unlinkSync(cachePath);
+      }
+    } catch {}
+  }
 }
 
 export const accountManager = new WindowsAccountManager();

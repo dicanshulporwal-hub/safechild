@@ -15,7 +15,7 @@ import {
 import { sessionMonitor } from './session-monitor';
 import { WINDOWS_AGENT_VERSION, BUILD_COMMIT } from './sync-client';
 import { evaluateSystemStatus } from './agent-cli';
-import { logServiceMessage } from './network-manager';
+import { networkManager, WindowsNetworkManager, logServiceMessage } from './network-manager';
 import { normalizePairingCode } from '@safebrowse/shared';
 
 const execAsync = promisify(exec);
@@ -26,10 +26,19 @@ export class GuiServer {
   private port: number = 8885;
   private configMgr: ConfigManager;
   private accountMgr: WindowsAccountManager;
+  private networkMgr: WindowsNetworkManager;
 
-  constructor(customConfigMgr?: ConfigManager, customAccountMgr?: WindowsAccountManager) {
+  constructor(
+    customConfigMgr?: ConfigManager,
+    customAccountMgr?: WindowsAccountManager,
+    customNetworkMgr?: WindowsNetworkManager
+  ) {
     this.configMgr = customConfigMgr || configManager;
     this.accountMgr = customAccountMgr || accountManager;
+    this.networkMgr = customNetworkMgr || networkManager;
+    if (this.networkMgr.setConfigManagerForTesting) {
+      this.networkMgr.setConfigManagerForTesting(this.configMgr);
+    }
   }
 
   public async start(port: number = 8885): Promise<number> {
@@ -76,6 +85,8 @@ export class GuiServer {
             res.end(
               JSON.stringify({
                 isPaired: Boolean(config),
+                onboardingState: this.configMgr.getOnboardingState(),
+                onboardingReason: this.configMgr.getOnboardingReason(),
                 agentVersion: WINDOWS_AGENT_VERSION,
                 buildCommit: BUILD_COMMIT,
                 config: config
@@ -479,12 +490,60 @@ export class GuiServer {
           return;
         }
 
-        // Endpoint: POST /api/disconnect
+        // Endpoint: POST /api/disconnect (Atomic complete teardown)
         if (pathname === '/api/disconnect' && req.method === 'POST') {
+          const isAdmin = await this.configMgr.isAdministrator();
+          if (!isAdmin && (process.platform === 'win32' || this.configMgr.getPlatform() === 'win32')) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Administrator elevation required to disconnect this computer.' }));
+            return;
+          }
+
           try {
+            const secureConfig = await this.configMgr.loadDeviceConfig();
+            if (secureConfig) {
+              // 1. Request backend unpair/revoke when online (best-effort)
+              try {
+                await fetch(`${secureConfig.backendUrl}/api/devices/${secureConfig.deviceId}/unpair`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'x-device-id': secureConfig.deviceId,
+                    'x-device-token': secureConfig.deviceToken,
+                  },
+                  body: JSON.stringify({
+                    deviceId: secureConfig.deviceId,
+                    deviceToken: secureConfig.deviceToken,
+                  }),
+                });
+              } catch (cloudErr: any) {
+                logServiceMessage('WARN', `[GuiServer] Cloud unpair notification note: ${cloudErr.message}`);
+              }
+            }
+
+            // 2. Stop enforcement and restore original/DHCP DNS
+            await this.networkMgr.restoreOriginalDns();
+
+            // 3. Clear DNS client cache
+            await this.networkMgr.flushDnsCache();
+
+            // 4. Delete device credentials (DPAPI)
             await this.configMgr.deleteDeviceConfig();
+
+            // 5. Clear profile mappings & session caches
+            await this.accountMgr.clearProfileMappings();
+
+            // 6. Verify adapter no longer uses 127.0.0.1
+            const inspection = await this.networkMgr.inspectCurrentEnforcement();
+
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: true }));
+            res.end(
+              JSON.stringify({
+                success: true,
+                disconnected: true,
+                dnsRestored: !inspection.isProtected,
+              })
+            );
           } catch (e: any) {
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: e.message }));
