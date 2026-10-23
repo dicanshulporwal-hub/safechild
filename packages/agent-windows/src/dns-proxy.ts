@@ -295,7 +295,7 @@ export class DnsFilterProxy {
     return new Promise((resolve, reject) => {
       this.socket = dgram.createSocket('udp4');
 
-      this.socket.on('message', (msg, rinfo) => {
+      const handleDnsMessage = (msg: Buffer, rinfo: dgram.RemoteInfo) => {
         const query = this.extractQueryFromDnsPacket(msg);
 
         // Internal infrastructure health probe (bypasses parental policy; loopback only)
@@ -396,18 +396,26 @@ export class DnsFilterProxy {
             }
           }, 1200);
         }
-      });
+      };
+
+      this.socket.on('message', handleDnsMessage);
 
       this.socket.on('error', (err: any) => {
         if (err.code === 'EACCES' || err.code === 'EADDRINUSE') {
-          console.warn(`[Windows DNS Filter] Port ${port} unavailable (requires admin or in use). Retrying on fallback port 5353...`);
-          this.socket?.close();
+          console.warn(`[Windows DNS Filter] Port ${port} unavailable (requires admin or in use). Retrying on fallback dynamic port...`);
+          try { this.socket?.close(); } catch {}
           const fallbackSocket = dgram.createSocket('udp4');
           this.socket = fallbackSocket;
-          fallbackSocket.bind(5353, '127.0.0.1', () => {
-            this.listeningPort = 5353;
-            console.log(`[Windows DNS Filter] Listening on fallback 127.0.0.1:5353`);
-            resolve(5353);
+          fallbackSocket.on('message', handleDnsMessage);
+          fallbackSocket.on('error', (fallbackErr) => {
+            console.error('[Windows DNS Filter] Fallback socket error:', fallbackErr);
+            reject(fallbackErr);
+          });
+          fallbackSocket.bind(0, '127.0.0.1', () => {
+            const fallbackPort = fallbackSocket.address().port;
+            this.listeningPort = fallbackPort;
+            console.log(`[Windows DNS Filter] Listening on fallback dynamic port 127.0.0.1:${fallbackPort}`);
+            resolve(fallbackPort);
           });
         } else {
           console.error('[Windows DNS Filter] Socket error:', err);

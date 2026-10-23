@@ -364,7 +364,7 @@ describe('SafeBrowse Shared Laptop Multi-User Architecture Suite', () => {
       blockReason = reason;
     });
 
-    const activePort = await proxy.start(59333);
+    const activePort = await proxy.start(0);
 
     try {
       // Craft DNS query for blocked domain roblox.com
