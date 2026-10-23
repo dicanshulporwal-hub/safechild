@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { configManager } from './config-manager';
+import { configManager, ConfigManager } from './config-manager';
 
 const execFileAsync = promisify(execFile);
 
@@ -94,15 +94,25 @@ export interface MultiSessionCheckResult {
 
 export class WindowsAccountManager {
   private customBaseDir: string | null = null;
+  private customConfigMgr: ConfigManager | null = null;
   private mockAccounts: WindowsAccount[] | null = null;
   private mockConsoleSid: string | null = null;
   private mockConsoleUsername: string | null = null;
   private mockInteractiveSessions: string[] | null = null;
 
-  constructor(customBaseDir?: string) {
-    if (customBaseDir) {
-      this.customBaseDir = customBaseDir;
+  constructor(customBaseDirOrConfig?: string | ConfigManager) {
+    if (customBaseDirOrConfig) {
+      if (typeof customBaseDirOrConfig === 'string') {
+        this.customBaseDir = customBaseDirOrConfig;
+      } else {
+        this.customConfigMgr = customBaseDirOrConfig;
+        this.customBaseDir = customBaseDirOrConfig.getBaseDir();
+      }
     }
+  }
+
+  private getConfigMgr(): ConfigManager {
+    return this.customConfigMgr || configManager;
   }
 
   public setMockAccountsForTesting(accounts: WindowsAccount[] | null): void {
@@ -735,7 +745,7 @@ export class WindowsAccountManager {
     if (!fs.existsSync(stateDir)) {
       try { fs.mkdirSync(stateDir, { recursive: true }); } catch {}
     }
-    configManager.ensureDirectories();
+    this.getConfigMgr().ensureDirectories();
 
     const filePath = this.getMappingsFilePath();
     // Step 6: Atomic Temp File Creation in state dir
@@ -763,9 +773,10 @@ export class WindowsAccountManager {
       fs.renameSync(tempFile, filePath);
 
       // Step 9: Privilege-Aware ACL Application (Elevated/SYSTEM only)
-      const isElevated = options?.isElevated ?? (await configManager.isAdministrator());
-      if (isElevated && !options?.skipAcl && (process.platform === 'win32' || configManager.getPlatform() === 'win32')) {
-        configManager.applyWindowsAcls(filePath, 'state');
+      const cfgMgr = this.getConfigMgr();
+      const isElevated = options?.isElevated ?? (await cfgMgr.isAdministrator());
+      if (isElevated && !options?.skipAcl && (process.platform === 'win32' || cfgMgr.getPlatform() === 'win32')) {
+        cfgMgr.applyWindowsAcls(filePath, 'state');
       }
 
       // Step 10: Verification of Reload

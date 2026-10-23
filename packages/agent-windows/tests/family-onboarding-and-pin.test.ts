@@ -277,6 +277,14 @@ describe('SafeBrowse Stage C.5 — Family-Level Onboarding, Cloud Truth & Parent
       assert.strictEqual(childRes.status, 200);
       const childData = await childRes.json() as any;
 
+      if (childData.managementUnlocked !== false) {
+        console.error('[TEST 7 DEBUG] unexpected managementUnlocked true:', {
+          childData,
+          isPinSetDirect: await pinMgr.isPinSet(),
+          pinFilePath: (pinMgr as any).getPinFilePath(),
+          pinFileExists: fs.existsSync((pinMgr as any).getPinFilePath()),
+        });
+      }
       assert.strictEqual(childData.managementUnlocked, false);
       assert.strictEqual(childData.pinConfigured, true);
       // Secret device identifiers & SIDs hidden

@@ -199,6 +199,14 @@ export class ConfigManager {
       cmd = this.getWindowsRootAclCommand(targetDir);
     }
 
+    // Windows NTFS icacls rejects (OI)(CI) container inheritance flags on file objects.
+    // If targetDir points to an existing file, strip (OI)(CI) so flags apply directly to the file.
+    try {
+      if (fs.existsSync(targetDir) && fs.statSync(targetDir).isFile()) {
+        cmd = cmd.replace(/\(OI\)\(CI\)/g, '');
+      }
+    } catch {}
+
     if (this.aclExecutor) {
       this.aclExecutor(cmd);
       return;

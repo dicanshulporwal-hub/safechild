@@ -48,7 +48,8 @@ export class ParentPinManager {
       const raw = fs.readFileSync(pinPath, 'utf8');
       const data = JSON.parse(raw);
       return Boolean(data && data.salt && data.verifier);
-    } catch {
+    } catch (err: any) {
+      logServiceMessage('WARN', `[ParentPinManager] isPinSet check failed on ${this.getPinFilePath()}: ${err.message}`);
       return false;
     }
   }
@@ -89,6 +90,7 @@ export class ParentPinManager {
     // Apply strict ACLs on Windows: SYSTEM & Administrators only
     if (process.platform === 'win32' || this.configMgr.getPlatform() === 'win32') {
       try {
+        this.configMgr.applyWindowsAcls(dir, 'secure');
         this.configMgr.applyWindowsAcls(pinPath, 'secure');
       } catch (aclErr: any) {
         logServiceMessage('WARN', `[ParentPinManager] ACL warning: ${aclErr.message}`);
