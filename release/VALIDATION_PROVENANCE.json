@@ -1,14 +1,15 @@
 {
-  "classification": "READY FOR CLEAN FAMILY-LEVEL WINDOWS PHYSICAL VALIDATION",
-  "sourceCommit": "219779babb4db8f4c10beba8dbf0973bf075ba49",
-  "parentCommit": "5916168e420a0afc5a3fcdadd711a87f41aa480f",
+  "classification": "READY FOR C5 VM2 CLOUD DEPLOYMENT",
+  "sourceCommit": "221a7a1386914ac00796eac92b5709f61269fb6e",
+  "parentCommit": "735fce4847e0344d5607da1975e53e414c71e2ef",
   "baselineCommit": "52517696e71c1c46fa481f1f9b780b8f8ccddf65",
   "branch": "feature/stage11-step4-device-enforcement",
   "candidateVersion": "1.0.4-validation",
-  "windowsMsiProductVersion": "1.0.4.7",
+  "windowsMsiProductVersion": "1.0.4.8",
   "androidVersionCode": 5,
   "publicRelease": false,
   "backendUrl": "https://safebrowse.porwal.online",
+  "ciRunId": "40082084365",
   "artifacts": [
     {
       "name": "SafeBrowseChild-Validation-1.0.4.apk",
@@ -19,25 +20,25 @@
     {
       "name": "SafeBrowseChild-Validation.msi",
       "path": "release/windows-validation/SafeBrowseChild-Validation.msi",
-      "sha256": "bfe6662f72c130cf95e64a70ffe1a805f879226988e5be50830300a6066d06da",
-      "size": 23470080
+      "sha256": "c6c2736b1ea5482e01c1a7d6370a0576d7d030e9c93545c96516b46c4d2c4d2f",
+      "size": 23465984
     },
     {
       "name": "SafeBrowseChild-Validation.exe",
       "path": "release/windows-validation/SafeBrowseChild-Validation.exe",
-      "sha256": "7fb7d074c69c729fd0c9efb2e3ff96e497618492b3767a7dbdeb070b8ffb9caa",
-      "size": 73198080
+      "sha256": "d14684ffe2f9102a99a646c036545d1870c4698fb07474b1c0909d23a7fb1b7d",
+      "size": 73200128
     },
     {
       "name": "SafeBrowseServiceHost.exe",
       "path": "release/windows-validation/SafeBrowseServiceHost.exe",
-      "sha256": "40073d34e29be04a2e90b961da46d7d7e941f5816f0c23ab4c7b69e3e90137bb",
+      "sha256": "da44551c407e56ab7b1d70c0cd6aeb7dbd5666046df45a7adf07c128e6a5bae1",
       "size": 37888
     },
     {
       "name": "SafeBrowseUserHelper.exe",
       "path": "release/windows-validation/SafeBrowseUserHelper.exe",
-      "sha256": "2fc74e2340ce1b6bb0e889c9f24fd80767f204aa785ffef24cb7433ed1347e10",
+      "sha256": "82b3e5534ae1779f99072d4109c839889d388f1019e4cd394f1a5b1abe7b41c8",
       "size": 7168
     }
   ]
