@@ -2,11 +2,23 @@ import http from 'http';
 import url from 'url';
 import fs from 'fs';
 import { spawn, exec } from 'child_process';
+import { Policy, evaluatePolicy } from '@safebrowse/shared';
 import { blockIpcServer } from './block-ipc';
+import { BlockExperienceContext } from './dns-proxy';
+import { AccessRequestResolutionEvent } from './sync-client';
 
 export interface ActiveChildContext {
   childId: string | null;
   childName: string | null;
+}
+
+export interface RequestStatusEntry {
+  requestId: string;
+  status: 'PENDING' | 'APPROVED' | 'DENIED';
+  domain: string;
+  expiresAt?: string;
+  duration?: number;
+  updatedAt: number;
 }
 
 export function escapeHtml(str: string): string {
@@ -89,6 +101,11 @@ export class BlockPageServer {
   public lastTriggeredExperience: { domain: string; reason: string; timestamp: number } | null = null;
   private onBlockExperienceCallback?: (domain: string, reason: string) => void;
 
+  private policyProvider?: () => Policy | null;
+  private resolutionMap: Map<string, RequestStatusEntry> = new Map();
+  private readonly maxResolutionEntries = 100;
+  private readonly resolutionTtlMs = 60 * 60 * 1000; // 1 hour
+
   constructor(
     backendUrl: string,
     defaultChildId: string | null,
@@ -107,8 +124,117 @@ export class BlockPageServer {
     this.activeChildProvider = provider;
   }
 
+  public setPolicyProvider(provider: () => Policy | null): void {
+    this.policyProvider = provider;
+  }
+
   public setOnBlockExperience(cb: (domain: string, reason: string) => void): void {
     this.onBlockExperienceCallback = cb;
+  }
+
+  public recordPendingRequest(requestId: string, domain: string): void {
+    this.cleanExpiredResolutions();
+    this.resolutionMap.set(requestId, {
+      requestId,
+      status: 'PENDING',
+      domain,
+      updatedAt: Date.now(),
+    });
+  }
+
+  public handleAccessRequestResolved(event: AccessRequestResolutionEvent): void {
+    this.cleanExpiredResolutions();
+    if (event.requestId) {
+      const existing = this.resolutionMap.get(event.requestId);
+      this.resolutionMap.set(event.requestId, {
+        requestId: event.requestId,
+        status: event.status,
+        domain: event.domain || existing?.domain || '',
+        expiresAt: event.expiresAt || existing?.expiresAt,
+        duration: event.resolvedDuration || existing?.duration,
+        updatedAt: Date.now(),
+      });
+    } else if (event.domain) {
+      for (const entry of this.resolutionMap.values()) {
+        if (entry.domain.toLowerCase() === event.domain.toLowerCase()) {
+          entry.status = event.status;
+          entry.expiresAt = event.expiresAt;
+          entry.duration = event.resolvedDuration;
+          entry.updatedAt = Date.now();
+        }
+      }
+    }
+  }
+
+  private cleanExpiredResolutions(): void {
+    const now = Date.now();
+    for (const [id, entry] of this.resolutionMap.entries()) {
+      if (now - entry.updatedAt > this.resolutionTtlMs) {
+        this.resolutionMap.delete(id);
+      }
+    }
+    if (this.resolutionMap.size > this.maxResolutionEntries) {
+      const oldestKeys = Array.from(this.resolutionMap.keys()).slice(
+        0,
+        this.resolutionMap.size - this.maxResolutionEntries
+      );
+      for (const k of oldestKeys) {
+        this.resolutionMap.delete(k);
+      }
+    }
+  }
+
+  public getRequestStatus(requestId?: string, queryDomain?: string): {
+    status: 'PENDING' | 'APPROVED' | 'DENIED';
+    domain: string;
+    expiresAt?: string;
+    allowed: boolean;
+    duration?: number;
+  } {
+    let entry = requestId ? this.resolutionMap.get(requestId) : undefined;
+    if (!entry && queryDomain) {
+      for (const item of this.resolutionMap.values()) {
+        if (item.domain.toLowerCase() === queryDomain.toLowerCase()) {
+          entry = item;
+          break;
+        }
+      }
+    }
+
+    let allowed = false;
+    let currentStatus: 'PENDING' | 'APPROVED' | 'DENIED' = entry?.status || 'PENDING';
+    const evalDomain = queryDomain || entry?.domain || '';
+
+    // Resilience fallback: evaluate active policy against evalDomain directly
+    if (evalDomain && this.policyProvider) {
+      try {
+        const currentPolicy = this.policyProvider();
+        if (currentPolicy) {
+          const evalResult = evaluatePolicy(currentPolicy, evalDomain);
+          if (
+            evalResult.action === 'ALLOW' &&
+            (evalResult.reason === 'TEMPORARY_ALLOW' ||
+              evalResult.reason === 'EXPLICIT_ALLOW' ||
+              evalResult.reason === 'ESSENTIAL_ALLOW')
+          ) {
+            allowed = true;
+            currentStatus = 'APPROVED';
+          }
+        }
+      } catch {}
+    }
+
+    if (currentStatus === 'APPROVED') {
+      allowed = true;
+    }
+
+    return {
+      status: currentStatus,
+      domain: evalDomain,
+      expiresAt: entry?.expiresAt,
+      allowed,
+      duration: entry?.duration || 15,
+    };
   }
 
   /**
@@ -116,16 +242,41 @@ export class BlockPageServer {
    * Dispatches the event via authenticated local IPC to the SafeBrowse User-Session Helper
    * running in the logged-in interactive child's desktop session.
    */
-  public triggerBlockExperience(domain: string, reason: string): { sent: boolean; reason: string; url?: string } {
+  public triggerBlockExperience(
+    target: string | BlockExperienceContext,
+    reason?: string
+  ): { sent: boolean; reason: string; url?: string } {
     const now = Date.now();
-    this.lastTriggeredExperience = { domain, reason, timestamp: now };
+    let requestedDomain: string;
+    let approvalDomain: string;
+    let finalReason: string;
+
+    if (typeof target === 'string') {
+      requestedDomain = target;
+      approvalDomain = target;
+      finalReason = reason || 'Blocked by family rules';
+    } else {
+      requestedDomain = target.requestedDomain;
+      approvalDomain = target.approvalDomain || target.requestedDomain;
+      finalReason = target.reason || reason || 'Blocked by family rules';
+    }
+
+    this.lastTriggeredExperience = { domain: requestedDomain, reason: finalReason, timestamp: now };
 
     if (this.onBlockExperienceCallback) {
-      this.onBlockExperienceCallback(domain, reason);
+      this.onBlockExperienceCallback(requestedDomain, finalReason);
     }
 
     // Delegate presentation to User Session Helper via authenticated local IPC
-    return blockIpcServer.presentBlock(domain, reason, this.port);
+    return blockIpcServer.presentBlock(
+      {
+        requestedDomain,
+        approvalDomain,
+        reason: finalReason,
+      },
+      undefined,
+      this.port
+    );
   }
 
   public start(port: number = 8880): Promise<void> {
@@ -133,6 +284,20 @@ export class BlockPageServer {
     return new Promise((resolve) => {
       this.server = http.createServer((req, res) => {
         const parsed = url.parse(req.url || '', true);
+
+        // Status Polling Endpoint for Parent Approval
+        if (parsed.pathname === '/request-status' && req.method === 'GET') {
+          const reqId = (parsed.query.id as string) || '';
+          const qDomain = (parsed.query.domain as string) || '';
+          const statusResult = this.getRequestStatus(reqId, qDomain);
+
+          res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store, no-cache, must-revalidate',
+          });
+          res.end(JSON.stringify(statusResult));
+          return;
+        }
 
         if (parsed.pathname === '/submit-request' && req.method === 'POST') {
           let body = '';
@@ -159,8 +324,22 @@ export class BlockPageServer {
               });
 
               if (response.ok) {
+                const respData = await response.json().catch(() => ({}));
+                const requestId = respData.id || respData.requestId || '';
+                const respDomain = respData.domain || data.domain;
+
+                if (requestId) {
+                  this.recordPendingRequest(requestId, respDomain);
+                }
+
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ success: true }));
+                res.end(
+                  JSON.stringify({
+                    success: true,
+                    requestId,
+                    domain: respDomain,
+                  })
+                );
               } else {
                 res.writeHead(400, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Failed to submit request' }));
@@ -179,12 +358,14 @@ export class BlockPageServer {
         }
 
         // Render Block Landing Page (/ or /blocked)
-        const rawDomain = (parsed.query.domain as string) || 'This website';
+        const rawRequestedDomain = (parsed.query.domain as string) || 'This website';
+        const rawApprovalDomain = (parsed.query.approvalDomain as string) || rawRequestedDomain;
         const rawReason = (parsed.query.reason as string) || '';
         const active = this.activeChildProvider ? this.activeChildProvider() : null;
         const profileDisplay = active?.childName || 'Child';
 
-        const safeDomain = escapeHtml(rawDomain);
+        const safeRequestedDomain = escapeHtml(rawRequestedDomain);
+        const safeApprovalDomain = escapeHtml(rawApprovalDomain);
         const friendlyReason = escapeHtml(formatFriendlyReason(rawReason));
         const safeProfile = escapeHtml(profileDisplay);
 
@@ -349,17 +530,45 @@ export class BlockPageServer {
       margin-bottom: 12px;
     }
     input:focus { outline: 2px solid #3b82f6; }
-    .success-msg {
+    .status-card {
       display: none;
-      background: rgba(34, 197, 94, 0.15);
-      border: 1px solid rgba(34, 197, 94, 0.3);
-      color: #4ade80;
-      padding: 16px;
-      border-radius: 16px;
-      font-size: 14px;
-      font-weight: 700;
+      border-radius: 20px;
+      padding: 24px 20px;
       margin-top: 20px;
       text-align: center;
+      animation: fadeIn 0.3s ease;
+    }
+    .status-pending {
+      background: rgba(30, 58, 138, 0.25);
+      border: 1px solid rgba(59, 130, 246, 0.4);
+      color: #93c5fd;
+    }
+    .status-approved {
+      background: rgba(22, 101, 52, 0.25);
+      border: 1px solid rgba(34, 197, 94, 0.4);
+      color: #86efac;
+    }
+    .status-denied {
+      background: rgba(153, 27, 27, 0.25);
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      color: #fca5a5;
+    }
+    .spinner {
+      display: inline-block;
+      width: 28px;
+      height: 28px;
+      border: 3px solid rgba(147, 197, 253, 0.3);
+      border-radius: 50%;
+      border-top-color: #60a5fa;
+      animation: spin 1s ease-in-out infinite;
+      margin-bottom: 12px;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
     }
   </style>
 </head>
@@ -377,7 +586,8 @@ export class BlockPageServer {
     <div><span class="profile-pill">Profile: ${safeProfile}</span></div>
 
     <h1>This site is blocked</h1>
-    <div class="domain-target">${safeDomain}</div>
+    <div class="domain-target">${safeApprovalDomain}</div>
+    ${rawRequestedDomain.toLowerCase() !== rawApprovalDomain.toLowerCase() ? `<div style="font-size: 11px; color: #64748b; margin-top: 4px; font-family: monospace;">Requested: ${safeRequestedDomain}</div>` : ''}
     <div class="subtitle-msg">This site has been restricted by your family protection settings.</div>
 
     <div class="reason-box">
@@ -401,19 +611,63 @@ export class BlockPageServer {
       <input type="text" id="reasonInput" placeholder="e.g. Need this for homework or study">
       <div style="display: flex; gap: 8px;">
         <button class="btn btn-secondary" style="flex: 1;" onclick="cancelAskForm()">Cancel</button>
-        <button class="btn btn-primary" style="flex: 2;" onclick="submitRequest()">Send Request</button>
+        <button class="btn btn-primary" id="sendRequestBtn" style="flex: 2;" onclick="submitRequest()">Send Request</button>
       </div>
     </div>
 
-    <div id="successMsg" class="success-msg">
-      ✓ Request sent to your parent! They will receive a notification.
+    <div id="pendingStatus" class="status-card status-pending">
+      <div class="spinner"></div>
+      <div style="font-weight: 800; font-size: 16px; margin-bottom: 6px; color: #ffffff;">Request sent to your parent.</div>
+      <div style="font-size: 13px; color: #cbd5e1;">Waiting for parent approval...</div>
+    </div>
+
+    <div id="approvedStatus" class="status-card status-approved">
+      <div style="font-size: 32px; margin-bottom: 8px;">✓</div>
+      <div style="font-weight: 800; font-size: 18px; margin-bottom: 6px; color: #ffffff;">Approved by your parent</div>
+      <div style="font-size: 13px; color: #cbd5e1; margin-bottom: 18px;">
+        Access is available for: <span id="approvedDuration" style="font-weight: 700; color: #86efac;">15 minutes</span>
+      </div>
+      <button class="btn btn-primary" id="continueBtn" style="background: linear-gradient(135deg, #16a34a, #15803d); width: 100%;">
+        Continue to website
+      </button>
+    </div>
+
+    <div id="deniedStatus" class="status-card status-denied">
+      <div style="font-size: 32px; margin-bottom: 8px;">✕</div>
+      <div style="font-weight: 800; font-size: 18px; margin-bottom: 6px; color: #ffffff;">Request declined by your parent.</div>
+      <div style="font-size: 13px; color: #cbd5e1; margin-bottom: 18px;">
+        Your parent decided not to approve access at this time.
+      </div>
+      <button class="btn btn-secondary" style="width: 100%;" onclick="goBack()">
+        ← Go Back
+      </button>
     </div>
 
     <div class="footer-brand">Protected by SafeBrowse</div>
   </div>
 
   <script>
-    const TARGET_DOMAIN = ${JSON.stringify(rawDomain)};
+    const REQUESTED_DOMAIN = ${JSON.stringify(rawRequestedDomain)};
+    const APPROVAL_DOMAIN = ${JSON.stringify(rawApprovalDomain)};
+    const TARGET_DOMAIN = APPROVAL_DOMAIN;
+
+    let pollTimer = null;
+    let currentRequestId = '';
+
+    function getSafeContinueUrl(domain) {
+      if (!domain) return 'https://google.com';
+      let clean = String(domain).trim().toLowerCase();
+      if (clean.startsWith('*.')) {
+        clean = clean.substring(2);
+      } else if (clean.startsWith('.')) {
+        clean = clean.substring(1);
+      }
+      clean = clean.replace(/[^a-z0-9.-]/g, '');
+      if (!clean || clean.indexOf('.') === -1) {
+        return 'https://google.com';
+      }
+      return 'https://' + clean;
+    }
 
     function goBack() {
       if (window.history.length > 1) {
@@ -435,23 +689,77 @@ export class BlockPageServer {
     }
 
     async function submitRequest() {
+      const btn = document.getElementById('sendRequestBtn');
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = 'Sending...';
+
       const reason = document.getElementById('reasonInput').value.trim();
       try {
         const res = await fetch('/submit-request', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ domain: TARGET_DOMAIN, reason: reason })
+          body: JSON.stringify({ domain: APPROVAL_DOMAIN, reason: reason })
         });
         const respData = await res.json().catch(function() { return {}; });
         if (res.ok) {
+          currentRequestId = respData.requestId || '';
           document.getElementById('askForm').style.display = 'none';
-          document.getElementById('successMsg').style.display = 'block';
+          document.getElementById('pendingStatus').style.display = 'block';
+          startStatusPolling();
         } else {
+          btn.disabled = false;
+          btn.textContent = 'Send Request';
           alert(respData.error || 'SafeBrowse service is temporarily unreachable. Please ask your parent directly.');
         }
       } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Send Request';
         alert('SafeBrowse service is temporarily unreachable. Please ask your parent directly.');
       }
+    }
+
+    function startStatusPolling() {
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(checkRequestStatus, 1500);
+    }
+
+    async function checkRequestStatus() {
+      try {
+        const url = '/request-status?id=' + encodeURIComponent(currentRequestId) + '&domain=' + encodeURIComponent(APPROVAL_DOMAIN);
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const data = await res.json();
+
+        if (data.allowed || data.status === 'APPROVED') {
+          if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+          showApprovedState(data);
+        } else if (data.status === 'DENIED') {
+          if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+          showDeniedState();
+        }
+      } catch (e) {}
+    }
+
+    function showApprovedState(data) {
+      document.getElementById('pendingStatus').style.display = 'none';
+      document.getElementById('approvedStatus').style.display = 'block';
+      const dur = data.duration || 15;
+      document.getElementById('approvedDuration').textContent = dur + ' minutes';
+
+      const continueUrl = getSafeContinueUrl(APPROVAL_DOMAIN);
+      document.getElementById('continueBtn').onclick = function() {
+        window.location.href = continueUrl;
+      };
+
+      setTimeout(function() {
+        window.location.href = continueUrl;
+      }, 1500);
+    }
+
+    function showDeniedState() {
+      document.getElementById('pendingStatus').style.display = 'none';
+      document.getElementById('deniedStatus').style.display = 'block';
     }
   </script>
 </body>

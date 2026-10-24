@@ -1,7 +1,7 @@
 import { PolicySyncClient, WINDOWS_AGENT_VERSION, BUILD_COMMIT } from './sync-client';
 import { BlockPageServer } from './block-server';
 import { blockIpcServer } from './block-ipc';
-import { DnsFilterProxy } from './dns-proxy';
+import { DnsFilterProxy, BlockExperienceContext } from './dns-proxy';
 import { WindowsProcessLimiter } from './process-limiter';
 import { configManager, DeviceConfig, ConfigManager } from './config-manager';
 import { networkManager, logServiceMessage, CurrentEnforcementInspection } from './network-manager';
@@ -478,6 +478,23 @@ async function runServiceMode(): Promise<void> {
     recomputeAndApplyEngineStatus(`Policy status changed: ${prevStatus} -> ${newStatus}`);
   });
 
+  syncClient.setOnAccessRequestResolved(async (event) => {
+    if (blockServer) {
+      blockServer.handleAccessRequestResolved(event);
+    }
+    if (event.status === 'APPROVED') {
+      try {
+        await networkManager.flushDnsCache();
+        logServiceMessage(
+          'INFO',
+          `[AskParent] Approval policy applied for '${event.domain || 'unknown'}'; DNS cache flushed.`
+        );
+      } catch (flushErr: any) {
+        logServiceMessage('WARN', `[AskParent] DNS flush error on approval: ${flushErr.message}`);
+      }
+    }
+  });
+
   syncClient.setDeviceStateProvider(() => {
     const currentPol = sessionMonitor.getCurrentPolicy();
     const hasMultiple = sessionMonitor.hasMultipleSessions();
@@ -504,6 +521,7 @@ async function runServiceMode(): Promise<void> {
     undefined,
     config.deviceToken
   );
+  blockServer.setPolicyProvider(() => syncClient?.getActivePolicy() ?? null);
   await blockServer.start(8880);
 
   // Connect active session and multi-session policy providers to Block IPC Server
@@ -549,11 +567,12 @@ async function runServiceMode(): Promise<void> {
   // 3b. Wire Activity Telemetry Outbox & Block IPC Presentation
   activityReporter.setConfig(config);
   activityReporter.start();
-  dnsProxy.setOnBlockExperienceTriggered((domain, reason) => {
-    const result = blockIpcServer.presentBlock(domain, reason, 8880);
+  dnsProxy.setOnBlockExperienceTriggered((context: BlockExperienceContext) => {
+    const result = blockIpcServer.presentBlock(context, undefined, 8880);
+    const domainLabel = typeof context === 'string' ? context : `${context.requestedDomain} (scope: ${context.approvalDomain})`;
     logServiceMessage(
       'INFO',
-      `[SafeBrowse Service] Block presentation for '${domain}': ${result.reason} (sent=${result.sent})`
+      `[SafeBrowse Service] Block presentation for '${domainLabel}': ${result.reason} (sent=${result.sent})`
     );
   });
   dnsProxy.setOnQueryEvaluated((event) => {

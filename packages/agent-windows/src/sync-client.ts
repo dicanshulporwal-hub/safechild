@@ -20,6 +20,18 @@ export interface DeviceConfig {
   backendUrl: string;
 }
 
+export interface AccessRequestResolutionEvent {
+  requestId?: string;
+  status: 'APPROVED' | 'DENIED';
+  domain?: string;
+  resolvedDuration?: number;
+  expiresAt?: string;
+  childId?: string;
+  policy?: Policy;
+}
+
+export type AccessRequestResolvedCallback = (event: AccessRequestResolutionEvent) => void | Promise<void>;
+
 export class PolicySyncClient {
   private config: DeviceConfig;
   private currentPolicy: Policy | null = null;
@@ -36,6 +48,7 @@ export class PolicySyncClient {
     protectionStatus?: string;
   };
   private onPolicyStatusChangeCallback?: (newStatus: PolicyStatus, previousStatus: PolicyStatus) => void;
+  private onAccessRequestResolvedCallback?: AccessRequestResolvedCallback;
 
   private childPolicies: Map<string, Policy> = new Map();
   private activeChildId: string | null = null;
@@ -175,6 +188,10 @@ export class PolicySyncClient {
 
   public setOnPolicyStatusChange(cb: (newStatus: PolicyStatus, previousStatus: PolicyStatus) => void): void {
     this.onPolicyStatusChangeCallback = cb;
+  }
+
+  public setOnAccessRequestResolved(cb?: AccessRequestResolvedCallback): void {
+    this.onAccessRequestResolvedCallback = cb;
   }
 
   private setPolicyStatus(newStatus: PolicyStatus): void {
@@ -387,16 +404,36 @@ export class PolicySyncClient {
             }
           } else if (msg.type === 'ACCESS_REQUEST_RESOLVED') {
             const targetChild = msg.childId || this.config.childId;
-            if (msg.payload.policy) {
-              console.log(`[Agent] Access request approved! Applied policy v${msg.payload.policy.version} (child: ${targetChild})`);
+            const req = msg.payload?.request;
+            const policy = msg.payload?.policy;
+            const status: 'APPROVED' | 'DENIED' = req?.status === 'APPROVED' ? 'APPROVED' : 'DENIED';
+
+            if (policy) {
+              console.log(`[Agent] Access request approved! Applied policy v${policy.version} (child: ${targetChild})`);
               if (targetChild) {
-                this.childPolicies.set(targetChild, msg.payload.policy);
+                this.childPolicies.set(targetChild, policy);
                 try {
-                  fs.writeFileSync(this.getCacheFilePathForChild(targetChild), JSON.stringify(msg.payload.policy, null, 2), 'utf-8');
+                  fs.writeFileSync(this.getCacheFilePathForChild(targetChild), JSON.stringify(policy, null, 2), 'utf-8');
                 } catch {}
               }
               if (!this.activeChildId || this.activeChildId === targetChild || targetChild === this.config.childId) {
-                this.saveCachedPolicy(msg.payload.policy);
+                this.saveCachedPolicy(policy);
+              }
+            }
+
+            if (this.onAccessRequestResolvedCallback) {
+              try {
+                this.onAccessRequestResolvedCallback({
+                  requestId: req?.id,
+                  status,
+                  domain: req?.domain,
+                  resolvedDuration: req?.resolvedDuration,
+                  expiresAt: req?.expiresAt,
+                  childId: targetChild,
+                  policy: policy || undefined,
+                });
+              } catch (cbErr: any) {
+                console.error('[Agent] Error in onAccessRequestResolved callback:', cbErr?.message || cbErr);
               }
             }
           }

@@ -5,10 +5,13 @@ import * as fs from 'fs';
 import { execFile } from 'child_process';
 import { ResolvedUserPolicy, MultiSessionCheckResult } from './account-manager';
 import { logServiceMessage } from './network-manager';
+import { BlockExperienceContext } from './dns-proxy';
 
 export interface BlockPresentationMessage {
   type: 'PRESENT_BLOCK';
-  domain: string;
+  domain: string; // legacy / requestedDomain
+  requestedDomain?: string;
+  approvalDomain?: string;
   reason: string;
   url: string;
   timestamp: number;
@@ -40,6 +43,8 @@ export interface ConnectedHelper {
 
 export interface PendingBlockPresentation {
   domain: string;
+  requestedDomain: string;
+  approvalDomain: string;
   reason: string;
   blockPort: number;
   timestamp: number;
@@ -286,20 +291,40 @@ export class BlockIpcServer {
         this.pendingPresentations.delete(key);
         logServiceMessage(
           'INFO',
-          `[BlockIpcServer] Retrying pending block presentation for domain '${pending.domain}' on newly registered helper (SessionId=${helper.sessionId ?? 'N/A'})`
+          `[BlockIpcServer] Retrying pending block presentation for scope '${pending.approvalDomain || pending.domain}' (requested: '${pending.requestedDomain || pending.domain}') on newly registered helper (SessionId=${helper.sessionId ?? 'N/A'})`
         );
-        this.presentBlock(pending.domain, pending.reason, pending.blockPort);
+        this.presentBlock({
+          requestedDomain: pending.requestedDomain || pending.domain,
+          approvalDomain: pending.approvalDomain || pending.domain,
+          reason: pending.reason,
+        }, undefined, pending.blockPort);
       }
     }
   }
 
   public presentBlock(
-    domain: string,
-    reason: string,
+    target: string | BlockExperienceContext,
+    reason?: string,
     blockPort: number = 8880
   ): { sent: boolean; reason: string; url?: string } {
     const now = Date.now();
-    const normalizedDomain = normalizeDomainForDebounce(domain);
+    let requestedDomain: string;
+    let approvalDomain: string;
+    let finalReason: string;
+
+    if (typeof target === 'string') {
+      requestedDomain = target;
+      approvalDomain = target;
+      finalReason = reason || 'Blocked by family rules';
+    } else {
+      requestedDomain = target.requestedDomain || 'This website';
+      approvalDomain = target.approvalDomain || target.requestedDomain || 'This website';
+      finalReason = target.reason || reason || 'Blocked by family rules';
+    }
+
+    const normalizedReqDomain = normalizeDomainForDebounce(requestedDomain);
+    const normalizedAppDomain = normalizeDomainForDebounce(approvalDomain);
+    const debounceKey = normalizedAppDomain || normalizedReqDomain;
 
     // 1. Check Console User Policy (Parent / Managed Child)
     const policy = this.activePolicyProvider ? this.activePolicyProvider() : null;
@@ -326,8 +351,8 @@ export class BlockIpcServer {
       return { sent: false, reason: 'CONCURRENT_SESSIONS_SAFETY_HOLD' };
     }
 
-    // 3. Debounce: Normalized Domain Check (10-15s window, default 12s)
-    const lastDomainTime = this.lastDomainTriggerTimes.get(normalizedDomain) || 0;
+    // 3. Debounce: Logical Scope Check (approvalDomain preferred, fallback to requestedDomain)
+    const lastDomainTime = this.lastDomainTriggerTimes.get(debounceKey) || 0;
     if (now - lastDomainTime < this.domainDebounceMs) {
       return { sent: false, reason: 'DOMAIN_DEBOUNCED' };
     }
@@ -338,9 +363,10 @@ export class BlockIpcServer {
     }
 
     // 5. Construct Safe Block Landing URL
-    const safeDomain = encodeURIComponent(domain);
-    const safeReason = encodeURIComponent(reason);
-    const blockUrl = `http://127.0.0.1:${blockPort}/blocked?domain=${safeDomain}&reason=${safeReason}`;
+    const safeReqDomain = encodeURIComponent(requestedDomain);
+    const safeAppDomain = encodeURIComponent(approvalDomain);
+    const safeReason = encodeURIComponent(finalReason);
+    const blockUrl = `http://127.0.0.1:${blockPort}/blocked?domain=${safeReqDomain}&approvalDomain=${safeAppDomain}&reason=${safeReason}`;
 
     const validation = validateBlockUrl(blockUrl, blockPort);
     if (!validation.valid) {
@@ -351,8 +377,10 @@ export class BlockIpcServer {
     const eventId = `evt-${now}-${Math.random().toString(36).substring(2, 8)}`;
     const payload: BlockPresentationMessage = {
       type: 'PRESENT_BLOCK',
-      domain,
-      reason,
+      domain: requestedDomain,
+      requestedDomain,
+      approvalDomain,
+      reason: finalReason,
       url: blockUrl,
       timestamp: now,
       eventId,
@@ -399,10 +427,12 @@ export class BlockIpcServer {
 
     // If helper is missing, store bounded pending presentation and trigger self-healing launcher
     if (matchedSockets.length === 0) {
-      const pendingKey = `${activeSessionId ?? 'default'}:${normalizedDomain}`;
+      const pendingKey = `${activeSessionId ?? 'default'}:${debounceKey}`;
       this.pendingPresentations.set(pendingKey, {
-        domain,
-        reason,
+        domain: requestedDomain,
+        requestedDomain,
+        approvalDomain,
+        reason: finalReason,
         blockPort,
         timestamp: now,
         sessionId: activeSessionId,
@@ -433,9 +463,13 @@ export class BlockIpcServer {
 
     if (targetFound) {
       // ONLY update debounce timestamps when block was actually delivered!
-      this.lastDomainTriggerTimes.set(normalizedDomain, now);
+      this.lastDomainTriggerTimes.set(debounceKey, now);
+      this.lastDomainTriggerTimes.set(normalizedReqDomain, now);
       this.lastGlobalTriggerTime = now;
-      logServiceMessage('INFO', `[BlockIpcServer] Block presentation for '${domain}': PRESENTED (sent=true)`);
+      logServiceMessage(
+        'INFO',
+        `[BlockIpcServer] Block presentation for '${requestedDomain}' (scope: '${approvalDomain}'): PRESENTED (sent=true)`
+      );
     }
 
     return {

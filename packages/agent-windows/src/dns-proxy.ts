@@ -7,6 +7,14 @@ export interface UpstreamDnsServer {
   port: number;
 }
 
+export interface BlockExperienceContext {
+  requestedDomain: string;
+  approvalDomain: string;
+  reason: string;
+  matchedDomain?: string;
+  matchedRuleType?: string;
+}
+
 export class DnsFilterProxy {
   private socket: dgram.Socket | null = null;
   private getPolicy: () => Policy | null;
@@ -18,6 +26,30 @@ export class DnsFilterProxy {
     action: 'BLOCKED' | 'ALLOWED';
     reason?: string;
   }) => void;
+  private _onBlockExperienceTriggered?: (context: BlockExperienceContext) => void;
+
+  public get onBlockExperienceTriggered(): ((target: string | BlockExperienceContext, reason?: string) => void) | undefined {
+    if (!this._onBlockExperienceTriggered) return undefined;
+    return (target: string | BlockExperienceContext, reason?: string) => {
+      if (!this._onBlockExperienceTriggered) return;
+      if (typeof target === 'string') {
+        const norm = target.toLowerCase().replace(/\.+$/, '');
+        this._onBlockExperienceTriggered({
+          requestedDomain: norm,
+          approvalDomain: norm,
+          reason: reason || 'Blocked by family rules',
+        });
+      } else {
+        this._onBlockExperienceTriggered(target);
+      }
+    };
+  }
+
+  public set onBlockExperienceTriggered(
+    listener: ((context: BlockExperienceContext) => void) | ((domain: string, reason: string) => void) | undefined
+  ) {
+    this.setOnBlockExperienceTriggered(listener);
+  }
 
   constructor(
     getPolicy: () => Policy | null,
@@ -50,12 +82,23 @@ export class DnsFilterProxy {
     this.onQueryEvaluated = listener;
   }
 
-  private onBlockExperienceTriggered?: (domain: string, reason: string) => void;
-
   public setOnBlockExperienceTriggered(
-    listener?: (domain: string, reason: string) => void
+    listener?: ((context: BlockExperienceContext) => void) | ((domain: string, reason: string) => void)
+  ): void;
+  public setOnBlockExperienceTriggered(
+    listener?: any
   ): void {
-    this.onBlockExperienceTriggered = listener;
+    if (!listener) {
+      this._onBlockExperienceTriggered = undefined;
+      return;
+    }
+    this._onBlockExperienceTriggered = (context: BlockExperienceContext) => {
+      if (listener.length >= 2) {
+        listener(context.requestedDomain, context.reason);
+      } else {
+        listener(context);
+      }
+    };
   }
 
   /**
@@ -319,8 +362,19 @@ export class DnsFilterProxy {
             if (this.onQueryEvaluated) {
               this.onQueryEvaluated({ domain, action: 'BLOCKED', reason: result.reason });
             }
-            if (this.onBlockExperienceTriggered) {
-              this.onBlockExperienceTriggered(domain, result.reason || 'Blocked by family rules');
+            if (this._onBlockExperienceTriggered) {
+              const normDomain = domain.toLowerCase().replace(/\.+$/, '');
+              const approvalDomain = result.matchedDomain
+                ? result.matchedDomain.toLowerCase().replace(/\.+$/, '')
+                : normDomain;
+              const blockContext: BlockExperienceContext = {
+                requestedDomain: normDomain,
+                approvalDomain,
+                reason: result.reason || 'Blocked by family rules',
+                matchedDomain: result.matchedDomain,
+                matchedRuleType: result.matchedRuleType,
+              };
+              this._onBlockExperienceTriggered(blockContext);
             }
             const blockResp = this.buildNxDomainResponse(msg);
             this.socket?.send(blockResp, rinfo.port, rinfo.address);
