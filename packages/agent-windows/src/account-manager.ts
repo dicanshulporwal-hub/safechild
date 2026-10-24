@@ -83,11 +83,26 @@ export interface ResolvedUserPolicy {
   childName: string | null;
   accountName: string;
   sid: string;
+  sessionId?: number | null;
+}
+
+export interface InteractiveSessionInfo {
+  sessionId: number;
+  username: string;
+  isConsole?: boolean;
+}
+
+export interface DisconnectedSessionInfo {
+  sessionId: number;
+  username: string;
 }
 
 export interface MultiSessionCheckResult {
   hasMultipleSessions: boolean;
+  hasMultipleActiveInteractiveSessions?: boolean;
   sessionCount: number;
+  activeInteractiveSessions?: InteractiveSessionInfo[];
+  disconnectedSessions?: DisconnectedSessionInfo[];
   activeUsers: string[];
   warning: string | null;
 }
@@ -98,7 +113,12 @@ export class WindowsAccountManager {
   private mockAccounts: WindowsAccount[] | null = null;
   private mockConsoleSid: string | null = null;
   private mockConsoleUsername: string | null = null;
+  private mockConsoleSessionId: number | null = null;
   private mockInteractiveSessions: string[] | null = null;
+  private mockSessions: {
+    active?: Array<{ sessionId: number; username: string; isConsole?: boolean }>;
+    disconnected?: Array<{ sessionId: number; username: string }>;
+  } | null = null;
 
   constructor(customBaseDirOrConfig?: string | ConfigManager) {
     if (customBaseDirOrConfig) {
@@ -126,9 +146,23 @@ export class WindowsAccountManager {
     }
   }
 
-  public setMockConsoleSessionForTesting(sid: string | null, username: string | null = null): void {
+  public setMockConsoleSessionForTesting(sid: string | null, username: string | null = null, sessionId: number | null = null): void {
     this.mockConsoleSid = sid;
     this.mockConsoleUsername = username;
+    this.mockConsoleSessionId = sessionId;
+  }
+
+  public setMockConsoleSessionIdForTesting(sessionId: number | null): void {
+    this.mockConsoleSessionId = sessionId;
+  }
+
+  public setMockSessionsForTesting(
+    sessions: {
+      active?: Array<{ sessionId: number; username: string; isConsole?: boolean }>;
+      disconnected?: Array<{ sessionId: number; username: string }>;
+    } | null
+  ): void {
+    this.mockSessions = sessions;
   }
 
   private customStagingDir: string | null = null;
@@ -1143,12 +1177,13 @@ export class WindowsAccountManager {
    * Reads from active-session.json written by SafeBrowseServiceHost.cs
    * or evaluates via fallback.
    */
-  public async getActiveConsoleSession(): Promise<{ sid: string | null; username: string | null }> {
+  public async getActiveConsoleSession(): Promise<{ sid: string | null; username: string | null; sessionId?: number | null }> {
     if (this.mockConsoleSid) {
       const mapping = await this.getMappingForSid(this.mockConsoleSid);
       return {
         sid: this.mockConsoleSid,
         username: this.mockConsoleUsername || mapping?.windowsUsername || 'ConsoleUser',
+        sessionId: this.mockConsoleSessionId !== null ? this.mockConsoleSessionId : 1,
       };
     }
 
@@ -1158,9 +1193,11 @@ export class WindowsAccountManager {
         const raw = fs.readFileSync(sessionFile, 'utf8');
         const data = JSON.parse(raw);
         if (data.windowsSid) {
+          const sessId = typeof data.sessionId === 'number' ? data.sessionId : (typeof data.activeConsoleSession === 'number' ? data.activeConsoleSession : null);
           return {
             sid: data.windowsSid,
             username: data.windowsUsername || null,
+            sessionId: sessId,
           };
         }
       } catch {}
@@ -1196,12 +1233,13 @@ export class WindowsAccountManager {
           return {
             sid: parsed.SID || null,
             username: parsed.UserName || null,
+            sessionId: null,
           };
         }
       } catch {}
     }
 
-    return { sid: null, username: null };
+    return { sid: null, username: null, sessionId: null };
   }
 
   /**
@@ -1212,11 +1250,15 @@ export class WindowsAccountManager {
   public async resolveUserPolicy(activeSid?: string | null, activeUsername?: string | null): Promise<ResolvedUserPolicy> {
     let sid = activeSid;
     let username = activeUsername;
+    let sessionId: number | null = this.mockConsoleSessionId !== null ? this.mockConsoleSessionId : null;
 
     if (!sid && !username) {
       const session = await this.getActiveConsoleSession();
       sid = session.sid;
       username = session.username;
+      if (typeof session.sessionId === 'number') {
+        sessionId = session.sessionId;
+      }
     }
 
     if (!sid && !username) {
@@ -1227,6 +1269,7 @@ export class WindowsAccountManager {
         childName: null,
         accountName: 'Unknown',
         sid: '',
+        sessionId,
       };
     }
 
@@ -1249,6 +1292,7 @@ export class WindowsAccountManager {
         childName: null,
         accountName: resolvedName,
         sid: resolvedSid,
+        sessionId,
       };
     }
 
@@ -1259,6 +1303,7 @@ export class WindowsAccountManager {
       childName: mapping.childName || mapping.windowsUsername,
       accountName: resolvedName,
       sid: resolvedSid,
+      sessionId,
     };
   }
 
@@ -1345,14 +1390,47 @@ export class WindowsAccountManager {
    * Evaluates if multiple interactive Windows user sessions are concurrently logged in (Fast User Switching).
    * Because userspace loopback DNS cannot isolate packets between concurrent sessions,
    * multiple simultaneously active desktop sessions require an explicit warning and attention state.
+   *
+   * CRITICAL ARCHITECTURAL DISTINCTION:
+   * Only ACTIVE desktop sessions (WTSActive) count as simultaneous concurrent users.
+   * Disconnected sessions (WTSDisconnected from Fast User Switching) do NOT trigger
+   * ATTENTION_REQUIRED or concurrency holds, and do NOT suppress block presentation.
    */
   public async detectMultipleInteractiveSessions(): Promise<MultiSessionCheckResult> {
+    if (this.mockSessions !== null) {
+      const active = (this.mockSessions.active || []).map((s) => ({
+        sessionId: s.sessionId,
+        username: s.username,
+        isConsole: s.isConsole ?? false,
+      }));
+      const disconnected = (this.mockSessions.disconnected || []).map((s) => ({
+        sessionId: s.sessionId,
+        username: s.username,
+      }));
+      const hasMultiple = active.length > 1;
+      return {
+        hasMultipleSessions: hasMultiple,
+        hasMultipleActiveInteractiveSessions: hasMultiple,
+        sessionCount: active.length,
+        activeInteractiveSessions: active,
+        disconnectedSessions: disconnected,
+        activeUsers: active.map((a) => a.username),
+        warning: hasMultiple
+          ? 'Multiple Windows users are currently signed in. For reliable SafeBrowse protection on this Pilot version, sign out other Windows users before switching accounts.'
+          : null,
+      };
+    }
+
     if (this.mockInteractiveSessions !== null) {
       const users = this.mockInteractiveSessions;
       const hasMultiple = users.length > 1;
+      const active = users.map((u, idx) => ({ sessionId: idx + 1, username: u, isConsole: idx === 0 }));
       return {
         hasMultipleSessions: hasMultiple,
+        hasMultipleActiveInteractiveSessions: hasMultiple,
         sessionCount: users.length,
+        activeInteractiveSessions: active,
+        disconnectedSessions: [],
         activeUsers: users,
         warning: hasMultiple
           ? 'Multiple Windows users are currently signed in. For reliable SafeBrowse protection on this Pilot version, sign out other Windows users before switching accounts.'
@@ -1360,10 +1438,47 @@ export class WindowsAccountManager {
       };
     }
 
+    // Check active-session.json written by SafeBrowseServiceHost
+    const sessionFile = this.getActiveSessionFilePath();
+    if (fs.existsSync(sessionFile)) {
+      try {
+        const raw = fs.readFileSync(sessionFile, 'utf8');
+        const data = JSON.parse(raw);
+        if (Array.isArray(data.activeSessions) && data.activeSessions.length > 0) {
+          const active: InteractiveSessionInfo[] = data.activeSessions.map((s: any) => ({
+            sessionId: Number(s.sessionId),
+            username: String(s.username || ''),
+            isConsole: Boolean(s.isConsole),
+          }));
+          const disconnected: DisconnectedSessionInfo[] = Array.isArray(data.disconnectedSessions)
+            ? data.disconnectedSessions.map((s: any) => ({
+                sessionId: Number(s.sessionId),
+                username: String(s.username || ''),
+              }))
+            : [];
+          const hasMultiple = active.length > 1;
+          return {
+            hasMultipleSessions: hasMultiple,
+            hasMultipleActiveInteractiveSessions: hasMultiple,
+            sessionCount: active.length,
+            activeInteractiveSessions: active,
+            disconnectedSessions: disconnected,
+            activeUsers: active.map((a) => a.username),
+            warning: hasMultiple
+              ? 'Multiple Windows users are currently signed in. For reliable SafeBrowse protection on this Pilot version, sign out other Windows users before switching accounts.'
+              : null,
+          };
+        }
+      } catch {}
+    }
+
     if (process.platform !== 'win32') {
       return {
         hasMultipleSessions: false,
+        hasMultipleActiveInteractiveSessions: false,
         sessionCount: 1,
+        activeInteractiveSessions: [{ sessionId: 1, username: 'CurrentConsoleUser', isConsole: true }],
+        disconnectedSessions: [],
         activeUsers: ['CurrentConsoleUser'],
         warning: null,
       };
@@ -1373,13 +1488,36 @@ export class WindowsAccountManager {
       const psPath = configManager.getPowerShellPath();
       const psCmd = [
         "$ErrorActionPreference = 'SilentlyContinue'",
-        '$procs = Get-Process -Name explorer -IncludeUserName -ErrorAction SilentlyContinue',
-        'if ($procs) {',
-        '  $users = @($procs | Select-Object -ExpandProperty UserName -Unique | Where-Object { $_ -and $_ -ne "" })',
-        '  $users | ConvertTo-Json -Compress',
-        '} else {',
-        '  "[]"',
+        '$active = @()',
+        '$disc = @()',
+        '$quserOut = quser 2>$null',
+        'if ($quserOut) {',
+        '  $lines = $quserOut -split "`r?`n" | Select-Object -Skip 1',
+        '  foreach ($line in $lines) {',
+        '    $trimmed = $line.Trim()',
+        '    if (-not $trimmed) { continue }',
+        '    if ($trimmed.StartsWith(">")) { $trimmed = $trimmed.Substring(1).Trim() }',
+        '    if ($trimmed -match "^([^\\s]+)\\s+(?:([a-zA-Z0-9_\\-#]+)\\s+)?(\\d+)\\s+([a-zA-Z]+)") {',
+        '      $u = $matches[1]',
+        '      $sname = $matches[2]',
+        '      $id = [int]$matches[3]',
+        '      $state = $matches[4]',
+        '      $isConsole = ($sname -eq "console") -or ($line.StartsWith(">"))',
+        '      if ($state -match "^Act") {',
+        '        $active += @{ sessionId = $id; username = $u; isConsole = $isConsole }',
+        '      } elseif ($state -match "^Disc") {',
+        '        $disc += @{ sessionId = $id; username = $u }',
+        '      }',
+        '    }',
+        '  }',
         '}',
+        'if ($active.Count -eq 0) {',
+        '  $csUser = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue | Select-Object -ExpandProperty UserName)',
+        '  if ($csUser) {',
+        '    $active += @{ sessionId = 1; username = $csUser; isConsole = $true }',
+        '  }',
+        '}',
+        '@{ activeSessions = $active; disconnectedSessions = $disc } | ConvertTo-Json -Compress',
       ].join('; ');
 
       const { stdout } = await execFileAsync(psPath, [
@@ -1393,34 +1531,53 @@ export class WindowsAccountManager {
       ]);
 
       const trimmed = (stdout || '').trim();
-      let users: string[] = [];
       if (trimmed) {
         try {
           const parsed = JSON.parse(trimmed);
-          users = Array.isArray(parsed) ? parsed : [parsed];
-        } catch {
-          if (trimmed && !trimmed.startsWith('[')) {
-            users = [trimmed];
-          }
-        }
+          const activeList = Array.isArray(parsed.activeSessions) ? parsed.activeSessions : [];
+          const discList = Array.isArray(parsed.disconnectedSessions) ? parsed.disconnectedSessions : [];
+
+          const active: InteractiveSessionInfo[] = activeList.map((s: any) => ({
+            sessionId: Number(s.sessionId),
+            username: String(s.username || ''),
+            isConsole: Boolean(s.isConsole),
+          }));
+          const disconnected: DisconnectedSessionInfo[] = discList.map((s: any) => ({
+            sessionId: Number(s.sessionId),
+            username: String(s.username || ''),
+          }));
+
+          const hasMultiple = active.length > 1;
+          return {
+            hasMultipleSessions: hasMultiple,
+            hasMultipleActiveInteractiveSessions: hasMultiple,
+            sessionCount: active.length,
+            activeInteractiveSessions: active,
+            disconnectedSessions: disconnected,
+            activeUsers: active.map((a) => a.username),
+            warning: hasMultiple
+              ? 'Multiple Windows users are currently signed in. For reliable SafeBrowse protection on this Pilot version, sign out other Windows users before switching accounts.'
+              : null,
+          };
+        } catch {}
       }
 
-      const cleanUsers = users.map((u) => (u.includes('\\') ? u.split('\\').pop()! : u)).filter(Boolean);
-      const uniqueUsers = Array.from(new Set(cleanUsers));
-      const hasMultiple = uniqueUsers.length > 1;
-
       return {
-        hasMultipleSessions: hasMultiple,
-        sessionCount: uniqueUsers.length,
-        activeUsers: uniqueUsers,
-        warning: hasMultiple
-          ? 'Multiple Windows users are currently signed in. For reliable SafeBrowse protection on this Pilot version, sign out other Windows users before switching accounts.'
-          : null,
+        hasMultipleSessions: false,
+        hasMultipleActiveInteractiveSessions: false,
+        sessionCount: 1,
+        activeInteractiveSessions: [{ sessionId: 1, username: 'CurrentConsoleUser', isConsole: true }],
+        disconnectedSessions: [],
+        activeUsers: ['CurrentConsoleUser'],
+        warning: null,
       };
     } catch {
       return {
         hasMultipleSessions: false,
+        hasMultipleActiveInteractiveSessions: false,
         sessionCount: 1,
+        activeInteractiveSessions: [],
+        disconnectedSessions: [],
         activeUsers: [],
         warning: null,
       };

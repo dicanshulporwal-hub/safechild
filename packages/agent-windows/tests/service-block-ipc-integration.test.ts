@@ -5,11 +5,13 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as net from 'net';
+import * as http from 'http';
 import {
   BlockIpcServer,
   BlockPresentationMessage,
   HelperRegisterAck,
 } from '../src/block-ipc';
+import { BlockPageServer } from '../src/block-server';
 import { DnsFilterProxy } from '../src/dns-proxy';
 import { ResolvedUserPolicy, MultiSessionCheckResult } from '../src/account-manager';
 import { Policy } from '@safebrowse/shared';
@@ -68,7 +70,8 @@ describe('SafeBrowse Windows Stage C.3.1: Service Block IPC Integration Suite', 
   function createHelperClient(
     pipePath: string,
     accountName: string = 'Manjari',
-    pid: number = 1234
+    pid: number = 1234,
+    sessionId?: number
   ): Promise<{
     socket: net.Socket;
     receivedAcks: HelperRegisterAck[];
@@ -83,13 +86,16 @@ describe('SafeBrowse Windows Stage C.3.1: Service Block IPC Integration Suite', 
 
       socket.on('connect', () => {
         // Send registration message
-        const regMsg = JSON.stringify({
+        const regPayload: any = {
           type: 'REGISTER_HELPER',
           version: '1.0.4-validation',
           accountName,
           pid,
-        }) + '\n';
-        socket.write(regMsg);
+        };
+        if (typeof sessionId === 'number') {
+          regPayload.sessionId = sessionId;
+        }
+        socket.write(JSON.stringify(regPayload) + '\n');
       });
 
       socket.on('data', (chunk) => {
@@ -287,5 +293,332 @@ describe('SafeBrowse Windows Stage C.3.1: Service Block IPC Integration Suite', 
     // Verify socket closed by server
     await new Promise((r) => setTimeout(r, 100));
     assert.strictEqual(clientDisconnected, true);
+  });
+
+  // 7. Physical failure reproduction: FUS disconnected session does NOT suppress active child block presentation
+  test('7. FUS disconnected session (Session 4 Disc) does NOT suppress active child (Session 5 Active Rahul) presentation', async () => {
+    await ipcServer.start();
+
+    // Session 4: Disconnected Parent helper (anshulporwal)
+    const session4Client = await createHelperClient(testSockPath, 'anshulporwal', 4444, 4);
+    // Session 5: Active Child helper (mporwal -> Rahul)
+    const session5Client = await createHelperClient(testSockPath, 'mporwal', 5555, 5);
+
+    try {
+      // Authoritative active console policy: mporwal mapped to child Rahul in Session 5
+      activePolicyState = {
+        accountName: 'mporwal',
+        isManaged: true,
+        childId: 'child-rahul-101',
+        childName: 'Rahul',
+        sid: 'S-1-5-21-12345-1005',
+        sessionId: 5,
+      };
+
+      // Multi-session state with 1 Active session + 1 Disconnected session
+      multiSessionState = {
+        hasMultipleSessions: false,
+        hasMultipleActiveInteractiveSessions: false,
+        sessionCount: 1,
+        activeInteractiveSessions: [{ sessionId: 5, username: 'mporwal', isConsole: true }],
+        disconnectedSessions: [{ sessionId: 4, username: 'anshulporwal' }],
+        activeUsers: ['mporwal'],
+        warning: null,
+      };
+
+      const result = ipcServer.presentBlock('roblox.com', 'EXPLICIT_BLOCK', 8880);
+      assert.strictEqual(result.sent, true);
+      assert.strictEqual(result.reason, 'PRESENTED');
+
+      await new Promise((r) => setTimeout(r, 60));
+
+      // Assert Session 5 (Rahul) helper receives the block presentation
+      assert.strictEqual(session5Client.receivedMessages.length, 1);
+      const msg = session5Client.receivedMessages[0];
+      assert.strictEqual(msg.domain, 'roblox.com');
+      assert.strictEqual(msg.reason, 'EXPLICIT_BLOCK');
+      assert.ok(msg.url.includes('roblox.com'));
+
+      // Assert Session 4 (Disconnected parent) helper receives ZERO messages
+      assert.strictEqual(session4Client.receivedMessages.length, 0);
+    } finally {
+      await session4Client.close();
+      await session5Client.close();
+    }
+  });
+
+  // 8. Real concurrent interactive sessions (Console + RDP) triggers concurrency hold
+  test('8. Real simultaneous active sessions (Active Console + Active RDP) triggers CONCURRENT_SESSIONS_SAFETY_HOLD', async () => {
+    await ipcServer.start();
+
+    const consoleClient = await createHelperClient(testSockPath, 'mporwal', 5555, 5);
+    const rdpClient = await createHelperClient(testSockPath, 'anshulporwal', 7777, 7);
+
+    try {
+      activePolicyState = {
+        accountName: 'mporwal',
+        isManaged: true,
+        childId: 'child-rahul-101',
+        childName: 'Rahul',
+        sid: 'S-1-5-21-12345-1005',
+        sessionId: 5,
+      };
+
+      // Two simultaneous ACTIVE interactive desktop sessions
+      multiSessionState = {
+        hasMultipleSessions: true,
+        hasMultipleActiveInteractiveSessions: true,
+        sessionCount: 2,
+        activeInteractiveSessions: [
+          { sessionId: 5, username: 'mporwal', isConsole: true },
+          { sessionId: 7, username: 'anshulporwal', isConsole: false },
+        ],
+        disconnectedSessions: [],
+        activeUsers: ['mporwal', 'anshulporwal'],
+        warning: 'Multiple Windows users are currently signed in.',
+      };
+
+      const result = ipcServer.presentBlock('roblox.com', 'EXPLICIT_BLOCK', 8880);
+      assert.strictEqual(result.sent, false);
+      assert.strictEqual(result.reason, 'CONCURRENT_SESSIONS_SAFETY_HOLD');
+
+      await new Promise((r) => setTimeout(r, 60));
+      assert.strictEqual(consoleClient.receivedMessages.length, 0);
+      assert.strictEqual(rdpClient.receivedMessages.length, 0);
+    } finally {
+      await consoleClient.close();
+      await rdpClient.close();
+    }
+  });
+
+  // 9. Fast User Switching: Sequential user transitions (Parent -> Child -> Parent)
+  test('9. Fast User Switching sequential user transitions correctly route block presentation', async () => {
+    await ipcServer.start();
+
+    const parentHelper = await createHelperClient(testSockPath, 'anshulporwal', 4444, 4);
+    const childHelper = await createHelperClient(testSockPath, 'mporwal', 5555, 5);
+
+    try {
+      // Step 1: Active user is Rahul (Session 5) -> block presented to childHelper
+      activePolicyState = {
+        accountName: 'mporwal',
+        isManaged: true,
+        childId: 'child-rahul-101',
+        childName: 'Rahul',
+        sid: 'S-1-5-21-12345-1005',
+        sessionId: 5,
+      };
+      multiSessionState = {
+        hasMultipleSessions: false,
+        hasMultipleActiveInteractiveSessions: false,
+        sessionCount: 1,
+        activeInteractiveSessions: [{ sessionId: 5, username: 'mporwal', isConsole: true }],
+        disconnectedSessions: [{ sessionId: 4, username: 'anshulporwal' }],
+        activeUsers: ['mporwal'],
+        warning: null,
+      };
+
+      let res = ipcServer.presentBlock('games.com', 'GAMING', 8880);
+      assert.strictEqual(res.sent, true);
+      await new Promise((r) => setTimeout(r, 50));
+      assert.strictEqual(childHelper.receivedMessages.length, 1);
+      assert.strictEqual(parentHelper.receivedMessages.length, 0);
+
+      // Wait out throttle window (100ms in test setup)
+      await new Promise((r) => setTimeout(r, 120));
+
+      // Step 2: Switch to Parent (Session 4) -> unmanaged transparent bypass
+      activePolicyState = {
+        accountName: 'anshulporwal',
+        isManaged: false,
+        childId: null,
+        childName: null,
+        sid: 'S-1-5-21-12345-1004',
+        sessionId: 4,
+      };
+      multiSessionState = {
+        hasMultipleSessions: false,
+        hasMultipleActiveInteractiveSessions: false,
+        sessionCount: 1,
+        activeInteractiveSessions: [{ sessionId: 4, username: 'anshulporwal', isConsole: true }],
+        disconnectedSessions: [{ sessionId: 5, username: 'mporwal' }],
+        activeUsers: ['anshulporwal'],
+        warning: null,
+      };
+
+      res = ipcServer.presentBlock('adult.com', 'ADULT', 8880);
+      assert.strictEqual(res.sent, false);
+      assert.strictEqual(res.reason, 'PARENT_OR_UNMANAGED_USER');
+      await new Promise((r) => setTimeout(r, 50));
+      assert.strictEqual(parentHelper.receivedMessages.length, 0);
+      assert.strictEqual(childHelper.receivedMessages.length, 1); // unchanged
+    } finally {
+      await parentHelper.close();
+      await childHelper.close();
+    }
+  });
+
+  // 10. Same user with multiple sessions (Session 5 Active, Session 8 Disconnected)
+  test('10. Same user with multiple sessions targets the active session ID only', async () => {
+    await ipcServer.start();
+
+    const activeSessionClient = await createHelperClient(testSockPath, 'mporwal', 5555, 5);
+    const staleSessionClient = await createHelperClient(testSockPath, 'mporwal', 8888, 8);
+
+    try {
+      activePolicyState = {
+        accountName: 'mporwal',
+        isManaged: true,
+        childId: 'child-rahul-101',
+        childName: 'Rahul',
+        sid: 'S-1-5-21-12345-1005',
+        sessionId: 5,
+      };
+      multiSessionState = {
+        hasMultipleSessions: false,
+        hasMultipleActiveInteractiveSessions: false,
+        sessionCount: 1,
+        activeInteractiveSessions: [{ sessionId: 5, username: 'mporwal', isConsole: true }],
+        disconnectedSessions: [{ sessionId: 8, username: 'mporwal' }],
+        activeUsers: ['mporwal'],
+        warning: null,
+      };
+
+      const result = ipcServer.presentBlock('social.com', 'SOCIAL', 8880);
+      assert.strictEqual(result.sent, true);
+      assert.strictEqual(result.reason, 'PRESENTED');
+
+      await new Promise((r) => setTimeout(r, 60));
+      assert.strictEqual(activeSessionClient.receivedMessages.length, 1);
+      assert.strictEqual(staleSessionClient.receivedMessages.length, 0);
+    } finally {
+      await activeSessionClient.close();
+      await staleSessionClient.close();
+    }
+  });
+
+  // 11. Helper absent self-healing trigger
+  test('11. Helper missing in active session triggers self-healing launcher callback', async () => {
+    await ipcServer.start();
+
+    const launchedSessions: Array<number | undefined> = [];
+    ipcServer.setHelperLauncher((sessId) => {
+      launchedSessions.push(sessId);
+    });
+
+    activePolicyState = {
+      accountName: 'mporwal',
+      isManaged: true,
+      childId: 'child-rahul-101',
+      childName: 'Rahul',
+      sid: 'S-1-5-21-12345-1005',
+      sessionId: 5,
+    };
+
+    const result = ipcServer.presentBlock('blocked-site.com', 'BLOCKED', 8880);
+    assert.strictEqual(result.sent, false);
+    assert.strictEqual(result.reason, 'NO_CONNECTED_HELPER');
+    assert.strictEqual(launchedSessions.length, 1);
+    assert.strictEqual(launchedSessions[0], 5);
+
+    // Now helper self-heals and registers with sessionId 5
+    const healedClient = await createHelperClient(testSockPath, 'mporwal', 5556, 5);
+    try {
+      // Clear debounce by waiting debounce window (500ms in test)
+      await new Promise((r) => setTimeout(r, 550));
+
+      const retryResult = ipcServer.presentBlock('blocked-site.com', 'BLOCKED', 8880);
+      assert.strictEqual(retryResult.sent, true);
+      assert.strictEqual(retryResult.reason, 'PRESENTED');
+
+      await new Promise((r) => setTimeout(r, 60));
+      assert.strictEqual(healedClient.receivedMessages.length, 1);
+    } finally {
+      await healedClient.close();
+    }
+  });
+
+  // 12. Ask Parent End-to-End: Active child Rahul drives access request
+  test('12. Ask Parent End-to-End: Active child Rahul policy drives backend access request', async () => {
+    const backendRequests: any[] = [];
+    const mockBackend = http.createServer((req, res) => {
+      if (req.url === '/api/requests' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => {
+          backendRequests.push({
+            headers: req.headers,
+            body: JSON.parse(body),
+          });
+          res.writeHead(201, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, id: 'req-e2e-1' }));
+        });
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    await new Promise<void>((resolve) => {
+      mockBackend.listen(0, '127.0.0.1', () => resolve());
+    });
+    const backendPort = (mockBackend.address() as any).port;
+
+    const blockPageServer = new BlockPageServer(
+      `http://127.0.0.1:${backendPort}`,
+      'fallback-child-default',
+      'device-laptop-pilot',
+      () => ({ childId: 'child-rahul-101', childName: 'Rahul' }),
+      'auth-device-token-abc'
+    );
+
+    const testBlockPagePort = 39880;
+    await blockPageServer.start(testBlockPagePort);
+
+    try {
+      // Child in active session clicks "Ask Parent"
+      const reqPayload = JSON.stringify({
+        domain: 'youtube.com',
+        reason: 'Educational video access',
+      });
+
+      const response = await new Promise<{ statusCode: number; data: any }>((resolve, reject) => {
+        const req = http.request(
+          `http://127.0.0.1:${testBlockPagePort}/submit-request`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(reqPayload),
+            },
+          },
+          (res) => {
+            let data = '';
+            res.on('data', (c) => (data += c));
+            res.on('end', () => {
+              resolve({ statusCode: res.statusCode || 500, data: JSON.parse(data) });
+            });
+          }
+        );
+        req.on('error', reject);
+        req.write(reqPayload);
+        req.end();
+      });
+
+      assert.strictEqual(response.statusCode, 200);
+      assert.strictEqual(response.data.success, true);
+
+      // Verify backend received the request strictly attributed to Rahul
+      assert.strictEqual(backendRequests.length, 1);
+      const bReq = backendRequests[0];
+      assert.strictEqual(bReq.headers['x-device-id'], 'device-laptop-pilot');
+      assert.strictEqual(bReq.headers['x-device-token'], 'auth-device-token-abc');
+      assert.strictEqual(bReq.body.childId, 'child-rahul-101');
+      assert.strictEqual(bReq.body.domain, 'youtube.com');
+      assert.strictEqual(bReq.body.reason, 'Educational video access');
+    } finally {
+      blockPageServer.stop();
+      await new Promise<void>((resolve) => mockBackend.close(() => resolve()));
+    }
   });
 });

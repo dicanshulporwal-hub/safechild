@@ -20,15 +20,26 @@ export class SafeBrowseUserSessionHelper {
   private browserLauncher: BrowserLaunchHandler;
   private onBlockReceivedCallback?: (msg: BlockPresentationMessage) => void;
   private expectedPort: number = 8880;
+  private sessionId?: number;
 
   constructor(
     pipePath: string = getDefaultPipePath(),
     accountName?: string,
-    browserLauncher?: BrowserLaunchHandler
+    browserLauncher?: BrowserLaunchHandler,
+    sessionId?: number
   ) {
     this.pipePath = pipePath;
     this.accountName = accountName || process.env.USERNAME || process.env.USER || os.userInfo().username || 'User';
     this.browserLauncher = browserLauncher || this.defaultLaunchBrowser.bind(this);
+    this.sessionId = sessionId;
+  }
+
+  public setSessionId(id: number): void {
+    this.sessionId = id;
+  }
+
+  public getSessionId(): number | undefined {
+    return this.sessionId;
   }
 
   public setBrowserLauncherForTesting(launcher: BrowserLaunchHandler): void {
@@ -63,6 +74,7 @@ export class SafeBrowseUserSessionHelper {
         version: WINDOWS_AGENT_VERSION,
         accountName: this.accountName,
         pid: process.pid,
+        sessionId: this.sessionId,
       };
 
       try {

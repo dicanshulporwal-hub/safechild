@@ -1,7 +1,7 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <?ifndef ProductVersion?>
-  <?define ProductVersion = "1.0.4.8" ?>
+  <?define ProductVersion = "1.0.4.9" ?>
   <?endif?>
   <Package
       Name="SafeBrowse Child Pilot"

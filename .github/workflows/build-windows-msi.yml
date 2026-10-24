@@ -204,7 +204,7 @@ jobs:
           Write-Host "Source Directory: $sourceDir"
           Write-Host "MSI Output: $msiOutput"
 
-          wix build -arch x64 "$wxsPath" -ext WixToolset.Util.wixext -d SourceDir="$sourceDir" -d ProductVersion="1.0.4.8" -o "$msiOutput"
+          wix build -arch x64 "$wxsPath" -ext WixToolset.Util.wixext -d SourceDir="$sourceDir" -d ProductVersion="1.0.4.9" -o "$msiOutput"
           $wixExitCode = $LASTEXITCODE
 
           if ($wixExitCode -ne 0) {

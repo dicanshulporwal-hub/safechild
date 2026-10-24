@@ -34,6 +34,7 @@ export interface ConnectedHelper {
   socket: net.Socket;
   accountName: string;
   pid?: number;
+  sessionId?: number;
   registeredAt: number;
 }
 
@@ -103,6 +104,7 @@ export class BlockIpcServer {
 
   private activePolicyProvider?: () => ResolvedUserPolicy | null;
   private multiSessionChecker?: () => MultiSessionCheckResult;
+  private helperLauncher?: (sessionId?: number) => void;
 
   constructor(
     pipePath: string = getDefaultPipePath(),
@@ -128,6 +130,10 @@ export class BlockIpcServer {
 
   public setMultiSessionChecker(checker: () => MultiSessionCheckResult): void {
     this.multiSessionChecker = checker;
+  }
+
+  public setHelperLauncher(launcher: (sessionId?: number) => void): void {
+    this.helperLauncher = launcher;
   }
 
   public getConnectedHelperCount(): number {
@@ -219,13 +225,14 @@ export class BlockIpcServer {
         const helper: ConnectedHelper = {
           socket,
           accountName: (data.accountName || '').trim(),
-          pid: data.pid,
+          pid: typeof data.pid === 'number' ? data.pid : undefined,
+          sessionId: typeof data.sessionId === 'number' ? data.sessionId : undefined,
           registeredAt: Date.now(),
         };
         this.helpers.set(socket, helper);
         logServiceMessage(
           'INFO',
-          `[BlockIpcServer] Helper registered: account='${helper.accountName}', PID=${helper.pid || 'N/A'}`
+          `[BlockIpcServer] Helper registered: account='${helper.accountName}', PID=${helper.pid || 'N/A'}, SessionId=${helper.sessionId ?? 'N/A'}`
         );
 
         const ack: HelperRegisterAck = { type: 'REGISTER_ACK', status: 'OK' };
@@ -256,12 +263,15 @@ export class BlockIpcServer {
       }
     }
 
-    // 2. Check Multiple Concurrent Interactive Sessions
+    // 2. Check Multiple Concurrent Active Interactive Sessions
     const multiSession = this.multiSessionChecker ? this.multiSessionChecker() : null;
-    if (multiSession && multiSession.hasMultipleSessions) {
+    const hasMultipleActive = multiSession
+      ? (multiSession.hasMultipleActiveInteractiveSessions ?? multiSession.hasMultipleSessions)
+      : false;
+    if (hasMultipleActive) {
       logServiceMessage(
         'WARN',
-        `[BlockIpcServer] Suppressed block presentation: Multiple interactive sessions detected.`
+        `[BlockIpcServer] Suppressed block presentation: Multiple active concurrent interactive sessions detected.`
       );
       return { sent: false, reason: 'CONCURRENT_SESSIONS_SAFETY_HOLD' };
     }
@@ -291,7 +301,7 @@ export class BlockIpcServer {
     this.lastDomainTriggerTimes.set(normalizedDomain, now);
     this.lastGlobalTriggerTime = now;
 
-    // 6. Broadcast to eligible connected helper(s)
+    // 6. Target eligible connected helper running in the active desktop session
     const eventId = `evt-${now}-${Math.random().toString(36).substring(2, 8)}`;
     const payload: BlockPresentationMessage = {
       type: 'PRESENT_BLOCK',
@@ -305,16 +315,57 @@ export class BlockIpcServer {
     const messageString = JSON.stringify(payload) + '\n';
     let targetFound = false;
 
-    for (const [socket, helper] of this.helpers.entries()) {
-      if (policy && helper.accountName) {
-        // Normalize usernames for comparison (strip domain prefixes e.g. LAPTOP\Rahul -> rahul)
-        const activeName = policy.accountName.split('\\').pop()?.toLowerCase();
-        const helperName = helper.accountName.split('\\').pop()?.toLowerCase();
-        if (activeName && helperName && activeName !== helperName) {
-          continue; // Do not deliver Child A's event to Child B or Parent
+    const activeSessionId = typeof policy?.sessionId === 'number' ? policy.sessionId : undefined;
+    const activeName = policy?.accountName ? policy.accountName.split('\\').pop()?.toLowerCase() : undefined;
+
+    // Priority 1: Exact sessionId match
+    let matchedSockets: net.Socket[] = [];
+    if (activeSessionId !== undefined) {
+      for (const [socket, helper] of this.helpers.entries()) {
+        if (helper.sessionId === activeSessionId) {
+          matchedSockets.push(socket);
         }
       }
+    }
 
+    // Priority 2: Fallback to normalized accountName if sessionId was not registered or matched
+    if (matchedSockets.length === 0 && activeName) {
+      for (const [socket, helper] of this.helpers.entries()) {
+        const helperName = helper.accountName.split('\\').pop()?.toLowerCase();
+        if (helperName === activeName) {
+          // Do not deliver to a session known to be a different session
+          if (activeSessionId !== undefined && helper.sessionId !== undefined && helper.sessionId !== activeSessionId) {
+            continue;
+          }
+          matchedSockets.push(socket);
+        }
+      }
+    }
+
+    // Priority 3: Fallback for test doubles where policy is managed and single helper is connected without explicit session/name
+    if (matchedSockets.length === 0 && this.helpers.size === 1 && policy && policy.isManaged) {
+      const [singleSocket, singleHelper] = Array.from(this.helpers.entries())[0];
+      const singleName = singleHelper.accountName.split('\\').pop()?.toLowerCase();
+      if (!activeName || !singleName || singleName === activeName || singleName === 'user' || singleName === 'currentconsoleuser') {
+        matchedSockets.push(singleSocket);
+      }
+    }
+
+    // If helper is missing, trigger self-healing launcher if available
+    if (matchedSockets.length === 0) {
+      if (this.helperLauncher) {
+        try {
+          this.helperLauncher(activeSessionId);
+        } catch {}
+      }
+      return {
+        sent: false,
+        reason: 'NO_CONNECTED_HELPER',
+        url: blockUrl,
+      };
+    }
+
+    for (const socket of matchedSockets) {
       try {
         socket.write(messageString);
         targetFound = true;

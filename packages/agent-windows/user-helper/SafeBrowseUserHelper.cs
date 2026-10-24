@@ -50,9 +50,10 @@ namespace SafeBrowse.UserHelper
                             {
                                 // Send registration handshake
                                 string reg = string.Format(
-                                    "{{\"type\":\"REGISTER_HELPER\",\"version\":\"1.0.4-validation\",\"accountName\":\"{0}\",\"pid\":{1}}}\n",
+                                    "{{\"type\":\"REGISTER_HELPER\",\"version\":\"1.0.4-validation\",\"accountName\":\"{0}\",\"pid\":{1},\"sessionId\":{2}}}\n",
                                     EscapeJson(Environment.UserName),
-                                    Process.GetCurrentProcess().Id
+                                    Process.GetCurrentProcess().Id,
+                                    Process.GetCurrentProcess().SessionId
                                 );
                                 writer.Write(reg);
 

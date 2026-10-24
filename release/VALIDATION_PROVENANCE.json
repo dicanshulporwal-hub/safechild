@@ -5,7 +5,7 @@
   "baselineCommit": "52517696e71c1c46fa481f1f9b780b8f8ccddf65",
   "branch": "feature/stage11-step4-device-enforcement",
   "candidateVersion": "1.0.4-validation",
-  "windowsMsiProductVersion": "1.0.4.8",
+  "windowsMsiProductVersion": "1.0.4.9",
   "androidVersionCode": 5,
   "publicRelease": false,
   "backendUrl": "https://safebrowse.porwal.online",

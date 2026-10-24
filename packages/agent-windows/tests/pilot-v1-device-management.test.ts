@@ -27,6 +27,24 @@ test('SafeBrowse Windows Pilot v1.0 — Device Management & Multi-Session Safety
     assert.deepStrictEqual(multiResult.activeUsers, ['acer', 'Manjari']);
     assert.ok(multiResult.warning);
     assert.ok(multiResult.warning?.includes('Multiple Windows users are currently signed in'));
+
+    // Fast User Switching: 1 Active console user + 1 Disconnected switched-out user
+    accountManager.setMockInteractiveSessionsForTesting(null);
+    accountManager.setMockSessionsForTesting({
+      active: [{ sessionId: 5, username: 'mporwal', isConsole: true }],
+      disconnected: [{ sessionId: 4, username: 'anshulporwal' }],
+    });
+    const fusResult = await accountManager.detectMultipleInteractiveSessions();
+    assert.strictEqual(fusResult.hasMultipleSessions, false);
+    assert.strictEqual(fusResult.hasMultipleActiveInteractiveSessions, false);
+    assert.strictEqual(fusResult.sessionCount, 1);
+    assert.deepStrictEqual(fusResult.activeUsers, ['mporwal']);
+    assert.strictEqual(fusResult.activeInteractiveSessions?.length, 1);
+    assert.strictEqual(fusResult.disconnectedSessions?.length, 1);
+    assert.strictEqual(fusResult.warning, null);
+
+    // Reset mock sessions
+    accountManager.setMockSessionsForTesting(null);
   });
 
   await t.test('2. SessionMonitor: tracks multi-session state and provides accessors', async () => {

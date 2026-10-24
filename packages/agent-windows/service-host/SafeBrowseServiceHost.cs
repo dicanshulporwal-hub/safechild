@@ -1,8 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.ServiceProcess;
+using System.Text;
 using System.Threading;
 
 namespace SafeBrowse
@@ -321,6 +323,15 @@ namespace SafeBrowse
             };
             _monitorThread.Start();
             Log("SafeBrowse Service Host started successfully; OnStart returned promptly to SCM.");
+            try
+            {
+                uint activeConsoleSession = WTSGetActiveConsoleSessionId();
+                if (activeConsoleSession != 0 && activeConsoleSession != 0xFFFFFFFF)
+                {
+                    EnsureUserHelperRunning(activeConsoleSession);
+                }
+            }
+            catch { }
         }
 
         public bool PerformBootPreflight(int maxRetries = 3, int retryDelayMs = 2000)
@@ -478,6 +489,118 @@ namespace SafeBrowse
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool WTSQueryUserToken(uint sessionId, out IntPtr phToken);
 
+        [DllImport("wtsapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool WTSEnumerateSessions(
+            IntPtr hServer,
+            uint Reserved,
+            uint Version,
+            out IntPtr ppSessionInfo,
+            out uint pCount);
+
+        private enum WTS_CONNECTSTATE_CLASS
+        {
+            WTSActive,
+            WTSConnected,
+            WTSConnectQuery,
+            WTSShadow,
+            WTSDisconnected,
+            WTSIdle,
+            WTSListen,
+            WTSReset,
+            WTSDown,
+            WTSInit
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WTS_SESSION_INFO
+        {
+            public uint SessionId;
+            [MarshalAs(UnmanagedType.LPStr)]
+            public string pWinStationName;
+            public WTS_CONNECTSTATE_CLASS State;
+        }
+
+        private enum WTS_INFO_CLASS
+        {
+            WTSInitialProgram,
+            WTSApplicationName,
+            WTSWorkingDirectory,
+            WTSOEMId,
+            WTSSessionId,
+            WTSUserName,
+            WTSWinStationName,
+            WTSDomainName,
+            WTSConnectState,
+            WTSClientBuildNumber,
+            WTSClientName,
+            WTSClientDirectory,
+            WTSClientProductId,
+            WTSClientHardwareId,
+            WTSClientAddress,
+            WTSClientDisplay,
+            WTSClientProtocolType
+        }
+
+        [DllImport("wtsapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool WTSQuerySessionInformation(
+            IntPtr hServer,
+            uint sessionId,
+            WTS_INFO_CLASS wtsInfoClass,
+            out IntPtr ppBuffer,
+            out uint pBytesReturned);
+
+        [DllImport("wtsapi32.dll")]
+        private static extern void WTSFreeMemory(IntPtr pMemory);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct STARTUPINFO
+        {
+            public int cb;
+            public string lpReserved;
+            public string lpDesktop;
+            public string lpTitle;
+            public int dwX;
+            public int dwY;
+            public int dwXSize;
+            public int dwYSize;
+            public int dwCountChars;
+            public int dwYCountChars;
+            public int dwFillAttribute;
+            public int dwFlags;
+            public short wShowWindow;
+            public short cbReserved2;
+            public IntPtr lpReserved2;
+            public IntPtr hStdInput;
+            public IntPtr hStdOutput;
+            public IntPtr hStdError;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROCESS_INFORMATION
+        {
+            public IntPtr hProcess;
+            public IntPtr hThread;
+            public int dwProcessId;
+            public int dwThreadId;
+        }
+
+        [DllImport("advapi32.dll", EntryPoint = "CreateProcessAsUser", SetLastError = true, CharSet = CharSet.Ansi, BestFitMapping = false, ThrowOnUnmappableChar = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreateProcessAsUser(
+            IntPtr hToken,
+            string lpApplicationName,
+            string lpCommandLine,
+            IntPtr lpProcessAttributes,
+            IntPtr lpThreadAttributes,
+            bool bInheritHandles,
+            uint dwCreationFlags,
+            IntPtr lpEnvironment,
+            string lpCurrentDirectory,
+            ref STARTUPINFO lpStartupInfo,
+            out PROCESS_INFORMATION lpProcessInformation);
+
         private enum TOKEN_INFORMATION_CLASS
         {
             TokenUser = 1
@@ -508,6 +631,20 @@ namespace SafeBrowse
         [DllImport("dnsapi.dll", EntryPoint = "DnsFlushResolverCache")]
         private static extern int DnsFlushResolverCache();
 
+        private static string EscapeJson(string str)
+        {
+            if (str == null) return "";
+            return str.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        }
+
+        private struct SessionItem
+        {
+            public uint SessionId;
+            public string UserName;
+            public string State;
+            public bool IsConsole;
+        }
+
         protected override void OnSessionChange(SessionChangeDescription changeDescription)
         {
             try
@@ -515,6 +652,11 @@ namespace SafeBrowse
                 Log(string.Format("[SESSION] Windows session change detected: {0} (Session ID {1})", changeDescription.Reason, changeDescription.SessionId));
                 base.OnSessionChange(changeDescription);
                 UpdateActiveConsoleSession(changeDescription.Reason.ToString(), changeDescription.SessionId);
+                uint activeSession = WTSGetActiveConsoleSessionId();
+                if (activeSession != 0 && activeSession != 0xFFFFFFFF)
+                {
+                    EnsureUserHelperRunning(activeSession);
+                }
             }
             catch (Exception ex)
             {
@@ -527,7 +669,14 @@ namespace SafeBrowse
             try
             {
                 uint activeConsoleSession = WTSGetActiveConsoleSessionId();
-                uint targetSession = (uint)(sessionId > 0 ? sessionId : (int)activeConsoleSession);
+                uint targetSession = activeConsoleSession;
+                string lowerReason = (reason ?? "").ToLowerInvariant();
+
+                // If activeConsoleSession is unset and this is not a disconnect/logoff event, fallback to reported sessionId
+                if (targetSession == 0xFFFFFFFF && !lowerReason.Contains("disconnect") && !lowerReason.Contains("logoff") && sessionId > 0)
+                {
+                    targetSession = (uint)sessionId;
+                }
 
                 string sidStr = null;
                 string username = null;
@@ -573,6 +722,105 @@ namespace SafeBrowse
                     }
                 }
 
+                // Enumerate all Windows Terminal Services sessions
+                List<SessionItem> activeSessions = new List<SessionItem>();
+                List<SessionItem> disconnectedSessions = new List<SessionItem>();
+
+                IntPtr pSessionInfo = IntPtr.Zero;
+                uint sessionCount = 0;
+                if (WTSEnumerateSessions(IntPtr.Zero, 0, 1, out pSessionInfo, out sessionCount))
+                {
+                    try
+                    {
+                        int dataSize = Marshal.SizeOf(typeof(WTS_SESSION_INFO));
+                        long current = pSessionInfo.ToInt64();
+                        for (int i = 0; i < sessionCount; i++)
+                        {
+                            WTS_SESSION_INFO si = (WTS_SESSION_INFO)Marshal.PtrToStructure(new IntPtr(current), typeof(WTS_SESSION_INFO));
+                            current += dataSize;
+
+                            if (si.SessionId == 0 && string.Compare(si.pWinStationName, "services", StringComparison.OrdinalIgnoreCase) == 0)
+                            {
+                                continue; // Skip Session 0 services
+                            }
+
+                            string user = null;
+                            string domain = null;
+                            IntPtr pBuf = IntPtr.Zero;
+                            uint bytesRet = 0;
+                            if (WTSQuerySessionInformation(IntPtr.Zero, si.SessionId, WTS_INFO_CLASS.WTSUserName, out pBuf, out bytesRet))
+                            {
+                                try
+                                {
+                                    user = Marshal.PtrToStringAnsi(pBuf);
+                                }
+                                finally { WTSFreeMemory(pBuf); }
+                            }
+
+                            if (WTSQuerySessionInformation(IntPtr.Zero, si.SessionId, WTS_INFO_CLASS.WTSDomainName, out pBuf, out bytesRet))
+                            {
+                                try
+                                {
+                                    domain = Marshal.PtrToStringAnsi(pBuf);
+                                }
+                                finally { WTSFreeMemory(pBuf); }
+                            }
+
+                            string fullName = user;
+                            if (!string.IsNullOrEmpty(domain) && !string.IsNullOrEmpty(user))
+                            {
+                                fullName = domain + "\\" + user;
+                            }
+
+                            if (string.IsNullOrEmpty(user))
+                            {
+                                continue;
+                            }
+
+                            bool isConsole = (si.SessionId == activeConsoleSession);
+                            if (si.State == WTS_CONNECTSTATE_CLASS.WTSActive)
+                            {
+                                activeSessions.Add(new SessionItem { SessionId = si.SessionId, UserName = fullName, State = "Active", IsConsole = isConsole });
+                            }
+                            else if (si.State == WTS_CONNECTSTATE_CLASS.WTSDisconnected)
+                            {
+                                disconnectedSessions.Add(new SessionItem { SessionId = si.SessionId, UserName = fullName, State = "Disconnected", IsConsole = false });
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log("[WARN] Exception enumerating Terminal Services sessions: " + ex.Message);
+                    }
+                    finally
+                    {
+                        if (pSessionInfo != IntPtr.Zero) WTSFreeMemory(pSessionInfo);
+                    }
+                }
+
+                StringBuilder activeJson = new StringBuilder("[");
+                for (int i = 0; i < activeSessions.Count; i++)
+                {
+                    if (i > 0) activeJson.Append(", ");
+                    activeJson.Append(string.Format("{{\"sessionId\":{0},\"username\":\"{1}\",\"state\":\"{2}\",\"isConsole\":{3}}}",
+                        activeSessions[i].SessionId,
+                        EscapeJson(activeSessions[i].UserName),
+                        activeSessions[i].State,
+                        activeSessions[i].IsConsole ? "true" : "false"));
+                }
+                activeJson.Append("]");
+
+                StringBuilder discJson = new StringBuilder("[");
+                for (int i = 0; i < disconnectedSessions.Count; i++)
+                {
+                    if (i > 0) discJson.Append(", ");
+                    discJson.Append(string.Format("{{\"sessionId\":{0},\"username\":\"{1}\",\"state\":\"{2}\",\"isConsole\":false}}",
+                        disconnectedSessions[i].SessionId,
+                        EscapeJson(disconnectedSessions[i].UserName),
+                        disconnectedSessions[i].State));
+                }
+                discJson.Append("]");
+
                 // Flush local Windows DNS resolver cache instantly on user transition
                 try
                 {
@@ -591,23 +839,120 @@ namespace SafeBrowse
                 string legacySessionFilePath = Path.Combine(programData, "SafeBrowse", "active-session.json");
 
                 string jsonContent = string.Format(
-                    "{{\n  \"sessionId\": {0},\n  \"activeConsoleSession\": {1},\n  \"windowsSid\": {2},\n  \"windowsUsername\": {3},\n  \"reason\": \"{4}\",\n  \"timestamp\": \"{5}\"\n}}",
-                    sessionId,
-                    activeConsoleSession,
+                    "{{\n  \"sessionId\": {0},\n  \"activeConsoleSession\": {1},\n  \"windowsSid\": {2},\n  \"windowsUsername\": {3},\n  \"activeSessions\": {4},\n  \"disconnectedSessions\": {5},\n  \"reason\": \"{6}\",\n  \"timestamp\": \"{7}\"\n}}",
+                    targetSession != 0xFFFFFFFF ? targetSession.ToString() : "null",
+                    activeConsoleSession != 0xFFFFFFFF ? activeConsoleSession.ToString() : "null",
                     sidStr != null ? "\"" + sidStr + "\"" : "null",
-                    username != null ? "\"" + username + "\"" : "null",
+                    username != null ? "\"" + EscapeJson(username) + "\"" : "null",
+                    activeJson.ToString(),
+                    discJson.ToString(),
                     reason,
                     DateTime.UtcNow.ToString("o")
                 );
 
                 File.WriteAllText(stateSessionFilePath, jsonContent);
                 try { File.WriteAllText(legacySessionFilePath, jsonContent); } catch { }
-                Log(string.Format("[SESSION] Active console user recorded: User '{0}' (SID: {1}, Session {2}, Reason {3})",
-                    username ?? "Unknown", sidStr ?? "N/A", sessionId, reason));
+                Log(string.Format("[SESSION] Active console user recorded: User '{0}' (SID: {1}, Session {2}, Reason {3}, Active: {4}, Disc: {5})",
+                    username ?? "Unknown", sidStr ?? "N/A", targetSession != 0xFFFFFFFF ? targetSession.ToString() : "N/A", reason, activeSessions.Count, disconnectedSessions.Count));
+
+                // Self-healing: Ensure SafeBrowseUserHelper is running in the active desktop session
+                if (activeConsoleSession != 0 && activeConsoleSession != 0xFFFFFFFF)
+                {
+                    EnsureUserHelperRunning(activeConsoleSession);
+                }
             }
             catch (Exception ex)
             {
                 Log(string.Format("[WARN] Exception updating active console session state: {0}", ex.Message));
+            }
+        }
+
+        public void EnsureUserHelperRunning(uint sessionId)
+        {
+            if (sessionId == 0 || sessionId == 0xFFFFFFFF) return;
+
+            try
+            {
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                string helperExe = Path.Combine(baseDir, "SafeBrowseUserHelper.exe");
+                if (!File.Exists(helperExe))
+                {
+                    return;
+                }
+
+                // Check if SafeBrowseUserHelper is already running in this session
+                Process[] procs = Process.GetProcessesByName("SafeBrowseUserHelper");
+                bool isRunning = false;
+                foreach (Process p in procs)
+                {
+                    try
+                    {
+                        if (p.SessionId == (int)sessionId && !p.HasExited)
+                        {
+                            isRunning = true;
+                            break;
+                        }
+                    }
+                    catch { }
+                    finally
+                    {
+                        p.Dispose();
+                    }
+                }
+
+                if (isRunning)
+                {
+                    return;
+                }
+
+                IntPtr hToken = IntPtr.Zero;
+                if (WTSQueryUserToken(sessionId, out hToken))
+                {
+                    try
+                    {
+                        STARTUPINFO si = new STARTUPINFO();
+                        si.cb = Marshal.SizeOf(si);
+                        si.lpDesktop = @"winsta0\default";
+
+                        PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
+                        const uint CREATE_NO_WINDOW = 0x08000000;
+                        const uint NORMAL_PRIORITY_CLASS = 0x00000020;
+
+                        bool success = CreateProcessAsUser(
+                            hToken,
+                            helperExe,
+                            null,
+                            IntPtr.Zero,
+                            IntPtr.Zero,
+                            false,
+                            NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW,
+                            IntPtr.Zero,
+                            baseDir,
+                            ref si,
+                            out pi
+                        );
+
+                        if (success)
+                        {
+                            Log(string.Format("[OK] Self-healing launched SafeBrowseUserHelper in Session {0} (PID {1}).", sessionId, pi.dwProcessId));
+                            if (pi.hProcess != IntPtr.Zero) CloseHandle(pi.hProcess);
+                            if (pi.hThread != IntPtr.Zero) CloseHandle(pi.hThread);
+                        }
+                        else
+                        {
+                            int err = Marshal.GetLastWin32Error();
+                            Log(string.Format("[WARN] CreateProcessAsUser failed for Session {0} (Win32 error: {1}).", sessionId, err));
+                        }
+                    }
+                    finally
+                    {
+                        if (hToken != IntPtr.Zero) CloseHandle(hToken);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("[WARN] Exception in EnsureUserHelperRunning for Session {0}: {1}", sessionId, ex.Message));
             }
         }
 
@@ -829,6 +1174,16 @@ namespace SafeBrowse
             {
                 try
                 {
+                    try
+                    {
+                        uint loopConsoleSession = WTSGetActiveConsoleSessionId();
+                        if (loopConsoleSession != 0 && loopConsoleSession != 0xFFFFFFFF)
+                        {
+                            EnsureUserHelperRunning(loopConsoleSession);
+                        }
+                    }
+                    catch { }
+
                     // Ensure any stale child instance is terminated before launching
                     CleanupStaleInstances();
 
