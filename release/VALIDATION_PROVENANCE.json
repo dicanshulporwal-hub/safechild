@@ -1,15 +1,15 @@
 {
-  "classification": "READY FOR ASK PARENT + FAST USER SWITCHING PHYSICAL VALIDATION",
-  "sourceCommit": "0514feb35800a537d2675f5683f106b77ddaae8c",
-  "parentCommit": "3b8d125a1e9d737cfb2e8767372f8f0bc1672927",
+  "classification": "READY FOR C5.3 NAMED-PIPE + ASK-PARENT PHYSICAL VALIDATION",
+  "sourceCommit": "6b5413b590c81de7042916eef3387502143a6237",
+  "parentCommit": "84d9fcc4c4d5ab851af86b16be883e797beb8fcc",
   "baselineCommit": "3b8d125a1e9d737cfb2e8767372f8f0bc1672927",
   "branch": "feature/stage11-step4-device-enforcement",
   "candidateVersion": "1.0.4-validation",
-  "windowsMsiProductVersion": "1.0.4.9",
+  "windowsMsiProductVersion": "1.0.4.10",
   "androidVersionCode": 5,
   "publicRelease": false,
   "backendUrl": "https://safebrowse.porwal.online",
-  "ciRunId": "40092390551",
+  "ciRunId": "40098647302",
   "artifacts": [
     {
       "name": "SafeBrowseChild-Validation-1.0.4.apk",
@@ -20,26 +20,26 @@
     {
       "name": "SafeBrowseChild-Validation.msi",
       "path": "release/windows-validation/SafeBrowseChild-Validation.msi",
-      "sha256": "a055d48bf67e92aa1fe93c5393e4f913351edcbcb52097d6fd0e5dcd0ecf6e0c",
-      "size": 23457792
+      "sha256": "bdffd3cb5932da1d9bd23081efb639347dfb9013d285effaeaf7a15635940ac8",
+      "size": 23478272
     },
     {
       "name": "SafeBrowseChild-Validation.exe",
       "path": "release/windows-validation/SafeBrowseChild-Validation.exe",
-      "sha256": "027e95de2293d86d9f6b88217c6b2df71722e2e6284479ae692b7c55d3badf55",
-      "size": 73208832
+      "sha256": "8fe9f2cb8f9a354834b47a9257430667c7460e509ef4ceabafb848071a2cf703",
+      "size": 73216000
     },
     {
       "name": "SafeBrowseServiceHost.exe",
       "path": "release/windows-validation/SafeBrowseServiceHost.exe",
-      "sha256": "dd70449c173ea140b522a241dba2c23b21ead020559e3874347bc9aad3532a7a",
+      "sha256": "f27a2d3afc378a4b6856996db3f5724449299c324652ac05390751ee85393226",
       "size": 43520
     },
     {
       "name": "SafeBrowseUserHelper.exe",
       "path": "release/windows-validation/SafeBrowseUserHelper.exe",
-      "sha256": "b1f6cf1fc233c5ef7d36cf16a8c22f189c35e210e444dcdcbc7c6b862af23b10",
-      "size": 7168
+      "sha256": "46c93914da5df04a0249647b8e0cfcc5e27b4d0cd5c65e540efa0b5b0ce7b511",
+      "size": 11264
     }
   ]
 }
