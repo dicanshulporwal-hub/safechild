@@ -295,16 +295,16 @@ if (-not ([System.Management.Automation.PSTypeName]'PipeInspect').Type) {
       });
 
       assert.match(sddlOutput, /^SDDL:D:/, 'Pipe must have a valid DACL string representation');
-      // Must contain SYSTEM Full Control
-      assert.match(sddlOutput, /\(A;;GA;;;SY\)/, 'DACL must grant SYSTEM Full Control');
-      // Must contain Builtin Administrators Full Control
-      assert.match(sddlOutput, /\(A;;GA;;;BA\)/, 'DACL must grant Builtin Administrators Full Control');
-      // Must contain Interactive Users Read/Write
-      assert.match(sddlOutput, /\(A;;GRGW;;;IU\)/, 'DACL must grant Interactive Users Read/Write');
-      // Must contain Authenticated Users Read/Write
-      assert.match(sddlOutput, /\(A;;GRGW;;;AU\)/, 'DACL must grant Authenticated Users Read/Write');
-      // Must contain Network Logon Deny
-      assert.match(sddlOutput, /\(D;;GA;;;NU\)/, 'DACL must deny Network Logon');
+      // Must contain SYSTEM Full Control (GA or FA)
+      assert.match(sddlOutput, /\(A;;(?:GA|FA);;;SY\)/, 'DACL must grant SYSTEM Full Control');
+      // Must contain Builtin Administrators Full Control (GA or FA)
+      assert.match(sddlOutput, /\(A;;(?:GA|FA);;;BA\)/, 'DACL must grant Builtin Administrators Full Control');
+      // Must contain Interactive Users Read/Write (GRGW or 0x12019f or FRFW)
+      assert.match(sddlOutput, /\(A;;(?:GRGW|0x12019f|FRFW);;;IU\)/, 'DACL must grant Interactive Users Read/Write');
+      // Must contain Authenticated Users Read/Write (GRGW or 0x12019f or FRFW)
+      assert.match(sddlOutput, /\(A;;(?:GRGW|0x12019f|FRFW);;;AU\)/, 'DACL must grant Authenticated Users Read/Write');
+      // Must contain Network Logon Deny (GA or FA)
+      assert.match(sddlOutput, /\(D;;(?:GA|FA);;;NU\)/, 'DACL must deny Network Logon');
     });
 
     test('Test 5 (Windows Native): Standard client connects to named pipe and completes duplex handshake', async () => {
