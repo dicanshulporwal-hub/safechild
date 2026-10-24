@@ -5,7 +5,7 @@
 *(Strict Notice: DO NOT classify as Pilot Ready until Cloud VM2 deployment, production migration reconciliation, and clean physical laptop validation succeed.)*  
 **Branch:** `feature/stage11-step4-device-enforcement`  
 **Git Baseline Commit:** `3b8d125a1e9d737cfb2e8767372f8f0bc1672927`  
-**Git Source Commit (HEAD):** `0514feb48e6467389a95781a967f6cfb71e84dfa`  
+**Git Source Commit (HEAD):** `0514feb35800a537d2675f5683f106b77ddaae8c`  
 **GitHub Actions Build Run:** [#40092390551](https://github.com/dicanshulporwal-hub/safechild/actions/runs/40092390551) (SUCCESS)  
 **Candidate Version:** `1.0.4-validation`  
 **Windows Protocol Version:** `3`  
@@ -194,7 +194,7 @@ Full regression tests passed:
 
 - **Run ID:** `40092390551`
 - **Workflow:** `build-windows-msi.yml` ("Windows MSI Pilot Packaging")
-- **Trigger Commit:** `0514feb48e6467389a95781a967f6cfb71e84dfa`
+- **Trigger Commit:** `0514feb35800a537d2675f5683f106b77ddaae8c`
 - **Duration:** 6m 56s
 - **Status:** **SUCCESS**
 - **Artifact:** `SafeBrowseChild-Pilot-MSI` (Contains MSI, single-exe bundle, service host, and user helper)
