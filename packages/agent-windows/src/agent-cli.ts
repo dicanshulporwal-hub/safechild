@@ -9,7 +9,7 @@ import { accountManager } from './account-manager';
 import { sessionMonitor } from './session-monitor';
 import { activityReporter } from './activity-reporter';
 import { guiServer } from './gui-server';
-import { normalizePairingCode } from '@safebrowse/shared';
+import { normalizePairingCode, CURRENT_WINDOWS_PROTOCOL_VERSION } from '@safebrowse/shared';
 import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
@@ -86,12 +86,16 @@ async function pairDevice(args: string[]): Promise<void> {
   try {
     const res = await fetch(`${backendUrl}/api/devices/claim`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-windows-protocol-version': String(CURRENT_WINDOWS_PROTOCOL_VERSION),
+      },
       body: JSON.stringify({
         code: normalizePairingCode(code),
         deviceName: name,
         platform: 'windows',
         agentVersion: WINDOWS_AGENT_VERSION,
+        windowsProtocolVersion: CURRENT_WINDOWS_PROTOCOL_VERSION,
       }),
     });
 

@@ -34,7 +34,7 @@ describe('SafeBrowse Stage C.4.2 — Windows Onboarding State Machine & Fail-Saf
     networkManager.setUpstreamResolutionCheckerForTesting(async () => true);
 
     unpairCalledWithToken = null;
-    backendProtocolVersion = 2;
+    backendProtocolVersion = 3;
 
     // Start mock backend cloud server
     await new Promise<void>((resolve) => {
@@ -47,7 +47,7 @@ describe('SafeBrowse Stage C.4.2 — Windows Onboarding State Machine & Fail-Saf
             JSON.stringify({
               application: 'SafeBrowse',
               windowsProtocolVersion: backendProtocolVersion,
-              schemaVersion: '20261023063000',
+              schemaVersion: '20261023120000',
               backendVersion: '1.0.4-validation',
             })
           );
@@ -198,26 +198,72 @@ describe('SafeBrowse Stage C.4.2 — Windows Onboarding State Machine & Fail-Saf
     }
   });
 
-  it('5. ElevatedPairServer version-check enforces windowsProtocolVersion >= 2', async () => {
+  it('5. ElevatedPairServer version-check enforces windowsProtocolVersion >= 3 (Test B)', async () => {
     const pairServer = new ElevatedPairServer(testConfigMgr, accountMgr, netMgr);
     const port = await pairServer.start(0);
 
     try {
-      // 5.1 Protocol version 2 is compatible
-      backendProtocolVersion = 2;
-      const resOk = await fetch(`http://127.0.0.1:${port}/api/version-check?url=${encodeURIComponent(mockBackendUrl)}`);
-      assert.strictEqual(resOk.status, 200);
-      const dataOk = await resOk.json() as any;
-      assert.strictEqual(dataOk.compatible, true);
-      assert.strictEqual(dataOk.windowsProtocolVersion, 2);
-
-      // 5.2 Protocol version 1 is incompatible
+      // 5.1 Protocol version 1 is incompatible
       backendProtocolVersion = 1;
-      const resIncompat = await fetch(`http://127.0.0.1:${port}/api/version-check?url=${encodeURIComponent(mockBackendUrl)}`);
-      assert.strictEqual(resIncompat.status, 200);
-      const dataIncompat = await resIncompat.json() as any;
-      assert.strictEqual(dataIncompat.compatible, false);
-      assert.ok(dataIncompat.error.includes('Production backend is running an older protocol'));
+      const resIncompat1 = await fetch(`http://127.0.0.1:${port}/api/version-check?url=${encodeURIComponent(mockBackendUrl)}`);
+      assert.strictEqual(resIncompat1.status, 200);
+      const dataIncompat1 = await resIncompat1.json() as any;
+      assert.strictEqual(dataIncompat1.compatible, false);
+      assert.strictEqual(dataIncompat1.error, 'SafeBrowse service needs an update. Please try again shortly.');
+
+      // 5.2 Protocol version 2 is incompatible
+      backendProtocolVersion = 2;
+      const resIncompat2 = await fetch(`http://127.0.0.1:${port}/api/version-check?url=${encodeURIComponent(mockBackendUrl)}`);
+      assert.strictEqual(resIncompat2.status, 200);
+      const dataIncompat2 = await resIncompat2.json() as any;
+      assert.strictEqual(dataIncompat2.compatible, false);
+      assert.strictEqual(dataIncompat2.error, 'SafeBrowse service needs an update. Please try again shortly.');
+
+      // 5.3 Protocol version 3 is compatible
+      backendProtocolVersion = 3;
+      const resOk3 = await fetch(`http://127.0.0.1:${port}/api/version-check?url=${encodeURIComponent(mockBackendUrl)}`);
+      assert.strictEqual(resOk3.status, 200);
+      const dataOk3 = await resOk3.json() as any;
+      assert.strictEqual(dataOk3.compatible, true);
+      assert.strictEqual(dataOk3.windowsProtocolVersion, 3);
+
+      // 5.4 Protocol version 4 is compatible (forward compatibility)
+      backendProtocolVersion = 4;
+      const resOk4 = await fetch(`http://127.0.0.1:${port}/api/version-check?url=${encodeURIComponent(mockBackendUrl)}`);
+      assert.strictEqual(resOk4.status, 200);
+      const dataOk4 = await resOk4.json() as any;
+      assert.strictEqual(dataOk4.compatible, true);
+      assert.strictEqual(dataOk4.windowsProtocolVersion, 4);
+    } finally {
+      pairServer.stop();
+    }
+  });
+
+  it('5b. Incompatible backend keeps pairing blocked, DNS untouched, no Protected state (Test C)', async () => {
+    const pairServer = new ElevatedPairServer(testConfigMgr, accountMgr, netMgr);
+    const port = await pairServer.start(0);
+
+    try {
+      backendProtocolVersion = 2; // Incompatible Stage C.4 backend
+
+      const claimRes = await fetch(`http://127.0.0.1:${port}/api/claim-and-pair`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: 'K8X9M2W7',
+          deviceName: 'Test-PC',
+          backendUrl: mockBackendUrl,
+        }),
+      });
+
+      assert.strictEqual(claimRes.status, 400);
+      const data = await claimRes.json() as any;
+      assert.strictEqual(data.error, 'SafeBrowse service needs an update. Please try again shortly.');
+
+      // Verify fail-safe: device state is NOT PROTECTED, device config not written
+      assert.notStrictEqual(testConfigMgr.getOnboardingState(), 'PROTECTED');
+      assert.strictEqual(testConfigMgr.getOnboardingState(), 'NOT_CONNECTED');
+      assert.strictEqual(await testConfigMgr.loadDeviceConfig(), null);
     } finally {
       pairServer.stop();
     }

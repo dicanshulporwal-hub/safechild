@@ -22,6 +22,11 @@ import { requireVerifiedEmail } from './middleware/requireVerifiedEmail';
 import { corsMiddleware } from './middleware/cors';
 import { configureTrustProxy } from './middleware/proxy';
 import { bootstrap } from './bootstrap';
+import {
+  CURRENT_WINDOWS_PROTOCOL_VERSION,
+  CURRENT_SCHEMA_VERSION,
+  CURRENT_BACKEND_VERSION,
+} from '@safebrowse/shared';
 
 const app = express();
 const port = process.env.PORT !== undefined ? process.env.PORT : 1002;
@@ -37,15 +42,15 @@ app.get('/api/version', (req, res) => {
     try {
       commit = require('child_process').execSync('git rev-parse HEAD', { encoding: 'utf8' }).trim();
     } catch {
-      commit = 'f7e9063db089dfaa443b815e0e2d1f88b5f998e3';
+      commit = '735fce4847e0344d5607da1975e53e414c71e2ef';
     }
   }
   res.json({
     application: 'SafeBrowse',
-    backendVersion: '1.0.4-validation',
+    backendVersion: CURRENT_BACKEND_VERSION,
     buildCommit: commit,
-    schemaVersion: '20261023063000',
-    windowsProtocolVersion: 2,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    windowsProtocolVersion: CURRENT_WINDOWS_PROTOCOL_VERSION,
   });
 });
 

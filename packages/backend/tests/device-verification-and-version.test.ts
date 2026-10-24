@@ -107,12 +107,12 @@ describe('SafeBrowse Stage C.4.2 — Device Verification, Protocol Version Gate 
     }
   });
 
-  it('1. GET /api/version exposes public metadata and windowsProtocolVersion: 2 without authentication', async () => {
+  it('1. GET /api/version exposes public metadata, protocol 3 and schema 20261023120000 without auth', async () => {
     const res = await api('GET', '/api/version');
     assert.strictEqual(res.status, 200);
     assert.strictEqual(res.data.application, 'SafeBrowse');
-    assert.strictEqual(res.data.windowsProtocolVersion, 2);
-    assert.strictEqual(res.data.schemaVersion, '20261023063000');
+    assert.strictEqual(res.data.windowsProtocolVersion, 3);
+    assert.strictEqual(res.data.schemaVersion, '20261023120000');
     assert.strictEqual(res.data.backendVersion, '1.0.4-validation');
     assert.ok(typeof res.data.buildCommit === 'string' && res.data.buildCommit.length > 0);
   });
@@ -149,6 +149,7 @@ describe('SafeBrowse Stage C.4.2 — Device Verification, Protocol Version Gate 
       deviceName: 'Alice-Laptop-Verify',
       platform: 'windows',
       agentVersion: '1.0.4-validation',
+      windowsProtocolVersion: 3,
     });
     assert.strictEqual(claimRes.status, 200);
     const { device } = claimRes.data;
@@ -177,6 +178,7 @@ describe('SafeBrowse Stage C.4.2 — Device Verification, Protocol Version Gate 
       deviceName: 'Alice-Laptop-Unconfigured',
       platform: 'windows',
       agentVersion: '1.0.4-validation',
+      windowsProtocolVersion: 3,
     });
     assert.strictEqual(claimRes.status, 200);
     const { device } = claimRes.data;
@@ -203,6 +205,7 @@ describe('SafeBrowse Stage C.4.2 — Device Verification, Protocol Version Gate 
       deviceName: 'Alice-Laptop-Mismatch',
       platform: 'windows',
       agentVersion: '1.0.4-validation',
+      windowsProtocolVersion: 3,
     });
     const { device } = claimRes.data;
 
@@ -228,6 +231,7 @@ describe('SafeBrowse Stage C.4.2 — Device Verification, Protocol Version Gate 
       deviceName: 'Alice-Laptop-Full-Flow',
       platform: 'windows',
       agentVersion: '1.0.4-validation',
+      windowsProtocolVersion: 3,
     });
     const { device } = claimRes.data;
 
@@ -299,6 +303,7 @@ describe('SafeBrowse Stage C.4.2 — Device Verification, Protocol Version Gate 
       deviceName: 'Alice-Laptop-To-Unpair',
       platform: 'windows',
       agentVersion: '1.0.4-validation',
+      windowsProtocolVersion: 3,
     });
     const { device } = claimRes.data;
 
@@ -341,5 +346,80 @@ describe('SafeBrowse Stage C.4.2 — Device Verification, Protocol Version Gate 
       }
     );
     assert.strictEqual(hbRes.status, 403);
+  });
+
+  it('9. POST /api/devices/claim rejects obsolete Windows protocol versions (< 3)', async () => {
+    // 9.1 Reject protocol version 1
+    const codeRes1 = await api(
+      'POST',
+      '/api/devices/pairing-code',
+      { Authorization: `Bearer ${parentToken}` },
+      { childId: childAliceId }
+    );
+    const resProto1 = await api('POST', '/api/devices/claim', {}, {
+      code: codeRes1.data.code,
+      deviceName: 'Obsolete-Win-1',
+      platform: 'windows',
+      windowsProtocolVersion: 1,
+    });
+    assert.strictEqual(resProto1.status, 400);
+    assert.match(resProto1.data.error, /protocol version 3 or higher is required/i);
+
+    // 9.2 Reject protocol version 2 (Stage C.4 client)
+    const codeRes2 = await api(
+      'POST',
+      '/api/devices/pairing-code',
+      { Authorization: `Bearer ${parentToken}` },
+      { childId: childAliceId }
+    );
+    const resProto2 = await api('POST', '/api/devices/claim', {}, {
+      code: codeRes2.data.code,
+      deviceName: 'Obsolete-Win-2',
+      platform: 'windows',
+      windowsProtocolVersion: 2,
+    });
+    assert.strictEqual(resProto2.status, 400);
+    assert.match(resProto2.data.error, /protocol version 3 or higher is required/i);
+
+    // 9.3 Reject Windows family pairing code when protocol version is missing
+    const familyCodeRes = await api(
+      'POST',
+      '/api/devices/pairing-code',
+      { Authorization: `Bearer ${parentToken}` },
+      { platform: 'windows' }
+    );
+    const resMissingProto = await api('POST', '/api/devices/claim', {}, {
+      code: familyCodeRes.data.code,
+      deviceName: 'Obsolete-Win-Missing-Proto',
+      platform: 'windows',
+    });
+    assert.strictEqual(resMissingProto.status, 400);
+    assert.match(resMissingProto.data.error, /protocol version 3 or higher is required/i);
+  });
+
+  it('10. Test D: Android pairing remains completely unchanged and succeeds without protocol header', async () => {
+    // Generate pairing code for Android child
+    const codeRes = await api(
+      'POST',
+      '/api/devices/pairing-code',
+      { Authorization: `Bearer ${parentToken}` },
+      { childId: childAliceId, platform: 'android' }
+    );
+    assert.strictEqual(codeRes.status, 200);
+
+    // Standard Android client payload (no windowsProtocolVersion)
+    const claimRes = await api('POST', '/api/devices/claim', {}, {
+      code: codeRes.data.code,
+      deviceName: "Alice's Android Phone",
+      platform: 'android',
+      agentVersion: '1.0.4-validation',
+    });
+
+    assert.strictEqual(claimRes.status, 200);
+    assert.ok(claimRes.data.device);
+    assert.strictEqual(claimRes.data.device.platform, 'android');
+    assert.strictEqual(claimRes.data.device.childId, childAliceId);
+    assert.strictEqual(claimRes.data.device.protectionStatus, 'ACTIVE');
+    assert.ok(claimRes.data.policy);
   });
 });

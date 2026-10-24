@@ -138,6 +138,7 @@ describe('SafeBrowse Stage C.4 — Device Account Mappings & Family Device Model
       deviceName: 'Family-Surface-Laptop',
       platform: 'windows',
       agentVersion: '1.0.4-validation',
+      windowsProtocolVersion: 3,
     });
     assert.strictEqual(claimRes.status, 200);
     assert.ok(claimRes.data.device);

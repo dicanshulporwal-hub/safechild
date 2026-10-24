@@ -8,6 +8,7 @@ import { deviceAuthMiddleware, AuthenticatedDeviceRequest } from '../middleware/
 import { rbacService, FamilyPermission } from '../services/rbac.service';
 import { wsManager } from '../services/websocket.service';
 import { FamilyRole } from '../types/models';
+import { MIN_WINDOWS_PROTOCOL_VERSION } from '@safebrowse/shared';
 
 export const deviceRouter = Router();
 
@@ -75,12 +76,29 @@ deviceRouter.post(
 // Claim pairing code (Rate limited)
 deviceRouter.post('/claim', pairingRateLimiter, async (req, res) => {
   try {
-    const { code, deviceName, platform, agentVersion } = req.body;
+    const { code, deviceName, platform, agentVersion, windowsProtocolVersion } = req.body;
     if (!code || !platform) {
       return res.status(400).json({ error: 'code and platform are required.' });
     }
 
-    const result = await deviceService.pairDevice(code, deviceName, platform, agentVersion);
+    const isWindows = String(platform).toLowerCase() === 'windows';
+    let clientProtocol: number | undefined = undefined;
+    if (windowsProtocolVersion !== undefined && windowsProtocolVersion !== null && windowsProtocolVersion !== '') {
+      clientProtocol = Number(windowsProtocolVersion);
+    } else if (req.headers['x-windows-protocol-version']) {
+      clientProtocol = Number(req.headers['x-windows-protocol-version']);
+    }
+
+    if (isWindows && clientProtocol !== undefined && clientProtocol < MIN_WINDOWS_PROTOCOL_VERSION) {
+      return res.status(400).json({
+        error: 'Incompatible Windows client version. Windows protocol version 3 or higher is required.',
+        code: 'INCOMPATIBLE_WINDOWS_PROTOCOL',
+        minWindowsProtocolVersion: MIN_WINDOWS_PROTOCOL_VERSION,
+        clientWindowsProtocolVersion: clientProtocol,
+      });
+    }
+
+    const result = await deviceService.pairDevice(code, deviceName, platform, agentVersion, clientProtocol);
     res.json(result);
   } catch (e: any) {
     res.status(400).json({ error: e.message });
@@ -90,12 +108,29 @@ deviceRouter.post('/claim', pairingRateLimiter, async (req, res) => {
 // Backward compatible pair alias
 deviceRouter.post('/pair', pairingRateLimiter, async (req, res) => {
   try {
-    const { code, deviceName, platform, agentVersion } = req.body;
+    const { code, deviceName, platform, agentVersion, windowsProtocolVersion } = req.body;
     if (!code || !platform) {
       return res.status(400).json({ error: 'code and platform are required.' });
     }
 
-    const result = await deviceService.pairDevice(code, deviceName, platform, agentVersion);
+    const isWindows = String(platform).toLowerCase() === 'windows';
+    let clientProtocol: number | undefined = undefined;
+    if (windowsProtocolVersion !== undefined && windowsProtocolVersion !== null && windowsProtocolVersion !== '') {
+      clientProtocol = Number(windowsProtocolVersion);
+    } else if (req.headers['x-windows-protocol-version']) {
+      clientProtocol = Number(req.headers['x-windows-protocol-version']);
+    }
+
+    if (isWindows && clientProtocol !== undefined && clientProtocol < MIN_WINDOWS_PROTOCOL_VERSION) {
+      return res.status(400).json({
+        error: 'Incompatible Windows client version. Windows protocol version 3 or higher is required.',
+        code: 'INCOMPATIBLE_WINDOWS_PROTOCOL',
+        minWindowsProtocolVersion: MIN_WINDOWS_PROTOCOL_VERSION,
+        clientWindowsProtocolVersion: clientProtocol,
+      });
+    }
+
+    const result = await deviceService.pairDevice(code, deviceName, platform, agentVersion, clientProtocol);
     res.json(result);
   } catch (e: any) {
     res.status(400).json({ error: e.message });

@@ -17,7 +17,7 @@ import { WINDOWS_AGENT_VERSION, BUILD_COMMIT } from './sync-client';
 import { evaluateSystemStatus } from './agent-cli';
 import { networkManager, WindowsNetworkManager, logServiceMessage } from './network-manager';
 import { parentPinManager, ParentPinManager } from './parent-pin-manager';
-import { normalizePairingCode } from '@safebrowse/shared';
+import { normalizePairingCode, CURRENT_WINDOWS_PROTOCOL_VERSION } from '@safebrowse/shared';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -318,12 +318,16 @@ export class GuiServer {
 
               const claimRes = await fetch(`${backendUrl}/api/devices/claim`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                  'Content-Type': 'application/json',
+                  'x-windows-protocol-version': String(CURRENT_WINDOWS_PROTOCOL_VERSION),
+                },
                 body: JSON.stringify({
                   code,
                   deviceName,
                   platform: 'windows',
                   agentVersion: WINDOWS_AGENT_VERSION,
+                  windowsProtocolVersion: CURRENT_WINDOWS_PROTOCOL_VERSION,
                 }),
               });
 

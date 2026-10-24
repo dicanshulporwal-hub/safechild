@@ -6,6 +6,7 @@ import { configManager, ConfigManager } from './config-manager';
 import { networkManager } from './network-manager';
 import { firewallEngine } from './wfp-engine';
 import { WINDOWS_AGENT_VERSION } from './sync-client';
+import { CURRENT_WINDOWS_PROTOCOL_VERSION } from '@safebrowse/shared';
 
 const execAsync = promisify(exec);
 
@@ -79,12 +80,16 @@ export class WindowsInstaller {
         const targetUrl = configManager.validateBackendUrl(options.backendUrl || ConfigManager.DEFAULT_PILOT_URL);
         const res = await fetch(`${targetUrl}/api/devices/claim`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'x-windows-protocol-version': String(CURRENT_WINDOWS_PROTOCOL_VERSION),
+          },
           body: JSON.stringify({
             code: options.pairingCode,
             deviceName: options.deviceName || "Rahul's Windows Laptop",
             platform: 'windows',
             agentVersion: WINDOWS_AGENT_VERSION,
+            windowsProtocolVersion: CURRENT_WINDOWS_PROTOCOL_VERSION,
           }),
         });
 

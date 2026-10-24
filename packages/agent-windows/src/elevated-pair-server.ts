@@ -9,7 +9,11 @@ import { accountManager, WindowsAccountManager } from './account-manager';
 import { networkManager, WindowsNetworkManager, logServiceMessage } from './network-manager';
 import { parentPinManager, ParentPinManager } from './parent-pin-manager';
 import { WINDOWS_AGENT_VERSION } from './sync-client';
-import { normalizePairingCode } from '@safebrowse/shared';
+import {
+  normalizePairingCode,
+  MIN_WINDOWS_PROTOCOL_VERSION,
+  CURRENT_WINDOWS_PROTOCOL_VERSION,
+} from '@safebrowse/shared';
 
 const execAsync = promisify(exec);
 
@@ -112,13 +116,13 @@ export class ElevatedPairServer {
             }
             const vData: any = await vRes.json();
             const protocolVer = Number(vData.windowsProtocolVersion || 1);
-            if (protocolVer < 2) {
+            if (protocolVer < MIN_WINDOWS_PROTOCOL_VERSION) {
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(
                 JSON.stringify({
                   compatible: false,
                   windowsProtocolVersion: protocolVer,
-                  error: 'Production backend is running an older protocol (version 1). Please update production backend before pairing.',
+                  error: 'SafeBrowse service needs an update. Please try again shortly.',
                   versionInfo: vData,
                 })
               );
@@ -198,7 +202,7 @@ export class ElevatedPairServer {
                 const vRes = await fetch(`${backendUrl}/api/version`);
                 if (vRes.ok) {
                   const vData: any = await vRes.json().catch(() => ({}));
-                  if (Number(vData.windowsProtocolVersion || 1) < 2) {
+                  if (Number(vData.windowsProtocolVersion || 1) < MIN_WINDOWS_PROTOCOL_VERSION) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(
                       JSON.stringify({
@@ -215,12 +219,16 @@ export class ElevatedPairServer {
               try {
                 claimRes = await fetch(`${backendUrl}/api/devices/claim`, {
                   method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'x-windows-protocol-version': String(CURRENT_WINDOWS_PROTOCOL_VERSION),
+                  },
                   body: JSON.stringify({
                     code,
                     deviceName,
                     platform: 'windows',
                     agentVersion: WINDOWS_AGENT_VERSION,
+                    windowsProtocolVersion: CURRENT_WINDOWS_PROTOCOL_VERSION,
                   }),
                 });
               } catch (netErr: any) {

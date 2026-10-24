@@ -8,6 +8,8 @@ import {
   DeviceAccountMappingDto,
   PAIRING_CODE_ALPHABET,
   normalizePairingCode,
+  MIN_WINDOWS_PROTOCOL_VERSION,
+  CURRENT_WINDOWS_PROTOCOL_VERSION,
 } from '@safebrowse/shared';
 import { HealthState } from '@safebrowse/protocol';
 import crypto from 'crypto';
@@ -115,7 +117,8 @@ export class DeviceService {
     code: string,
     deviceName: string,
     platform: DevicePlatform,
-    agentVersion: string = '1.0.0'
+    agentVersion: string = '1.0.0',
+    protocolVersion?: number
   ): Promise<{ device: ExtendedDevice; policy: any }> {
     const rawClean = (code || '').trim().toUpperCase();
     const normalized = normalizePairingCode(code);
@@ -158,6 +161,21 @@ export class DeviceService {
       const deviceToken = `dtk_${crypto.randomBytes(32).toString('hex')}`;
 
       const isWindows = platform.toLowerCase() === 'windows' || pairing.platformIntent === 'WINDOWS' || !pairing.childId;
+      const isFamilyOnboarding = !pairing.childId;
+
+      if (isWindows && protocolVersion !== undefined && protocolVersion < MIN_WINDOWS_PROTOCOL_VERSION) {
+        throw new Error('Incompatible Windows client version. Windows protocol version 3 or higher is required.');
+      }
+
+      if (isFamilyOnboarding) {
+        if (platform.toLowerCase() !== 'windows') {
+          throw new Error('This pairing code was created for a Windows computer. Please pair from a Windows device.');
+        }
+        if (!protocolVersion || protocolVersion < MIN_WINDOWS_PROTOCOL_VERSION) {
+          throw new Error('Incompatible Windows client version. Windows protocol version 3 or higher is required for family onboarding.');
+        }
+      }
+
       const effectiveChildId = isWindows ? null : pairing.childId;
 
       let policy = null;
