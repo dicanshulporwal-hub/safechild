@@ -1,15 +1,15 @@
 {
-  "classification": "READY FOR C5.3 NAMED-PIPE + ASK-PARENT PHYSICAL VALIDATION",
-  "sourceCommit": "6b5413b590c81de7042916eef3387502143a6237",
-  "parentCommit": "84d9fcc4c4d5ab851af86b16be883e797beb8fcc",
+  "classification": "READY FOR C5.4 ASK-PARENT APPROVAL PHYSICAL VALIDATION",
+  "sourceCommit": "4c0ee6d3f46e6c522691ebfbc3f3a67df52b0d88",
+  "parentCommit": "276741ba0e9a0f0cb02be8eecb571171804f877f",
   "baselineCommit": "3b8d125a1e9d737cfb2e8767372f8f0bc1672927",
   "branch": "feature/stage11-step4-device-enforcement",
   "candidateVersion": "1.0.4-validation",
-  "windowsMsiProductVersion": "1.0.4.10",
+  "windowsMsiProductVersion": "1.0.4.11",
   "androidVersionCode": 5,
   "publicRelease": false,
   "backendUrl": "https://safebrowse.porwal.online",
-  "ciRunId": "40098647302",
+  "ciRunId": "40105310946",
   "artifacts": [
     {
       "name": "SafeBrowseChild-Validation-1.0.4.apk",
@@ -20,25 +20,25 @@
     {
       "name": "SafeBrowseChild-Validation.msi",
       "path": "release/windows-validation/SafeBrowseChild-Validation.msi",
-      "sha256": "bdffd3cb5932da1d9bd23081efb639347dfb9013d285effaeaf7a15635940ac8",
+      "sha256": "d9b49a51d8c198a34d8c27f214d641b0209ffe51f77e2dfd7e54673941cb99d1",
       "size": 23478272
     },
     {
       "name": "SafeBrowseChild-Validation.exe",
       "path": "release/windows-validation/SafeBrowseChild-Validation.exe",
-      "sha256": "8fe9f2cb8f9a354834b47a9257430667c7460e509ef4ceabafb848071a2cf703",
-      "size": 73216000
+      "sha256": "9efa1c57eedfa02400bdb71f0efb2922a851838d6f74dc444487be867b3766d7",
+      "size": 73229824
     },
     {
       "name": "SafeBrowseServiceHost.exe",
       "path": "release/windows-validation/SafeBrowseServiceHost.exe",
-      "sha256": "f27a2d3afc378a4b6856996db3f5724449299c324652ac05390751ee85393226",
+      "sha256": "0ebabf1cfac0fe1cc9bc1a4a7754a85bd216bfdfb826bfa40127d5b422d10ad5",
       "size": 43520
     },
     {
       "name": "SafeBrowseUserHelper.exe",
       "path": "release/windows-validation/SafeBrowseUserHelper.exe",
-      "sha256": "46c93914da5df04a0249647b8e0cfcc5e27b4d0cd5c65e540efa0b5b0ce7b511",
+      "sha256": "6bfb8cedcdb42c33d7e09c7534466a5b966211c990bda8f30e8a4c3692477b2d",
       "size": 11264
     }
   ]
