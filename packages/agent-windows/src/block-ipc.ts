@@ -494,8 +494,8 @@ export async function configureWindowsPipeSecurity(pipePath: string, force: bool
   const psPath = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   const exe = fs.existsSync(psPath) ? psPath : 'powershell.exe';
 
-  // SDDL: Deny Network (NU), Allow SYSTEM (SY) Full, Allow Administrators (BA) Full, Allow Interactive Users (IU) Read+Write, Allow Authenticated Users (AU) Read+Write
-  const sddl = 'D:(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)(A;;GRGW;;;AU)';
+  // SDDL: Protected DACL (P), Deny Network (NU), Allow SYSTEM (SY) Full, Allow Administrators (BA) Full, Allow Interactive Users (IU) Read+Write, Allow Authenticated Users (AU) Read+Write
+  const sddl = 'D:P(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)(A;;GRGW;;;AU)';
 
   const psScript = `
 $code = @'
@@ -513,6 +513,32 @@ public class PipeAclHelper {
         IntPtr pDacl,
         IntPtr pSacl
     );
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern uint SetSecurityInfo(
+        IntPtr handle,
+        int objectType,
+        uint securityInfo,
+        IntPtr psidOwner,
+        IntPtr psidGroup,
+        IntPtr pDacl,
+        IntPtr pSacl
+    );
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern IntPtr CreateFile(
+        string lpFileName,
+        uint dwDesiredAccess,
+        uint dwShareMode,
+        IntPtr lpSecurityAttributes,
+        uint dwCreationDisposition,
+        uint dwFlagsAndAttributes,
+        IntPtr hTemplateFile
+    );
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool CloseHandle(IntPtr hObject);
 
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -556,23 +582,44 @@ public class PipeAclHelper {
                     getDaclRes, daclPresent, pDacl == IntPtr.Zero, getDaclErr);
             }
 
-            // SE_FILE_OBJECT = 1, DACL_SECURITY_INFORMATION = 4
-            uint setRes = SetNamedSecurityInfo(
-                pipePath,
-                1,
-                4,
-                IntPtr.Zero,
-                IntPtr.Zero,
-                pDacl,
-                IntPtr.Zero
-            );
-
-            if (setRes != 0) {
-                return string.Format("FAIL:SET_SECURITY:win32Code={0}", setRes);
+            // Strategy 1: SetNamedSecurityInfo with DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION (0x80000004)
+            // DACL_SECURITY_INFORMATION = 4, PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
+            uint setRes = SetNamedSecurityInfo(pipePath, 1, 0x80000004, IntPtr.Zero, IntPtr.Zero, pDacl, IntPtr.Zero);
+            if (setRes == 0) {
+                return string.Format("SUCCESS:method=SetNamedSecurityInfoProtected,win32Code=0");
             }
 
-            return string.Format("SUCCESS:convertRes={0},getDaclRes={1},daclPresent={2},pDaclValid={3},win32Code={4}",
-                convertRes, getDaclRes, daclPresent, pDacl != IntPtr.Zero, setRes);
+            // Strategy 2: SetNamedSecurityInfo with plain DACL_SECURITY_INFORMATION (4)
+            uint setResPlain = SetNamedSecurityInfo(pipePath, 1, 4, IntPtr.Zero, IntPtr.Zero, pDacl, IntPtr.Zero);
+            if (setResPlain == 0) {
+                return string.Format("SUCCESS:method=SetNamedSecurityInfoPlain,win32Code=0");
+            }
+
+            // Strategy 3: Handle-based SetSecurityInfo via CreateFile with WRITE_DAC access
+            IntPtr hPipe = CreateFile(pipePath, 0x00040000 /* WRITE_DAC */, 0, IntPtr.Zero, 3 /* OPEN_EXISTING */, 0, IntPtr.Zero);
+            if (hPipe == IntPtr.Zero || hPipe == (IntPtr)(-1)) {
+                hPipe = CreateFile(pipePath, 0x00040000 | 0x40000000 /* WRITE_DAC | GENERIC_WRITE */, 0, IntPtr.Zero, 3, 0, IntPtr.Zero);
+            }
+            if (hPipe != IntPtr.Zero && hPipe != (IntPtr)(-1)) {
+                try {
+                    uint handleRes = SetSecurityInfo(hPipe, 6 /* SE_KERNEL_OBJECT */, 0x80000004, IntPtr.Zero, IntPtr.Zero, pDacl, IntPtr.Zero);
+                    if (handleRes == 0) {
+                        return string.Format("SUCCESS:method=SetSecurityInfoKernelProtected,win32Code=0");
+                    }
+                    handleRes = SetSecurityInfo(hPipe, 1 /* SE_FILE_OBJECT */, 0x80000004, IntPtr.Zero, IntPtr.Zero, pDacl, IntPtr.Zero);
+                    if (handleRes == 0) {
+                        return string.Format("SUCCESS:method=SetSecurityInfoFileProtected,win32Code=0");
+                    }
+                    handleRes = SetSecurityInfo(hPipe, 6 /* SE_KERNEL_OBJECT */, 4, IntPtr.Zero, IntPtr.Zero, pDacl, IntPtr.Zero);
+                    if (handleRes == 0) {
+                        return string.Format("SUCCESS:method=SetSecurityInfoKernelPlain,win32Code=0");
+                    }
+                } finally {
+                    CloseHandle(hPipe);
+                }
+            }
+
+            return string.Format("FAIL:SET_SECURITY:resProtected={0},resPlain={1}", setRes, setResPlain);
         } finally {
             if (pSD != IntPtr.Zero) {
                 LocalFree(pSD);

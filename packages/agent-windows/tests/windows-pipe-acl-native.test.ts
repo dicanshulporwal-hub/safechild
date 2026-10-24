@@ -223,6 +223,21 @@ public class PipeInspect {
         out IntPtr ppsidOwner, out IntPtr ppsidGroup, out IntPtr ppDacl, out IntPtr ppSacl,
         out IntPtr ppSecurityDescriptor
     );
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern uint GetSecurityInfo(
+        IntPtr handle, int objectType, uint securityInfo,
+        out IntPtr ppsidOwner, out IntPtr ppsidGroup, out IntPtr ppDacl, out IntPtr ppSacl,
+        out IntPtr ppSecurityDescriptor
+    );
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern IntPtr CreateFile(
+        string lpFileName, uint dwDesiredAccess, uint dwShareMode,
+        IntPtr lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes,
+        IntPtr hTemplateFile
+    );
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool CloseHandle(IntPtr hObject);
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern bool ConvertSecurityDescriptorToStringSecurityDescriptor(
         IntPtr pSecurityDescriptor, uint requestedRevision, uint securityInformation,
@@ -234,6 +249,19 @@ public class PipeInspect {
     public static string GetPipeSddl(string pipePath) {
         IntPtr pOwner = IntPtr.Zero, pGroup = IntPtr.Zero, pDacl = IntPtr.Zero, pSacl = IntPtr.Zero, pSD = IntPtr.Zero;
         uint res = GetNamedSecurityInfo(pipePath, 1, 4, out pOwner, out pGroup, out pDacl, out pSacl, out pSD);
+        if (res != 0 || pSD == IntPtr.Zero) {
+            IntPtr h = CreateFile(pipePath, 0x00020000 /* READ_CONTROL */, 0, IntPtr.Zero, 3 /* OPEN_EXISTING */, 0, IntPtr.Zero);
+            if (h != IntPtr.Zero && h != (IntPtr)(-1)) {
+                try {
+                    res = GetSecurityInfo(h, 6 /* SE_KERNEL_OBJECT */, 4, out pOwner, out pGroup, out pDacl, out pSacl, out pSD);
+                    if (res != 0) {
+                        res = GetSecurityInfo(h, 1 /* SE_FILE_OBJECT */, 4, out pOwner, out pGroup, out pDacl, out pSacl, out pSD);
+                    }
+                } finally {
+                    CloseHandle(h);
+                }
+            }
+        }
         if (res != 0 || pSD == IntPtr.Zero) return "FAIL:" + res;
         try {
             IntPtr pStr = IntPtr.Zero; uint len = 0;
@@ -244,7 +272,7 @@ public class PipeInspect {
             }
             return "CONVERT_FAIL";
         } finally {
-            LocalFree(pSD);
+            if (pSD != IntPtr.Zero) LocalFree(pSD);
         }
     }
 }
