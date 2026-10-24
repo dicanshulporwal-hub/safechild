@@ -524,15 +524,15 @@ describe('SafeBrowse Windows Stage C.3.1: Service Block IPC Integration Suite', 
     // Now helper self-heals and registers with sessionId 5
     const healedClient = await createHelperClient(testSockPath, 'mporwal', 5556, 5);
     try {
-      // Clear debounce by waiting debounce window (500ms in test)
-      await new Promise((r) => setTimeout(r, 550));
-
-      const retryResult = ipcServer.presentBlock('blocked-site.com', 'BLOCKED', 8880);
-      assert.strictEqual(retryResult.sent, true);
-      assert.strictEqual(retryResult.reason, 'PRESENTED');
-
-      await new Promise((r) => setTimeout(r, 60));
+      // The pending block presentation is automatically retried upon helper registration
+      await new Promise((r) => setTimeout(r, 80));
       assert.strictEqual(healedClient.receivedMessages.length, 1);
+      assert.strictEqual(healedClient.receivedMessages[0].domain, 'blocked-site.com');
+
+      // Subsequent presentation within debounce window is properly debounced
+      const debouncedResult = ipcServer.presentBlock('blocked-site.com', 'BLOCKED', 8880);
+      assert.strictEqual(debouncedResult.sent, false);
+      assert.strictEqual(debouncedResult.reason, 'DOMAIN_DEBOUNCED');
     } finally {
       await healedClient.close();
     }

@@ -38,6 +38,16 @@ export interface ConnectedHelper {
   registeredAt: number;
 }
 
+export interface PendingBlockPresentation {
+  domain: string;
+  reason: string;
+  blockPort: number;
+  timestamp: number;
+  sessionId?: number;
+  accountName?: string;
+  retried: boolean;
+}
+
 export function getDefaultPipePath(): string {
   if (process.platform === 'win32') {
     return '\\\\.\\pipe\\SafeBrowseBlockPipe';
@@ -96,6 +106,7 @@ export class BlockIpcServer {
   private server: net.Server | null = null;
   private pipePath: string;
   private helpers: Map<net.Socket, ConnectedHelper> = new Map();
+  private pendingPresentations: Map<string, PendingBlockPresentation> = new Map();
   private lastDomainTriggerTimes: Map<string, number> = new Map();
   private lastGlobalTriggerTime: number = 0;
   private domainDebounceMs: number = 12000;
@@ -237,9 +248,48 @@ export class BlockIpcServer {
 
         const ack: HelperRegisterAck = { type: 'REGISTER_ACK', status: 'OK' };
         socket.write(JSON.stringify(ack) + '\n');
+
+        // Bounded retry of any pending presentation for this helper session/account
+        this.flushPendingPresentationsForHelper(helper);
       }
     } catch {
       // Ignore malformed messages
+    }
+  }
+
+  private flushPendingPresentationsForHelper(helper: ConnectedHelper): void {
+    const now = Date.now();
+    const TTL_MS = 15000;
+    const helperName = helper.accountName ? helper.accountName.split('\\').pop()?.toLowerCase() : undefined;
+
+    for (const [key, pending] of Array.from(this.pendingPresentations.entries())) {
+      // Purge expired
+      if (now - pending.timestamp > TTL_MS) {
+        this.pendingPresentations.delete(key);
+        continue;
+      }
+      if (pending.retried) {
+        this.pendingPresentations.delete(key);
+        continue;
+      }
+
+      // Match helper session or account
+      const sessionMatch = helper.sessionId !== undefined && pending.sessionId !== undefined
+        ? helper.sessionId === pending.sessionId
+        : true;
+      const accountMatch = helperName && pending.accountName
+        ? helperName === pending.accountName
+        : true;
+
+      if (sessionMatch && accountMatch) {
+        pending.retried = true;
+        this.pendingPresentations.delete(key);
+        logServiceMessage(
+          'INFO',
+          `[BlockIpcServer] Retrying pending block presentation for domain '${pending.domain}' on newly registered helper (SessionId=${helper.sessionId ?? 'N/A'})`
+        );
+        this.presentBlock(pending.domain, pending.reason, pending.blockPort);
+      }
     }
   }
 
@@ -297,10 +347,6 @@ export class BlockIpcServer {
       return { sent: false, reason: `URL_VALIDATION_FAILED: ${validation.reason}` };
     }
 
-    // Update debounce timestamps
-    this.lastDomainTriggerTimes.set(normalizedDomain, now);
-    this.lastGlobalTriggerTime = now;
-
     // 6. Target eligible connected helper running in the active desktop session
     const eventId = `evt-${now}-${Math.random().toString(36).substring(2, 8)}`;
     const payload: BlockPresentationMessage = {
@@ -351,8 +397,19 @@ export class BlockIpcServer {
       }
     }
 
-    // If helper is missing, trigger self-healing launcher if available
+    // If helper is missing, store bounded pending presentation and trigger self-healing launcher
     if (matchedSockets.length === 0) {
+      const pendingKey = `${activeSessionId ?? 'default'}:${normalizedDomain}`;
+      this.pendingPresentations.set(pendingKey, {
+        domain,
+        reason,
+        blockPort,
+        timestamp: now,
+        sessionId: activeSessionId,
+        accountName: activeName,
+        retried: false,
+      });
+
       if (this.helperLauncher) {
         try {
           this.helperLauncher(activeSessionId);
@@ -374,6 +431,13 @@ export class BlockIpcServer {
       }
     }
 
+    if (targetFound) {
+      // ONLY update debounce timestamps when block was actually delivered!
+      this.lastDomainTriggerTimes.set(normalizedDomain, now);
+      this.lastGlobalTriggerTime = now;
+      logServiceMessage('INFO', `[BlockIpcServer] Block presentation for '${domain}': PRESENTED (sent=true)`);
+    }
+
     return {
       sent: targetFound,
       reason: targetFound ? 'PRESENTED' : 'NO_CONNECTED_HELPER',
@@ -389,6 +453,7 @@ export class BlockIpcServer {
       } catch {}
     }
     this.helpers.clear();
+    this.pendingPresentations.clear();
 
     return new Promise((resolve) => {
       if (!this.server) {
@@ -413,57 +478,138 @@ export class BlockIpcServer {
 /**
  * Configures DACL on Windows Named Pipe to allow interactive child users
  * to connect and write registration handshake, while denying network/remote users.
+ *
+ * Win32 Principle:
+ * - Convert SDDL to SECURITY_DESCRIPTOR using ConvertStringSecurityDescriptorToSecurityDescriptor.
+ * - Extract real DACL pointer using GetSecurityDescriptorDacl.
+ * - Pass ONLY that extracted PACL pointer to SetNamedSecurityInfo (NOT pSD).
+ * - Keep pSD allocated until SetNamedSecurityInfo completes, then LocalFree(pSD).
  */
-export async function configureWindowsPipeSecurity(pipePath: string): Promise<void> {
-  if (process.platform !== 'win32') return;
-  if (!pipePath.startsWith('\\\\.\\pipe\\')) return;
-  if (process.env.NODE_ENV === 'test') return;
+export async function configureWindowsPipeSecurity(pipePath: string, force: boolean = false): Promise<boolean> {
+  if (process.platform !== 'win32') return false;
+  if (!pipePath.startsWith('\\\\.\\pipe\\')) return false;
+  if (!force && process.env.NODE_ENV === 'test') return false;
 
   const systemRoot = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
   const psPath = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   const exe = fs.existsSync(psPath) ? psPath : 'powershell.exe';
 
   // SDDL: Deny Network (NU), Allow SYSTEM (SY) Full, Allow Administrators (BA) Full, Allow Interactive Users (IU) Read+Write, Allow Authenticated Users (AU) Read+Write
+  const sddl = 'D:(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)(A;;GRGW;;;AU)';
+
   const psScript = `
 $code = @'
 using System;
 using System.Runtime.InteropServices;
+
 public class PipeAclHelper {
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern uint SetNamedSecurityInfo(
-        string pObjectName, int objectType, uint securityInfo,
-        IntPtr psidOwner, IntPtr psidGroup, IntPtr pDacl, IntPtr pSacl
+        string pObjectName,
+        int objectType,
+        uint securityInfo,
+        IntPtr psidOwner,
+        IntPtr psidGroup,
+        IntPtr pDacl,
+        IntPtr pSacl
     );
+
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(
-        string sddl, uint rev, out IntPtr pSD, out uint size
+        string sddl,
+        uint rev,
+        out IntPtr pSD,
+        out uint size
     );
-    [DllImport("kernel32.dll")]
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetSecurityDescriptorDacl(
+        IntPtr pSecurityDescriptor,
+        [MarshalAs(UnmanagedType.Bool)] out bool lpbDaclPresent,
+        out IntPtr pDacl,
+        [MarshalAs(UnmanagedType.Bool)] out bool lpbDaclDefaulted
+    );
+
+    [DllImport("kernel32.dll", SetLastError = true)]
     public static extern IntPtr LocalFree(IntPtr hMem);
+
+    public static string ApplyPipeSecurity(string pipePath, string sddl) {
+        IntPtr pSD = IntPtr.Zero;
+        uint size = 0;
+        bool convertRes = ConvertStringSecurityDescriptorToSecurityDescriptor(sddl, 1, out pSD, out size);
+        int convertErr = Marshal.GetLastWin32Error();
+        if (!convertRes || pSD == IntPtr.Zero) {
+            return string.Format("FAIL:CONVERT:convertRes={0},err={1}", convertRes, convertErr);
+        }
+
+        try {
+            bool daclPresent = false;
+            IntPtr pDacl = IntPtr.Zero;
+            bool daclDefaulted = false;
+            bool getDaclRes = GetSecurityDescriptorDacl(pSD, out daclPresent, out pDacl, out daclDefaulted);
+            int getDaclErr = Marshal.GetLastWin32Error();
+
+            if (!getDaclRes || !daclPresent || pDacl == IntPtr.Zero) {
+                return string.Format("FAIL:GET_DACL:getDaclRes={0},daclPresent={1},pDaclZero={2},err={3}",
+                    getDaclRes, daclPresent, pDacl == IntPtr.Zero, getDaclErr);
+            }
+
+            // SE_FILE_OBJECT = 1, DACL_SECURITY_INFORMATION = 4
+            uint setRes = SetNamedSecurityInfo(
+                pipePath,
+                1,
+                4,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                pDacl,
+                IntPtr.Zero
+            );
+
+            if (setRes != 0) {
+                return string.Format("FAIL:SET_SECURITY:win32Code={0}", setRes);
+            }
+
+            return string.Format("SUCCESS:convertRes={0},getDaclRes={1},daclPresent={2},pDaclValid={3},win32Code={4}",
+                convertRes, getDaclRes, daclPresent, pDacl != IntPtr.Zero, setRes);
+        } finally {
+            if (pSD != IntPtr.Zero) {
+                LocalFree(pSD);
+            }
+        }
+    }
 }
 '@
-Add-Type -TypeDefinition $code -Language CSharp
-$pSD = [IntPtr]::Zero; $size = 0
-$sddl = "D:(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)(A;;GRGW;;;AU)"
-if ([PipeAclHelper]::ConvertStringSecurityDescriptorToSecurityDescriptor($sddl, 1, [ref]$pSD, [ref]$size)) {
-    $res = [PipeAclHelper]::SetNamedSecurityInfo("${pipePath}", 1, 4, [IntPtr]::Zero, [IntPtr]::Zero, $pSD, [IntPtr]::Zero)
-    [PipeAclHelper]::LocalFree($pSD)
-    if ($res -ne 0) { exit $res }
+if (-not ([System.Management.Automation.PSTypeName]'PipeAclHelper').Type) {
+    Add-Type -TypeDefinition $code -Language CSharp
 }
+$pipe = $env:SB_PIPE_PATH
+$sddl = '${sddl}'
+$res = [PipeAclHelper]::ApplyPipeSecurity($pipe, $sddl)
+Write-Output $res
+if ($res -notlike "SUCCESS*") { exit 1 }
 `;
 
   return new Promise((resolve) => {
     execFile(
       exe,
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', psScript],
-      { timeout: 5000 },
-      (err) => {
-        if (err) {
-          logServiceMessage('WARN', `[BlockIpcServer] [WARN] Pipe ACL configuration note: ${err.message}`);
+      {
+        timeout: 8000,
+        env: { ...process.env, SB_PIPE_PATH: pipePath },
+      },
+      (err, stdout, stderr) => {
+        const outStr = (stdout || '').trim();
+        const errStr = (stderr || '').trim();
+        if (err || !outStr.startsWith('SUCCESS')) {
+          const detail = outStr || errStr || err?.message || 'Unknown error';
+          logServiceMessage('WARN', `[BlockIpcServer] BLOCK_IPC_ACL_FAILED on ${pipePath} with Win32 error: ${detail}`);
+          resolve(false);
         } else {
-          logServiceMessage('INFO', `[BlockIpcServer] Configured local pipe ACL for interactive user sessions on ${pipePath}`);
+          logServiceMessage('INFO', `[BlockIpcServer] BLOCK_IPC_ACL_APPLIED on ${pipePath} (${outStr})`);
+          resolve(true);
         }
-        resolve();
       }
     );
   });
