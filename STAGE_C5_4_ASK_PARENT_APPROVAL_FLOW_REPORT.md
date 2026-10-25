@@ -4,7 +4,7 @@
 **Classification:** **`READY FOR C5.4 ASK-PARENT APPROVAL PHYSICAL VALIDATION`**  
 *(Strict Notice: DO NOT classify as Pilot Ready until Cloud VM2 deployment, production migration reconciliation, and clean physical laptop validation succeed.)*  
 **Branch:** `feature/stage11-step4-device-enforcement`  
-**Git Baseline Commit:** `276741ba0e9a0f0cb02be8eecb571171804f877f`  
+**Git Baseline Commit:** `276741b476f7d46f57d061f33a0692e9404e3180`  
 **Git Source Commit (HEAD):** `4c0ee6d3f46e6c522691ebfbc3f3a67df52b0d88`  
 **GitHub Actions Build Run:** [#40105310946](https://github.com/dicanshulporwal-hub/safechild/actions/runs/40105310946) (SUCCESS)  
 **Candidate Version:** `1.0.4-validation`  
