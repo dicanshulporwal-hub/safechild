@@ -322,6 +322,7 @@ namespace SafeBrowse
                 Name = "SafeBrowseServiceMonitor"
             };
             _monitorThread.Start();
+
             Log("SafeBrowse Service Host started successfully; OnStart returned promptly to SCM.");
             try
             {
@@ -628,6 +629,24 @@ namespace SafeBrowse
             uint TokenInformationLength,
             out uint ReturnLength);
 
+        [DllImport("userenv.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreateEnvironmentBlock(out IntPtr lpEnvironment, IntPtr hToken, bool bInherit);
+
+        [DllImport("userenv.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DestroyEnvironmentBlock(IntPtr lpEnvironment);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DuplicateTokenEx(
+            IntPtr hExistingToken,
+            uint dwDesiredAccess,
+            IntPtr lpTokenAttributes,
+            int impersonationLevel,
+            int tokenType,
+            out IntPtr phNewToken);
+
         [DllImport("dnsapi.dll", EntryPoint = "DnsFlushResolverCache")]
         private static extern int DnsFlushResolverCache();
 
@@ -867,9 +886,9 @@ namespace SafeBrowse
             }
         }
 
-        public void EnsureUserHelperRunning(uint sessionId)
+        public bool EnsureUserHelperRunning(uint sessionId)
         {
-            if (sessionId == 0 || sessionId == 0xFFFFFFFF) return;
+            if (sessionId == 0 || sessionId == 0xFFFFFFFF) return false;
 
             try
             {
@@ -877,20 +896,19 @@ namespace SafeBrowse
                 string helperExe = Path.Combine(baseDir, "SafeBrowseUserHelper.exe");
                 if (!File.Exists(helperExe))
                 {
-                    return;
+                    Log(string.Format("[WARN] Cannot launch UserHelper: executable not found at {0}", helperExe));
+                    return false;
                 }
 
                 // Check if SafeBrowseUserHelper is already running in this session
                 Process[] procs = Process.GetProcessesByName("SafeBrowseUserHelper");
-                bool isRunning = false;
                 foreach (Process p in procs)
                 {
                     try
                     {
                         if (p.SessionId == (int)sessionId && !p.HasExited)
                         {
-                            isRunning = true;
-                            break;
+                            return true; // Already running and healthy
                         }
                     }
                     catch { }
@@ -900,16 +918,24 @@ namespace SafeBrowse
                     }
                 }
 
-                if (isRunning)
-                {
-                    return;
-                }
-
+                Log(string.Format("[HELPER] Launch requested for Session {0}...", sessionId));
                 IntPtr hToken = IntPtr.Zero;
                 if (WTSQueryUserToken(sessionId, out hToken))
                 {
+                    IntPtr hPrimaryToken = IntPtr.Zero;
+                    IntPtr pEnv = IntPtr.Zero;
                     try
                     {
+                        const uint MAXIMUM_ALLOWED = 0x02000000;
+                        const int SecurityImpersonation = 2;
+                        const int TokenPrimary = 1;
+
+                        IntPtr launchToken = hToken;
+                        if (DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, IntPtr.Zero, SecurityImpersonation, TokenPrimary, out hPrimaryToken))
+                        {
+                            launchToken = hPrimaryToken;
+                        }
+
                         STARTUPINFO si = new STARTUPINFO();
                         si.cb = Marshal.SizeOf(si);
                         si.lpDesktop = @"winsta0\default";
@@ -917,16 +943,29 @@ namespace SafeBrowse
                         PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
                         const uint CREATE_NO_WINDOW = 0x08000000;
                         const uint NORMAL_PRIORITY_CLASS = 0x00000020;
+                        const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+
+                        uint creationFlags = NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW;
+
+                        if (CreateEnvironmentBlock(out pEnv, launchToken, false))
+                        {
+                            creationFlags |= CREATE_UNICODE_ENVIRONMENT;
+                            Log(string.Format("[HELPER] Created user environment block for Session {0}.", sessionId));
+                        }
+                        else
+                        {
+                            Log(string.Format("[WARN] CreateEnvironmentBlock failed for Session {0} (Win32: {1}). Proceeding with default env.", sessionId, Marshal.GetLastWin32Error()));
+                        }
 
                         bool success = CreateProcessAsUser(
-                            hToken,
+                            launchToken,
                             helperExe,
                             null,
                             IntPtr.Zero,
                             IntPtr.Zero,
                             false,
-                            NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW,
-                            IntPtr.Zero,
+                            creationFlags,
+                            pEnv,
                             baseDir,
                             ref si,
                             out pi
@@ -934,25 +973,65 @@ namespace SafeBrowse
 
                         if (success)
                         {
-                            Log(string.Format("[OK] Self-healing launched SafeBrowseUserHelper in Session {0} (PID {1}).", sessionId, pi.dwProcessId));
+                            Log(string.Format("[OK] Successfully launched SafeBrowseUserHelper in Session {0} (PID {1}).", sessionId, pi.dwProcessId));
                             if (pi.hProcess != IntPtr.Zero) CloseHandle(pi.hProcess);
                             if (pi.hThread != IntPtr.Zero) CloseHandle(pi.hThread);
+                            return true;
                         }
                         else
                         {
                             int err = Marshal.GetLastWin32Error();
                             Log(string.Format("[WARN] CreateProcessAsUser failed for Session {0} (Win32 error: {1}).", sessionId, err));
+                            return false;
                         }
                     }
                     finally
                     {
+                        if (pEnv != IntPtr.Zero) DestroyEnvironmentBlock(pEnv);
+                        if (hPrimaryToken != IntPtr.Zero) CloseHandle(hPrimaryToken);
                         if (hToken != IntPtr.Zero) CloseHandle(hToken);
                     }
+                }
+                else
+                {
+                    Log(string.Format("[WARN] WTSQueryUserToken failed for Session {0} (Win32 error: {1}).", sessionId, Marshal.GetLastWin32Error()));
+                    return false;
                 }
             }
             catch (Exception ex)
             {
                 Log(string.Format("[WARN] Exception in EnsureUserHelperRunning for Session {0}: {1}", sessionId, ex.Message));
+                return false;
+            }
+        }
+
+        public void TerminateAllUserHelpers()
+        {
+            try
+            {
+                Process[] helpers = Process.GetProcessesByName("SafeBrowseUserHelper");
+                foreach (Process p in helpers)
+                {
+                    try
+                    {
+                        Log(string.Format("[HELPER] Terminating SafeBrowseUserHelper (PID {0}, Session {1})...", p.Id, p.SessionId));
+                        p.Kill();
+                        p.WaitForExit(3000);
+                        Log(string.Format("[OK] SafeBrowseUserHelper PID {0} terminated.", p.Id));
+                    }
+                    catch (Exception ex)
+                    {
+                        Log(string.Format("[WARN] Could not terminate SafeBrowseUserHelper PID {0}: {1}", p.Id, ex.Message));
+                    }
+                    finally
+                    {
+                        p.Dispose();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log(string.Format("[WARN] Exception in TerminateAllUserHelpers: {0}", ex.Message));
             }
         }
 
@@ -963,25 +1042,30 @@ namespace SafeBrowse
             Log("[INFO] SafeBrowse Service Host stop requested.");
             _stopping = true;
 
-            // 1. Restore network DNS to original state before terminating child process
-            Log("[INFO] Initiating pre-termination network DNS restoration...");
-            bool restored = RunEmergencyRestore(2, 15000);
+            // 1. Terminate all SafeBrowseUserHelper instances
+            Log("[INFO] Terminating all SafeBrowse UserHelper instances...");
+            TerminateAllUserHelpers();
+
+            // 2. Restore network DNS to original state before service completes shutdown
+            Log("[INFO] Initiating network DNS restoration...");
+            bool restored = RunEmergencyRestore(2, 20000);
             if (!restored)
             {
                 Log("[CRITICAL] Service stop: DNS restoration could not be confirmed after retries.");
             }
 
-            // 2. Terminate child process
+            // 3. Stop child enforcement process
+            Log("[INFO] Stopping child enforcement process...");
             StopChildProcess();
 
-            // 3. Close Job Object handle
+            // 4. Close Job Object handle
             if (_jobHandle != IntPtr.Zero)
             {
                 try { CloseHandle(_jobHandle); } catch { }
                 _jobHandle = IntPtr.Zero;
             }
 
-            // 4. Await monitor thread completion
+            // 5. Await monitor thread completion
             if (_monitorThread != null && _monitorThread.IsAlive)
             {
                 _monitorThread.Join(5000);
@@ -1093,6 +1177,7 @@ namespace SafeBrowse
 
                 string psScript =
                     "$ErrorActionPreference = 'SilentlyContinue'; " +
+                    "try { Stop-Process -Name SafeBrowseUserHelper -Force -ErrorAction SilentlyContinue } catch {}; " +
                     "$backupPath = Join-Path $env:ProgramData 'SafeBrowse\\secure\\network-backup.json'; " +
                     "if (-not (Test-Path $backupPath)) { $backupPath = Join-Path $env:ProgramData 'SafeBrowse\\network-backup.json' }; " +
                     "$restoredAny = $false; " +
@@ -1120,14 +1205,21 @@ namespace SafeBrowse
                     "if (-not $restoredAny) { " +
                     "    $trapped = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.ServerAddresses -contains '127.0.0.1' }); " +
                     "    $validRoutes = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -ne '0.0.0.0' }); " +
-                    "    $routeIndexes = @($validRoutes | ForEach-Object { $_.InterfaceIndex }); " +
+                    "    $routeIndexes = @($validRoutes | ForEach-Object { [int]$_.InterfaceIndex }); " +
                     "    foreach ($t in $trapped) { " +
-                    "        if ($routeIndexes -contains $t.InterfaceIndex) { " +
+                    "        if ($routeIndexes -contains [int]$t.InterfaceIndex) { " +
                     "            Set-DnsClientServerAddress -InterfaceIndex $t.InterfaceIndex -ResetServerAddresses -ErrorAction SilentlyContinue; " +
                     "        } " +
                     "    } " +
                     "}; " +
-                    "Clear-DnsClientCache -ErrorAction SilentlyContinue;";
+                    "Clear-DnsClientCache -ErrorAction SilentlyContinue; " +
+                    "$routes = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -ne '0.0.0.0' }); " +
+                    "$routeIndexes = @($routes | ForEach-Object { [int]$_.InterfaceIndex }); " +
+                    "$trappedPost = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $routeIndexes -contains [int]$_.InterfaceIndex -and ($_.ServerAddresses -contains '127.0.0.1' -or $_.ServerAddresses -contains '::1') }); " +
+                    "if ($trappedPost.Count -gt 0) { exit 1 }; " +
+                    "$resolved = $false; foreach ($d in @('cloudflare.com','google.com')) { try { if (Resolve-DnsName -Name $d -QuickTimeout -ErrorAction Stop) { $resolved = $true; break } } catch {} }; " +
+                    "if (-not $resolved) { exit 1 }; " +
+                    "exit 0;";
 
                 ProcessStartInfo psi = new ProcessStartInfo
                 {
@@ -1139,9 +1231,9 @@ namespace SafeBrowse
 
                 using (Process proc = Process.Start(psi))
                 {
-                    if (proc != null && proc.WaitForExit(10000) && proc.ExitCode == 0)
+                    if (proc != null && proc.WaitForExit(15000) && proc.ExitCode == 0)
                     {
-                        Log("[OK] Native PowerShell DNS restore fallback succeeded.");
+                        Log("[OK] Native PowerShell DNS restore fallback succeeded and verified.");
                         return true;
                     }
                 }
@@ -1307,6 +1399,21 @@ namespace SafeBrowse
 
         public static void Main(string[] args)
         {
+            if (args != null && args.Length > 0 && args[0] == "--launch-helper")
+            {
+                uint targetSession = 0;
+                if (args.Length > 1 && uint.TryParse(args[1], out targetSession)) { }
+                else { targetSession = WTSGetActiveConsoleSessionId(); }
+
+                if (targetSession != 0 && targetSession != 0xFFFFFFFF)
+                {
+                    SafeBrowseServiceHost host = new SafeBrowseServiceHost();
+                    bool launched = host.EnsureUserHelperRunning(targetSession);
+                    Environment.Exit(launched ? 0 : 1);
+                }
+                Environment.Exit(1);
+            }
+
             if (Environment.UserInteractive)
             {
                 Console.WriteLine("SafeBrowse Child Service Host");

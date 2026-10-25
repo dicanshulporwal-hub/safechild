@@ -13,6 +13,7 @@ import {
   FamilyChildProfile,
 } from '../src/account-manager';
 import { ConfigManager, DeviceConfig } from '../src/config-manager';
+import { ParentPinManager } from '../src/parent-pin-manager';
 import { GuiServer } from '../src/gui-server';
 import { ElevatedConfigServer } from '../src/elevated-config-server';
 
@@ -401,7 +402,10 @@ describe('SafeBrowse Windows Pilot — Account Mapping Reliability & Secure Save
   });
 
   it('17. GUI Server: POST /api/mappings saves mappings and reloads successfully', async () => {
-    const server = new GuiServer(testConfigMgr, accountMgr);
+    const pinMgr = new ParentPinManager(testConfigMgr);
+    await pinMgr.setPin('123456');
+    const session = await pinMgr.verifyPin('123456');
+    const server = new GuiServer(testConfigMgr, accountMgr, undefined, pinMgr);
     const port = await server.start(0);
 
     try {
@@ -414,7 +418,10 @@ describe('SafeBrowse Windows Pilot — Account Mapping Reliability & Secure Save
 
       const resp = await fetch(`http://127.0.0.1:${port}/api/mappings`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-management-session': session.sessionToken!,
+        },
         body: JSON.stringify(payload),
       });
 
@@ -734,11 +741,16 @@ describe('SafeBrowse Windows Pilot — Account Mapping Reliability & Secure Save
       throw new Error('EACCES: permission denied, open secure/device-config.json');
     };
 
-    const server = new GuiServer(testConfigMgr, accountMgr);
+    const pinMgr = new ParentPinManager(testConfigMgr);
+    await pinMgr.setPin('123456');
+    const session = await pinMgr.verifyPin('123456');
+    const server = new GuiServer(testConfigMgr, accountMgr, undefined, pinMgr);
     const port = await server.start(0);
 
     try {
-      const resp = await fetch(`http://127.0.0.1:${port}/api/status`);
+      const resp = await fetch(`http://127.0.0.1:${port}/api/status`, {
+        headers: { 'x-management-session': session.sessionToken! },
+      });
       assert.strictEqual(resp.status, 200);
       const data: any = await resp.json();
 
@@ -758,7 +770,10 @@ describe('SafeBrowse Windows Pilot — Account Mapping Reliability & Secure Save
   // =========================================================================
 
   it('30. Normal GUI cannot write mappings directly when unelevated (returns 403 Forbidden)', async () => {
-    const server = new GuiServer(testConfigMgr, accountMgr);
+    const pinMgr = new ParentPinManager(testConfigMgr);
+    await pinMgr.setPin('123456');
+    const session = await pinMgr.verifyPin('123456');
+    const server = new GuiServer(testConfigMgr, accountMgr, undefined, pinMgr);
     // Mock unelevated status
     testConfigMgr.isAdministrator = async () => false;
     // Mock platform as win32 to trigger elevation check
@@ -770,7 +785,10 @@ describe('SafeBrowse Windows Pilot — Account Mapping Reliability & Secure Save
     try {
       const resp = await fetch(`http://127.0.0.1:${port}/api/mappings`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-management-session': session.sessionToken!,
+        },
         body: JSON.stringify({
           mappings: [
             { windowsSid: 'S-1-5-21-1000-1000-1000-1001', windowsUsername: 'Manjari', childId: null, enabled: false },
@@ -788,12 +806,16 @@ describe('SafeBrowse Windows Pilot — Account Mapping Reliability & Secure Save
   });
 
   it('31. Normal GUI launches elevated configuration mode via POST /api/reconfigure', async () => {
-    const server = new GuiServer(testConfigMgr, accountMgr);
+    const pinMgr = new ParentPinManager(testConfigMgr);
+    await pinMgr.setPin('123456');
+    const session = await pinMgr.verifyPin('123456');
+    const server = new GuiServer(testConfigMgr, accountMgr, undefined, pinMgr);
     const port = await server.start(0);
 
     try {
       const resp = await fetch(`http://127.0.0.1:${port}/api/reconfigure`, {
         method: 'POST',
+        headers: { 'x-management-session': session.sessionToken! },
       });
 
       assert.strictEqual(resp.status, 200);

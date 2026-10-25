@@ -140,7 +140,32 @@ export class SafeBrowseUserSessionHelper {
           this.onBlockReceivedCallback(blockMsg);
         }
 
-        this.browserLauncher(blockMsg.url);
+        Promise.resolve(this.browserLauncher(blockMsg.url))
+          .then((success) => {
+            const resultMsg = {
+              type: 'PRESENTATION_RESULT',
+              eventId: blockMsg.eventId,
+              success: Boolean(success !== false),
+              method: process.platform === 'win32' ? 'cmd_start' : 'simulated',
+              timestamp: Date.now(),
+            };
+            try {
+              this.socket?.write(JSON.stringify(resultMsg) + '\n');
+            } catch {}
+          })
+          .catch((err) => {
+            const resultMsg = {
+              type: 'PRESENTATION_RESULT',
+              eventId: blockMsg.eventId,
+              success: false,
+              method: 'error',
+              error: err?.message,
+              timestamp: Date.now(),
+            };
+            try {
+              this.socket?.write(JSON.stringify(resultMsg) + '\n');
+            } catch {}
+          });
       }
     } catch {
       // Ignore invalid JSON

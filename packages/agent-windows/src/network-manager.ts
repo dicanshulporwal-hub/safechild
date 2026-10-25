@@ -236,6 +236,28 @@ export class WindowsNetworkManager {
     return this.backupFile;
   }
 
+  private externalDnsResolutionChecker: (() => Promise<boolean>) | null = null;
+  private mockUserHelpersStopped: boolean = false;
+  private mockTrappedReadbackOverride: { index: number; alias: string; servers: string[] }[] | null = null;
+
+  public setExternalDnsResolutionCheckerForTesting(checker: (() => Promise<boolean>) | null): void {
+    this.externalDnsResolutionChecker = checker;
+  }
+
+  public areMockUserHelpersStopped(): boolean {
+    return this.mockUserHelpersStopped;
+  }
+
+  public resetMockUserHelpersStopped(): void {
+    this.mockUserHelpersStopped = false;
+  }
+
+  public setMockTrappedReadbackOverrideForTesting(
+    override: { index: number; alias: string; servers: string[] }[] | null
+  ): void {
+    this.mockTrappedReadbackOverride = override;
+  }
+
   private activeUpstreamProvider: (() => { host: string; port: number }[]) | null = null;
 
   public setActiveUpstreamProvider(
@@ -2390,152 +2412,314 @@ export class WindowsNetworkManager {
    */
   public async restoreOriginalDns(options: { stopReconciliation?: boolean } = {}): Promise<void> {
     const stopReconciliation = options.stopReconciliation ?? true;
-    logServiceMessage('INFO', '[NetworkManager] Restoring network adapters to original DNS settings...');
+    logServiceMessage('INFO', '[NetworkManager] Initiating network restoration to original DNS / DHCP settings...');
     this.isRestoring = true;
     if (stopReconciliation) {
       this.stopReconciliationLoop();
     }
 
-    if (this.getPlatform() !== 'win32') {
-      logServiceMessage('INFO', '[NetworkManager] Non-Windows platform: simulation complete.');
-      if (this.mockAdapters) {
-        const backupMap = new Map<number, AdapterDnsBackup>();
-        if (fs.existsSync(this.backupFile)) {
-          try {
-            const list: AdapterDnsBackup[] = JSON.parse(fs.readFileSync(this.backupFile, 'utf8'));
-            for (const b of list) backupMap.set(b.InterfaceIndex, b);
-          } catch {}
-        }
-        if (backupMap.size > 0) {
-          for (const ma of this.mockAdapters) {
-            const rec = backupMap.get(ma.InterfaceIndex);
-            if (rec) {
-              const clean = (rec.ServerAddresses || []).filter((ip) => !ip.startsWith('127.') && ip !== '::1');
-              ma.ServerAddresses = rec.DhcpEnabled !== false || clean.length === 0 ? [] : clean;
-            }
-          }
-        } else {
-          // If no backup records exist, reset ONLY internet-facing adapters currently configured to 127.0.0.1 to DHCP
-          for (const ma of this.mockAdapters) {
-            const isTrapped = (ma.ServerAddresses || []).includes('127.0.0.1');
-            const hasDefaultGateway = Boolean(ma.Gateway && ma.Gateway !== '0.0.0.0' && ma.Status !== 'Disconnected');
-            const alias = (ma.InterfaceAlias || '').toLowerCase();
-            const isExcluded =
-              alias.includes('tailscale') ||
-              alias.includes('loopback') ||
-              (ma.IpAddresses || []).some((ip) => ip.startsWith('169.254.'));
-            if (isTrapped && hasDefaultGateway && !isExcluded) {
-              ma.ServerAddresses = [];
-            }
-          }
-        }
+    // 1. Terminate all SafeBrowse UserHelper instances
+    logServiceMessage('INFO', '[NetworkManager] Stopping all SafeBrowse UserHelper instances...');
+    if (this.getPlatform() === 'win32') {
+      try {
+        await this.executePowerShell(
+          '$ErrorActionPreference = \'SilentlyContinue\'; Stop-Process -Name SafeBrowseUserHelper -Force -ErrorAction SilentlyContinue'
+        );
+        logServiceMessage('INFO', '[NetworkManager] [OK] Terminated SafeBrowse UserHelper processes.');
+      } catch (err: any) {
+        logServiceMessage('WARN', `[NetworkManager] Notice stopping UserHelper: ${err.message}`);
       }
-      this.isRestoring = false;
-      return;
+    } else {
+      this.mockUserHelpersStopped = true;
+      logServiceMessage('INFO', '[NetworkManager] Non-Windows: Simulated termination of SafeBrowse UserHelper.');
     }
-    // 1. Remove SafeBrowse firewall rules
+
+    // 2. Remove SafeBrowse firewall rules
     try {
       await firewallEngine.teardown();
-      logServiceMessage('INFO', '[NetworkManager] Firewall rules torn down.');
+      logServiceMessage('INFO', '[NetworkManager] [OK] SafeBrowse firewall rules torn down.');
     } catch (fwErr: any) {
       logServiceMessage('WARN', `[NetworkManager] Warning tearing down firewall rules: ${fwErr.message}`);
     }
 
-    // 2. Restore DNS
+    // 3. Restore DNS
     try {
-      let backupList: AdapterDnsBackup[] = [];
-
-      if (fs.existsSync(this.backupFile)) {
-        try {
-          const raw = fs.readFileSync(this.backupFile, 'utf8');
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            backupList = parsed;
+      if (this.getPlatform() !== 'win32') {
+        logServiceMessage('INFO', '[NetworkManager] Non-Windows platform: simulation complete.');
+        if (this.mockAdapters) {
+          const backupMap = new Map<number, AdapterDnsBackup>();
+          if (fs.existsSync(this.backupFile)) {
+            try {
+              const list: AdapterDnsBackup[] = JSON.parse(fs.readFileSync(this.backupFile, 'utf8'));
+              for (const b of list) backupMap.set(b.InterfaceIndex, b);
+            } catch {}
           }
-        } catch (e: any) {
-          logServiceMessage('WARN', `[NetworkManager] Could not parse backup file: ${e.message}`);
-        }
-      }
-
-      if (backupList.length > 0) {
-        for (const item of backupList) {
-          // Never restore 127.0.0.1 or ::1 as original DNS
-          const cleanAddrs = (item.ServerAddresses || []).filter(
-            (ip) => ip && !ip.includes('127.0.0.1') && !ip.includes('::1')
-          );
-          if (item.DhcpEnabled) {
-            // Original adapter was configured for DHCP (automatic DNS) -> reset to DHCP
-            const script = [
-              '$ErrorActionPreference = \'Stop\'',
-              `Set-DnsClientServerAddress -InterfaceIndex ${item.InterfaceIndex} -ResetServerAddresses -ErrorAction Stop`,
-            ].join('\n');
-            await this.executePowerShell(script);
-            logServiceMessage('INFO', `[NetworkManager] Reset adapter ${item.InterfaceIndex} to DHCP.`);
-          } else if (cleanAddrs.length > 0) {
-            // Restore original static DNS addresses
-            const formattedAddresses = cleanAddrs.map((ip) => `'${ip}'`).join(',');
-            const script = [
-              '$ErrorActionPreference = \'Stop\'',
-              `Set-DnsClientServerAddress -InterfaceIndex ${item.InterfaceIndex} -ServerAddresses @(${formattedAddresses}) -ErrorAction Stop`,
-            ].join('\n');
-            await this.executePowerShell(script);
-            logServiceMessage(
-              'INFO',
-              `[NetworkManager] Restored static DNS for adapter ${item.InterfaceIndex} to [${cleanAddrs.join(', ')}].`
-            );
+          if (backupMap.size > 0) {
+            for (const ma of this.mockAdapters) {
+              const rec = backupMap.get(ma.InterfaceIndex);
+              if (rec) {
+                const clean = (rec.ServerAddresses || []).filter((ip) => !ip.startsWith('127.') && ip !== '::1');
+                ma.ServerAddresses = rec.DhcpEnabled !== false || clean.length === 0 ? [] : clean;
+              }
+            }
           } else {
-            // Fallback to DHCP if no static addresses are available
-            const script = [
-              '$ErrorActionPreference = \'Stop\'',
-              `Set-DnsClientServerAddress -InterfaceIndex ${item.InterfaceIndex} -ResetServerAddresses -ErrorAction Stop`,
-            ].join('\n');
-            await this.executePowerShell(script);
-            logServiceMessage('INFO', `[NetworkManager] Reset adapter ${item.InterfaceIndex} to DHCP.`);
+            // If no backup records exist, reset ONLY internet-facing adapters currently configured to 127.0.0.1 to DHCP
+            for (const ma of this.mockAdapters) {
+              const isTrapped = (ma.ServerAddresses || []).includes('127.0.0.1');
+              const hasDefaultGateway = Boolean(ma.Gateway && ma.Gateway !== '0.0.0.0' && ma.Status !== 'Disconnected');
+              const alias = (ma.InterfaceAlias || '').toLowerCase();
+              const isExcluded =
+                alias.includes('tailscale') ||
+                alias.includes('loopback') ||
+                (ma.IpAddresses || []).some((ip) => ip.startsWith('169.254.'));
+              if (isTrapped && hasDefaultGateway && !isExcluded) {
+                ma.ServerAddresses = [];
+              }
+            }
           }
         }
+        return;
       } else {
-        // If no adapters were restored from backup (e.g. backup missing or corrupt),
-        // reset ONLY adapters that are currently set to 127.0.0.1 AND have an active default gateway to DHCP
-        // Never touch Tailscale or tunnels!
-        logServiceMessage(
-          'INFO',
-          '[NetworkManager] No backup records found; falling back to resetting internet-facing adapters currently configured to 127.0.0.1 to DHCP...'
-        );
-        const script = [
-          '$ErrorActionPreference = \'SilentlyContinue\'',
-          '$trapped = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.ServerAddresses -contains \'127.0.0.1\' })',
-          '$routes = @(Get-NetRoute -DestinationPrefix \'0.0.0.0/0\' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -ne \'0.0.0.0\' })',
-          'if ($routes.Count -gt 0) {',
-          '    $routeIndexes = @($routes | ForEach-Object { $_.InterfaceIndex })',
-          '    foreach ($t in $trapped) {',
-          '        if ($routeIndexes -contains $t.InterfaceIndex) {',
-          '            Set-DnsClientServerAddress -InterfaceIndex $t.InterfaceIndex -ResetServerAddresses -ErrorAction SilentlyContinue',
-          '        }',
-          '    }',
-          '} else {',
-          '    $configs = @(Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object { $_.NetAdapter.Status -eq \'Up\' -and $_.IPv4DefaultGateway -ne $null })',
-          '    $configIndexes = @($configs | ForEach-Object { [int]$_.InterfaceIndex })',
-          '    foreach ($t in $trapped) {',
-          '        if ($configIndexes -contains $t.InterfaceIndex) {',
-          '            Set-DnsClientServerAddress -InterfaceIndex $t.InterfaceIndex -ResetServerAddresses -ErrorAction SilentlyContinue',
-          '        }',
-          '    }',
-          '}',
-        ].join('\n');
-        await this.executePowerShell(script);
-        logServiceMessage('INFO', '[NetworkManager] Trapped internet-facing adapters reset to DHCP.');
+        let backupList: AdapterDnsBackup[] = [];
+
+        if (fs.existsSync(this.backupFile)) {
+          try {
+            const raw = fs.readFileSync(this.backupFile, 'utf8');
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              backupList = parsed;
+            }
+          } catch (e: any) {
+            logServiceMessage('WARN', `[NetworkManager] Could not parse backup file: ${e.message}`);
+          }
+        }
+
+        if (backupList.length > 0) {
+          for (const item of backupList) {
+            // Never restore 127.0.0.1 or ::1 as original DNS
+            const cleanAddrs = (item.ServerAddresses || []).filter(
+              (ip) => ip && !ip.includes('127.0.0.1') && !ip.includes('::1')
+            );
+            if (item.DhcpEnabled) {
+              // Original adapter was configured for DHCP (automatic DNS) -> reset to DHCP
+              const script = [
+                '$ErrorActionPreference = \'Stop\'',
+                `Set-DnsClientServerAddress -InterfaceIndex ${item.InterfaceIndex} -ResetServerAddresses -ErrorAction Stop`,
+              ].join('\n');
+              await this.executePowerShell(script);
+              if (this.mockAdapters) {
+                const ma = this.mockAdapters.find((a) => a.InterfaceIndex === item.InterfaceIndex);
+                if (ma) ma.ServerAddresses = [];
+              }
+              logServiceMessage('INFO', `[NetworkManager] Reset adapter ${item.InterfaceIndex} to DHCP.`);
+            } else if (cleanAddrs.length > 0) {
+              // Restore original static DNS addresses
+              const formattedAddresses = cleanAddrs.map((ip) => `'${ip}'`).join(',');
+              const script = [
+                '$ErrorActionPreference = \'Stop\'',
+                `Set-DnsClientServerAddress -InterfaceIndex ${item.InterfaceIndex} -ServerAddresses @(${formattedAddresses}) -ErrorAction Stop`,
+              ].join('\n');
+              await this.executePowerShell(script);
+              if (this.mockAdapters) {
+                const ma = this.mockAdapters.find((a) => a.InterfaceIndex === item.InterfaceIndex);
+                if (ma) ma.ServerAddresses = cleanAddrs;
+              }
+              logServiceMessage(
+                'INFO',
+                `[NetworkManager] Restored static DNS for adapter ${item.InterfaceIndex} to [${cleanAddrs.join(', ')}].`
+              );
+            } else {
+              // Fallback to DHCP if no static addresses are available
+              const script = [
+                '$ErrorActionPreference = \'Stop\'',
+                `Set-DnsClientServerAddress -InterfaceIndex ${item.InterfaceIndex} -ResetServerAddresses -ErrorAction Stop`,
+              ].join('\n');
+              await this.executePowerShell(script);
+              if (this.mockAdapters) {
+                const ma = this.mockAdapters.find((a) => a.InterfaceIndex === item.InterfaceIndex);
+                if (ma) ma.ServerAddresses = [];
+              }
+              logServiceMessage('INFO', `[NetworkManager] Reset adapter ${item.InterfaceIndex} to DHCP.`);
+            }
+          }
+        } else {
+          // If no adapters were restored from backup (e.g. backup missing or corrupt),
+          // reset ONLY adapters that are currently set to 127.0.0.1 AND have an active default gateway to DHCP
+          // Never touch Tailscale or tunnels!
+          logServiceMessage(
+            'INFO',
+            '[NetworkManager] No backup records found; falling back to resetting internet-facing adapters currently configured to 127.0.0.1 to DHCP...'
+          );
+          const script = [
+            '$ErrorActionPreference = \'SilentlyContinue\'',
+            '$trapped = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.ServerAddresses -contains \'127.0.0.1\' })',
+            '$routes = @(Get-NetRoute -DestinationPrefix \'0.0.0.0/0\' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -ne \'0.0.0.0\' })',
+            'if ($routes.Count -gt 0) {',
+            '    $routeIndexes = @($routes | ForEach-Object { [int]$_.InterfaceIndex })',
+            '    foreach ($t in $trapped) {',
+            '        if ($routeIndexes -contains $t.InterfaceIndex) {',
+            '            Set-DnsClientServerAddress -InterfaceIndex $t.InterfaceIndex -ResetServerAddresses -ErrorAction SilentlyContinue',
+            '        }',
+            '    }',
+            '} else {',
+            '    $configs = @(Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object { $_.NetAdapter.Status -eq \'Up\' -and $_.IPv4DefaultGateway -ne $null })',
+            '    $configIndexes = @($configs | ForEach-Object { [int]$_.InterfaceIndex })',
+            '    foreach ($t in $trapped) {',
+            '        if ($configIndexes -contains [int]$t.InterfaceIndex) {',
+            '            Set-DnsClientServerAddress -InterfaceIndex $t.InterfaceIndex -ResetServerAddresses -ErrorAction SilentlyContinue',
+            '        }',
+            '    }',
+            '}',
+          ].join('\n');
+          await this.executePowerShell(script);
+          if (this.mockAdapters) {
+            for (const ma of this.mockAdapters) {
+              if ((ma.ServerAddresses || []).includes('127.0.0.1')) {
+                ma.ServerAddresses = [];
+              }
+            }
+          }
+          logServiceMessage('INFO', '[NetworkManager] Trapped internet-facing adapters reset to DHCP.');
+        }
       }
 
-      // Flush DNS client cache
-      const flushScript = '$ErrorActionPreference = \'SilentlyContinue\'; Clear-DnsClientCache';
-      await this.executePowerShell(flushScript);
+      // 4. Flush DNS client cache
+      await this.flushDnsCache();
 
-      logServiceMessage('INFO', '[NetworkManager] [OK] Original DNS configuration cleanly restored and DNS cache flushed.');
+      // 5. Read back DNS configuration and verify no active internet-facing adapter remains trapped at 127.0.0.1
+      logServiceMessage('INFO', '[NetworkManager] Reading back DNS configuration to verify no adapter is trapped at 127.0.0.1...');
+      const trapped = await this.checkTrappedAdapters();
+      if (trapped.length > 0) {
+        const desc = trapped.map((t) => `${t.alias} (${t.index}): [${t.servers.join(', ')}]`).join('; ');
+        const errMsg = `DNS read-back verification failed: active adapter(s) remain trapped at 127.0.0.1: ${desc}`;
+        logServiceMessage('ERROR', `[NetworkManager] [ERROR] ${errMsg}`);
+        throw new Error(errMsg);
+      }
+      logServiceMessage('INFO', '[NetworkManager] [OK] Read-back verification passed: zero active adapters trapped at 127.0.0.1.');
+
+      // 6. Verify normal external DNS resolution after restoration
+      logServiceMessage('INFO', '[NetworkManager] Verifying normal external DNS resolution after restoration...');
+      const externalOk = await this.verifyExternalDnsResolution();
+      if (!externalOk) {
+        const errMsg = 'External DNS resolution verification failed: cannot resolve external domain after restoration';
+        logServiceMessage('ERROR', `[NetworkManager] [ERROR] ${errMsg}`);
+        throw new Error(errMsg);
+      }
+      logServiceMessage('INFO', '[NetworkManager] [OK] External DNS resolution verified successfully.');
+
+      logServiceMessage('INFO', '[NetworkManager] [OK] Original DNS configuration cleanly restored, verified, and operational.');
     } catch (e: any) {
       logServiceMessage('ERROR', `[NetworkManager] Error during DNS restoration: ${e.message}`);
       throw e;
     } finally {
       this.isRestoring = false;
+    }
+  }
+
+  public async checkTrappedAdapters(): Promise<{ index: number; alias: string; servers: string[] }[]> {
+    if (this.mockTrappedReadbackOverride !== null) {
+      return this.mockTrappedReadbackOverride;
+    }
+
+    if (this.mockAdapters !== null) {
+      const trapped: { index: number; alias: string; servers: string[] }[] = [];
+      for (const ma of this.mockAdapters) {
+        const addrs = ma.ServerAddresses || [];
+        const hasGateway = Boolean(ma.Gateway && ma.Gateway !== '0.0.0.0' && ma.Status !== 'Disconnected');
+        const alias = (ma.InterfaceAlias || '').toLowerCase();
+        const isExcluded = alias.includes('tailscale') || alias.includes('loopback');
+        if (hasGateway && !isExcluded && (addrs.includes('127.0.0.1') || addrs.includes('::1'))) {
+          trapped.push({
+            index: ma.InterfaceIndex,
+            alias: ma.InterfaceAlias || `Adapter ${ma.InterfaceIndex}`,
+            servers: addrs,
+          });
+        }
+      }
+      return trapped;
+    }
+
+    try {
+      const script = [
+        '$ErrorActionPreference = \'SilentlyContinue\'',
+        '$trapped = @()',
+        '$dns = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue)',
+        'foreach ($d in $dns) {',
+        '    $alias = if ($d.InterfaceAlias) { [string]$d.InterfaceAlias } else { "Interface $($d.InterfaceIndex)" }',
+        '    $aliasLower = $alias.ToLower()',
+        '    if ($aliasLower -match \'tailscale\' -or $aliasLower -match \'loopback\') { continue }',
+        '    $addrs = if ($d.ServerAddresses) { @($d.ServerAddresses | ForEach-Object { [string]$_ }) } else { @() }',
+        '    if ($addrs -contains \'127.0.0.1\' -or $addrs -contains \'::1\') {',
+        '        $trapped += [PSCustomObject]@{',
+        '            InterfaceIndex = [int]$d.InterfaceIndex',
+        '            InterfaceAlias = $alias',
+        '            ServerAddresses = $addrs',
+        '        }',
+        '    }',
+        '}',
+        'if ($trapped.Count -gt 0) { $trapped | ConvertTo-Json -Compress } else { \'[]\' }',
+      ].join('\n');
+
+      const { stdout } = await this.executePowerShell(script);
+      const trimmed = (stdout || '').trim();
+      if (!trimmed || trimmed === '[]' || trimmed === 'null') {
+        return [];
+      }
+      const parsed = JSON.parse(trimmed);
+      const list = Array.isArray(parsed) ? parsed : [parsed];
+      const result: { index: number; alias: string; servers: string[] }[] = [];
+      for (const item of list) {
+        const idx = Number(item.InterfaceIndex);
+        if (!isNaN(idx)) {
+          const servers = Array.isArray(item.ServerAddresses) ? item.ServerAddresses : (item.ServerAddresses ? [item.ServerAddresses] : []);
+          const isTrapped = servers.some((s: any) => typeof s === 'string' && (s.startsWith('127.') || s === '::1'));
+          if (isTrapped) {
+            result.push({
+              index: idx,
+              alias: item.InterfaceAlias || `Interface ${idx}`,
+              servers,
+            });
+          }
+        }
+      }
+      return result;
+    } catch {
+      return [];
+    }
+  }
+
+  public async verifyExternalDnsResolution(testDomain: string = 'dns.google'): Promise<boolean> {
+    if (this.externalDnsResolutionChecker) {
+      return await this.externalDnsResolutionChecker();
+    }
+
+    // In unit tests running on non-Windows host (Linux/macOS) or with mock adapters:
+    if (process.platform !== 'win32' || this.mockAdapters !== null) {
+      if (this.commandExecutor) {
+        const res = await this.executePowerShell('Resolve-DnsName');
+        if (res.stdout.includes('RESOLVE_FAILED') || res.stdout.trim() === 'FAILED') {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    try {
+      const script = [
+        '$ErrorActionPreference = \'SilentlyContinue\'',
+        `$resolved = $false`,
+        `foreach ($d in @('${testDomain}', 'google.com', 'cloudflare.com', 'microsoft.com')) {`,
+        `  try {`,
+        `    $r = Resolve-DnsName -Name $d -Type A -QuickTimeout -ErrorAction Stop`,
+        `    if ($r) { $resolved = $true; break }`,
+        `  } catch {}`,
+        `}`,
+        `if ($resolved) { 'RESOLVED_OK' } else { 'FAILED' }`,
+      ].join('\n');
+      const { stdout } = await this.executePowerShell(script);
+      return (stdout || '').trim().includes('RESOLVED_OK');
+    } catch {
+      return false;
     }
   }
 

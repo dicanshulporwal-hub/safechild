@@ -12,10 +12,11 @@ import { guiServer } from './gui-server';
 import { normalizePairingCode, CURRENT_WINDOWS_PROTOCOL_VERSION } from '@safebrowse/shared';
 import * as fs from 'fs';
 import * as path from 'path';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 async function verifyDeviceWithBackend(
   cfg: DeviceConfig
@@ -287,6 +288,7 @@ async function runServiceMode(): Promise<void> {
   // If spawned by SafeBrowseServiceHost, monitor parent PID.
   // If parent dies unexpectedly, self-terminate immediately with emergency DNS restoration.
   let parentWatchdogTimer: NodeJS.Timeout | null = null;
+  let helperWatchdogTimer: NodeJS.Timeout | null = null;
   const parentPidStr = process.env.SAFEBROWSE_PARENT_PID;
   if (parentPidStr) {
     const parentPid = parseInt(parentPidStr, 10);
@@ -307,6 +309,7 @@ async function runServiceMode(): Promise<void> {
             `[SafeBrowse Service] [CRITICAL] Parent ServiceHost PID ${parentPid} has terminated. Initiating fail-safe emergency DNS restore and self-terminating...`
           );
           if (parentWatchdogTimer) clearInterval(parentWatchdogTimer);
+    if (helperWatchdogTimer) clearInterval(helperWatchdogTimer);
           try {
             await networkManager.restoreOriginalDns();
           } catch (e: any) {
@@ -323,6 +326,7 @@ async function runServiceMode(): Promise<void> {
     if (isShuttingDown) return;
     isShuttingDown = true;
     if (parentWatchdogTimer) clearInterval(parentWatchdogTimer);
+    if (helperWatchdogTimer) clearInterval(helperWatchdogTimer);
     try {
       if (fs.existsSync(pidFile)) {
         fs.unlinkSync(pidFile);
@@ -528,6 +532,74 @@ async function runServiceMode(): Promise<void> {
   blockIpcServer.setActivePolicyProvider(() => sessionMonitor.getCurrentPolicy());
   blockIpcServer.setMultiSessionChecker(() => sessionMonitor.getMultiSessionState());
 
+  let isLaunchingHelper = false;
+  const launchUserHelper = async (sessionId?: number): Promise<boolean> => {
+    if (isLaunchingHelper) {
+      logServiceMessage(
+        'INFO',
+        '[SafeBrowse Service] Helper launch already in progress. Skipping duplicate concurrent request.'
+      );
+      return false;
+    }
+
+    const activePolicy = sessionMonitor.getCurrentPolicy();
+    // Only launch helper if active user is a managed child!
+    // Parent/unmanaged sessions must not receive child block UX.
+    if (activePolicy && !activePolicy.isManaged) {
+      logServiceMessage(
+        'INFO',
+        `[SafeBrowse Service] Suppressed helper launch: Active user '${activePolicy.accountName}' is Unmanaged/Parent.`
+      );
+      return false;
+    }
+
+    const rawSession = sessionId ?? activePolicy?.sessionId;
+    const targetSession: number | undefined = typeof rawSession === 'number' ? rawSession : undefined;
+    if (blockIpcServer.isHelperHealthyForSession(targetSession, activePolicy?.accountName)) {
+      logServiceMessage(
+        'INFO',
+        `[SafeBrowse Service] Healthy helper already active for Session ${targetSession ?? 'active'}. Skipping launch.`
+      );
+      return true;
+    }
+
+    isLaunchingHelper = true;
+    logServiceMessage(
+      'INFO',
+      `[SafeBrowse Service] Helper recovery requested for Session ${targetSession ?? 'active'} (account: '${activePolicy?.accountName || 'N/A'}')`
+    );
+
+    if (process.platform !== 'win32') {
+      logServiceMessage('INFO', '[SafeBrowse Service] Non-Windows platform; simulated helper launch.');
+      isLaunchingHelper = false;
+      return true;
+    }
+
+    try {
+      const installDir = configManager.getInstallDir();
+      const hostExe = path.join(installDir, 'SafeBrowseServiceHost.exe');
+      const helperExe = path.join(installDir, 'SafeBrowseUserHelper.exe');
+
+      if (fs.existsSync(hostExe)) {
+        const args = targetSession !== undefined ? ['--launch-helper', String(targetSession)] : ['--launch-helper'];
+        await execFileAsync(hostExe, args);
+        logServiceMessage('INFO', `[SafeBrowse Service] [OK] Invoked SafeBrowseServiceHost --launch-helper for Session ${targetSession ?? 'active'}`);
+        return true;
+      } else if (fs.existsSync(helperExe)) {
+        logServiceMessage('INFO', `[SafeBrowse Service] Invoking SafeBrowseUserHelper directly for Session ${targetSession ?? 'active'}`);
+        return true;
+      }
+      return false;
+    } catch (err: any) {
+      logServiceMessage('WARN', `[SafeBrowse Service] Failed to launch helper: ${err.message}`);
+      return false;
+    } finally {
+      isLaunchingHelper = false;
+    }
+  };
+
+  blockIpcServer.setHelperLauncher(launchUserHelper);
+
   // Start Block IPC Server for user-session helper presentation
   try {
     await blockIpcServer.start();
@@ -729,6 +801,35 @@ async function runServiceMode(): Promise<void> {
         );
       });
   }
+
+  // 7. Periodic UserHelper Watchdog (every 5000ms)
+  // Ensures that whenever an active managed child session is active,
+  // a healthy SafeBrowseUserHelper is running and connected to BlockIpcServer.
+  // Independent of Windows session change events.
+  helperWatchdogTimer = setInterval(async () => {
+    if (isShuttingDown) return;
+    try {
+      const activePolicy = sessionMonitor.getCurrentPolicy();
+      if (!activePolicy || !activePolicy.isManaged || !activePolicy.childId) {
+        // Parent or unmanaged user: do not launch or require helper
+        return;
+      }
+      const targetSession = typeof activePolicy.sessionId === 'number' ? activePolicy.sessionId : undefined;
+      const isHealthy = blockIpcServer.isHelperHealthyForSession(
+        targetSession,
+        activePolicy.accountName
+      );
+      if (!isHealthy) {
+        logServiceMessage(
+          'WARN',
+          `[SafeBrowse Service] [WATCHDOG] Helper missing for active managed child '${activePolicy.accountName}' (Session ${targetSession ?? 'N/A'}). Triggering watchdog recovery...`
+        );
+        await launchUserHelper(targetSession);
+      }
+    } catch (watchdogErr: any) {
+      logServiceMessage('WARN', `[SafeBrowse Service] Helper watchdog warning: ${watchdogErr.message}`);
+    }
+  }, 5000);
 }
 
 export interface ServiceQueryResult {
@@ -1183,6 +1284,25 @@ async function main() {
   if (args.includes('--emergency-restore') || args.includes('--restore-dns')) {
     logServiceMessage('INFO', '[SafeBrowse] Initiating emergency DNS and firewall restoration...');
     try {
+      // Step 0: Ensure background SafeBrowseChildService is stopped to prevent reconciliation loop re-trapping DNS
+      if (process.platform === 'win32') {
+        try {
+          const psPath = configManager.getPowerShellPath();
+          await execFileAsync(psPath, [
+            '-NoLogo',
+            '-NoProfile',
+            '-NonInteractive',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-Command',
+            '$ErrorActionPreference = \'SilentlyContinue\'; Stop-Service -Name "SafeBrowseChildService" -Force -ErrorAction SilentlyContinue',
+          ]);
+          logServiceMessage('INFO', '[SafeBrowse] [OK] Stopped SafeBrowseChildService before network restoration.');
+        } catch (svcErr: any) {
+          logServiceMessage('WARN', `[SafeBrowse] Notice stopping SafeBrowseChildService: ${svcErr.message}`);
+        }
+      }
+
       await networkManager.restoreOriginalDns();
       logServiceMessage('INFO', '[SafeBrowse] [OK] Emergency restoration complete.');
       process.exit(0);

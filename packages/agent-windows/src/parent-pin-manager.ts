@@ -16,6 +16,8 @@ export interface ManagementSession {
   token: string;
   createdAt: number;
   expiresAt: number;
+  boundSid?: string;
+  boundUsername?: string;
 }
 
 export class ParentPinManager {
@@ -107,7 +109,9 @@ export class ParentPinManager {
    * On success, generates a short-lived in-memory management session token.
    */
   public async verifyPin(
-    pin: string
+    pin: string,
+    boundSid?: string,
+    boundUsername?: string
   ): Promise<{ success: boolean; sessionToken?: string; error?: string }> {
     const cleanPin = String(pin || '').trim();
     if (!/^\d{6,8}$/.test(cleanPin)) {
@@ -116,7 +120,10 @@ export class ParentPinManager {
 
     const pinPath = this.getPinFilePath();
     if (!fs.existsSync(pinPath)) {
-      return { success: false, error: 'NO_PIN_CONFIGURED' };
+      return {
+        success: false,
+        error: 'SafeBrowse Parent PIN has not been configured. Protected management is locked.',
+      };
     }
 
     let record: PinVerifierRecord;
@@ -152,6 +159,8 @@ export class ParentPinManager {
       token,
       createdAt: now,
       expiresAt: now + ParentPinManager.SESSION_TTL_MS,
+      boundSid,
+      boundUsername,
     };
 
     logServiceMessage('INFO', '[ParentPinManager] Parent PIN verified. Temporary management session unlocked.');
@@ -160,9 +169,9 @@ export class ParentPinManager {
 
   /**
    * Validates an active in-memory management session token.
-   * Returns false if token is expired, invalid, or absent.
+   * Returns false if token is expired, invalid, absent, or if console user switched.
    */
-  public validateSession(sessionToken?: string): boolean {
+  public validateSession(sessionToken?: string, currentSid?: string): boolean {
     if (!sessionToken || !this.activeSession) {
       return false;
     }
@@ -173,7 +182,19 @@ export class ParentPinManager {
       this.invalidateSession();
       return false;
     }
+    if (currentSid && this.activeSession.boundSid && this.activeSession.boundSid !== currentSid) {
+      logServiceMessage(
+        'WARN',
+        `[ParentPinManager] Management session invalidated due to user switch (bound: ${this.activeSession.boundSid}, current: ${currentSid}).`
+      );
+      this.invalidateSession();
+      return false;
+    }
     return true;
+  }
+
+  public getActiveSession(): ManagementSession | null {
+    return this.activeSession;
   }
 
   /**

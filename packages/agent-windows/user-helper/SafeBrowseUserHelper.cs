@@ -79,7 +79,7 @@ namespace SafeBrowse.UserHelper
                                 string line;
                                 while (!_stopping && (line = reader.ReadLine()) != null)
                                 {
-                                    ProcessMessage(line);
+                                    ProcessMessage(line, writer);
                                 }
                             }
                         }
@@ -100,7 +100,7 @@ namespace SafeBrowse.UserHelper
             }
         }
 
-        private static void ProcessMessage(string rawMessage)
+        private static void ProcessMessage(string rawMessage, StreamWriter writer = null)
         {
             if (string.IsNullOrWhiteSpace(rawMessage) || rawMessage.Length > 8192)
             {
@@ -127,7 +127,9 @@ namespace SafeBrowse.UserHelper
                 {
                     Match domainMatch = Regex.Match(rawMessage, "\"domain\"\\s*:\\s*\"([^\"]+)\"");
                     string domain = domainMatch.Success ? UnescapeJson(domainMatch.Groups[1].Value) : "unknown";
-                    LogMessage("INFO", string.Format("PRESENT_BLOCK received for domain '{0}'. Launching default browser.", domain));
+                    Match eventIdMatch = Regex.Match(rawMessage, "\"eventId\"\\s*:\\s*\"([^\"]+)\"");
+                    string eventId = eventIdMatch.Success ? UnescapeJson(eventIdMatch.Groups[1].Value) : "";
+                    LogMessage("INFO", string.Format("PRESENT_BLOCK received for domain '{0}' (eventId: {1}). Launching default browser.", domain, eventId));
 
                     Match urlMatch = Regex.Match(rawMessage, "\"url\"\\s*:\\s*\"([^\"]+)\"");
                     if (!urlMatch.Success)
@@ -137,13 +139,35 @@ namespace SafeBrowse.UserHelper
 
                     string blockUrl = UnescapeJson(urlMatch.Groups[1].Value);
 
+                    bool success = false;
+                    string method = "none";
                     if (IsValidBlockUrl(blockUrl))
                     {
-                        LaunchDefaultBrowser(blockUrl);
+                        success = LaunchDefaultBrowser(blockUrl, out method);
                     }
                     else
                     {
+                        method = "invalid_url";
                         LogMessage("WARN", "Received invalid block URL. Suppressing launch.");
+                    }
+
+                    if (writer != null)
+                    {
+                        try
+                        {
+                            string resultMsg = string.Format(
+                                "{{\"type\":\"PRESENTATION_RESULT\",\"eventId\":\"{0}\",\"success\":{1},\"method\":\"{2}\"}}\n",
+                                EscapeJson(eventId),
+                                success ? "true" : "false",
+                                EscapeJson(method)
+                            );
+                            writer.Write(resultMsg);
+                            LogMessage("INFO", string.Format("Browser launch dispatched for block presentation: eventId='{0}', dispatched={1}, method='{2}'", eventId, success, method));
+                        }
+                        catch (Exception resEx)
+                        {
+                            LogMessage("WARN", string.Format("Could not send PRESENTATION_RESULT to pipe: {0}", resEx.Message));
+                        }
                     }
                 }
             }
@@ -199,8 +223,9 @@ namespace SafeBrowse.UserHelper
             return true;
         }
 
-        private static void LaunchDefaultBrowser(string url)
+        private static bool LaunchDefaultBrowser(string url, out string method)
         {
+            method = "none";
             try
             {
                 // Uses Windows shell default URL association (ShellExecuteEx)
@@ -210,7 +235,9 @@ namespace SafeBrowse.UserHelper
                     UseShellExecute = true
                 };
                 Process.Start(psi);
+                method = "ShellExecuteEx";
                 LogMessage("INFO", "Launched default browser via Windows ShellExecuteEx.");
+                return true;
             }
             catch (Exception ex)
             {
@@ -224,11 +251,15 @@ namespace SafeBrowse.UserHelper
                         UseShellExecute = false
                     };
                     Process.Start(fallback);
+                    method = "cmd_fallback";
                     LogMessage("INFO", "Launched default browser via cmd.exe start fallback.");
+                    return true;
                 }
                 catch (Exception fallbackEx)
                 {
+                    method = "failed";
                     LogMessage("WARN", string.Format("cmd fallback launch failed: {0}", fallbackEx.Message));
+                    return false;
                 }
             }
         }

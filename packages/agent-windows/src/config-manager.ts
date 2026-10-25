@@ -91,6 +91,21 @@ export class ConfigManager {
   }
 
   /**
+   * SafeBrowse binaries installation directory (contains SafeBrowseServiceHost.exe, SafeBrowseUserHelper.exe).
+   */
+  public getInstallDir(): string {
+    if (this.getPlatform() === 'win32') {
+      const execDir = path.dirname(process.execPath);
+      if (fs.existsSync(path.join(execDir, 'SafeBrowseServiceHost.exe'))) {
+        return execDir;
+      }
+      const pf = process.env['ProgramFiles'] || 'C:\\Program Files';
+      return path.join(pf, 'SafeBrowse');
+    }
+    return path.dirname(process.execPath);
+  }
+
+  /**
    * Privileged secure storage directory (SYSTEM and Administrators ONLY, no Users).
    * Holds device-config.json (credentials, tokens) and network-backup.json.
    */

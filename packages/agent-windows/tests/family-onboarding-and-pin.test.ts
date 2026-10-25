@@ -421,4 +421,349 @@ describe('SafeBrowse Stage C.5 — Family-Level Onboarding, Cloud Truth & Parent
     assert.ok(script.includes('ProfileList'));
     assert.ok(script.includes('System.Security.Principal.SecurityIdentifier'));
   });
+
+  // =========================================================================
+  // Gate A2 Defect Verification: Parent Management Lock Invariants
+  // =========================================================================
+
+  it('10. Gate A2: Missing Parent PIN strictly locks protected management (never fails open)', async () => {
+    // 1. Device is paired but Parent PIN is NOT configured
+    await configMgr.saveDeviceConfig({
+      deviceId: 'dev-no-pin-test',
+      deviceToken: 'dtk_no_pin_token',
+      childId: null,
+      parentId: 'p1',
+      deviceName: 'Family Laptop',
+      backendUrl: 'https://safebrowse.porwal.online',
+      pairedAt: new Date().toISOString(),
+      onboardingState: 'PROTECTED',
+    });
+    await pinMgr.clearPin();
+    assert.strictEqual(await pinMgr.isPinSet(), false);
+
+    const server = new GuiServer(configMgr, accountMgr, networkManager, pinMgr);
+    const port = await server.start(0);
+
+    try {
+      // Status-only view is available without PIN
+      const statusRes = await fetch(`http://127.0.0.1:${port}/api/status`);
+      assert.strictEqual(statusRes.status, 200);
+      const statusData = await statusRes.json() as any;
+      assert.strictEqual(statusData.pinConfigured, false);
+      assert.strictEqual(statusData.managementUnlocked, false);
+
+      // Protected mutations without PIN configured must return 401 DENIED
+      const mappingsRes = await fetch(`http://127.0.0.1:${port}/api/mappings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mappings: [] }),
+      });
+      assert.strictEqual(mappingsRes.status, 401);
+      const mappingsData = await mappingsRes.json() as any;
+      assert.match(mappingsData.error, /Parent PIN has not been configured/);
+
+      const reconfigRes = await fetch(`http://127.0.0.1:${port}/api/reconfigure`, { method: 'POST' });
+      assert.strictEqual(reconfigRes.status, 401);
+      const reconfigData = await reconfigRes.json() as any;
+      assert.match(reconfigData.error, /Parent PIN has not been configured/);
+
+      const disconnectRes = await fetch(`http://127.0.0.1:${port}/api/disconnect`, { method: 'POST' });
+      assert.strictEqual(disconnectRes.status, 401);
+      const disconnectData = await disconnectRes.json() as any;
+      assert.match(disconnectData.error, /Parent PIN has not been configured/);
+
+      const verifyRes = await fetch(`http://127.0.0.1:${port}/api/verify-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: '123456' }),
+      });
+      assert.strictEqual(verifyRes.status, 401);
+      const verifyData = await verifyRes.json() as any;
+      assert.match(verifyData.error, /Parent PIN has not been configured/);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it('11. Gate A2: Parent PIN authentication matrix (wrong PIN, correct PIN, TTL expiration)', async () => {
+    await configMgr.saveDeviceConfig({
+      deviceId: 'dev-pin-auth-matrix',
+      deviceToken: 'dtk_pin_matrix',
+      childId: null,
+      parentId: 'p1',
+      deviceName: 'Family Laptop',
+      backendUrl: 'https://safebrowse.porwal.online',
+      pairedAt: new Date().toISOString(),
+      onboardingState: 'PROTECTED',
+    });
+    await pinMgr.setPin('849201');
+    assert.strictEqual(await pinMgr.isPinSet(), true);
+
+    const server = new GuiServer(configMgr, accountMgr, networkManager, pinMgr);
+    const port = await server.start(0);
+
+    try {
+      // 1. Wrong PIN => DENIED (401)
+      const wrongRes = await fetch(`http://127.0.0.1:${port}/api/verify-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: '999999' }),
+      });
+      assert.strictEqual(wrongRes.status, 401);
+      const wrongData = await wrongRes.json() as any;
+      assert.ok(wrongData.error);
+
+      // 2. Correct PIN => temporary management session (200 + token)
+      assert.strictEqual(
+        ParentPinManager.SESSION_TTL_MS,
+        5 * 60 * 1000,
+        'Management session TTL must strictly be 5 minutes (300,000 ms)'
+      );
+
+      const correctRes = await fetch(`http://127.0.0.1:${port}/api/verify-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: '849201' }),
+      });
+      assert.strictEqual(correctRes.status, 200);
+      const correctData = await correctRes.json() as any;
+      assert.strictEqual(correctData.success, true);
+      assert.ok(correctData.sessionToken);
+
+      // Verify session is valid immediately
+      assert.strictEqual(pinMgr.validateSession(correctData.sessionToken), true);
+
+      // Status with valid token shows managementUnlocked: true
+      const authStatus = await fetch(`http://127.0.0.1:${port}/api/status`, {
+        headers: { 'x-management-session': correctData.sessionToken },
+      });
+      assert.strictEqual(authStatus.status, 200);
+      const authData = await authStatus.json() as any;
+      assert.strictEqual(authData.managementUnlocked, true);
+
+      // Verify session expiration at TTL boundary (5 minutes)
+      const originalNow = Date.now;
+      try {
+        // Advance clock by 5 minutes + 1 second
+        Date.now = () => originalNow() + 5 * 60 * 1000 + 1000;
+        assert.strictEqual(
+          pinMgr.validateSession(correctData.sessionToken),
+          false,
+          'Session token must expire strictly after 5 minutes'
+        );
+      } finally {
+        Date.now = originalNow;
+      }
+
+      // 3. Expired or invalidated session => DENIED (401)
+      pinMgr.invalidateSession(correctData.sessionToken);
+      const expiredStatus = await fetch(`http://127.0.0.1:${port}/api/status`, {
+        headers: { 'x-management-session': correctData.sessionToken },
+      });
+      assert.strictEqual(expiredStatus.status, 200);
+      const expiredData = await expiredStatus.json() as any;
+      assert.strictEqual(expiredData.managementUnlocked, false);
+
+      const expiredMutate = await fetch(`http://127.0.0.1:${port}/api/reconfigure`, {
+        method: 'POST',
+        headers: { 'x-management-session': correctData.sessionToken },
+      });
+      assert.strictEqual(expiredMutate.status, 401);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it('12. Gate A2: Valid PIN but non-admin action requiring Windows elevation is rejected', async () => {
+    await configMgr.saveDeviceConfig({
+      deviceId: 'dev-elevation-test',
+      deviceToken: 'dtk_elevation',
+      childId: null,
+      parentId: 'p1',
+      deviceName: 'Family Laptop',
+      backendUrl: 'https://safebrowse.porwal.online',
+      pairedAt: new Date().toISOString(),
+      onboardingState: 'PROTECTED',
+    });
+    await pinMgr.setPin('123456');
+
+    // Simulate non-administrator caller
+    configMgr.setMockIsAdministratorForTesting(false);
+
+    const server = new GuiServer(configMgr, accountMgr, networkManager, pinMgr);
+    const port = await server.start(0);
+
+    try {
+      // Authenticate with valid Parent PIN
+      const verifyRes = await fetch(`http://127.0.0.1:${port}/api/verify-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: '123456' }),
+      });
+      assert.strictEqual(verifyRes.status, 200);
+      const { sessionToken } = await verifyRes.json() as any;
+      assert.ok(sessionToken);
+
+      // Attempt action requiring elevation (/api/pair requires Windows Admin)
+      const pairRes = await fetch(`http://127.0.0.1:${port}/api/pair`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-management-session': sessionToken,
+        },
+        body: JSON.stringify({ code: 'test-code' }),
+      });
+      // Elevation guard rejects with 403 Windows elevation required
+      assert.strictEqual(pairRes.status, 403);
+      const pairData = await pairRes.json() as any;
+      assert.match(pairData.error, /Administrator/i);
+    } finally {
+      server.stop();
+      configMgr.setMockIsAdministratorForTesting(true);
+    }
+  });
+
+  it('13. Gate A2: User switch / session change immediately invalidates management session', async () => {
+    await configMgr.saveDeviceConfig({
+      deviceId: 'dev-user-switch-test',
+      deviceToken: 'dtk_switch',
+      childId: null,
+      parentId: 'p1',
+      deviceName: 'Family Laptop',
+      backendUrl: 'https://safebrowse.porwal.online',
+      pairedAt: new Date().toISOString(),
+      onboardingState: 'PROTECTED',
+    });
+    await pinMgr.setPin('778899');
+
+    // Currently console user is S-1-5-21-1000-1001 (AnshulPorwal)
+    accountMgr.setMockConsoleSidForTesting('S-1-5-21-1000-1001');
+
+    const server = new GuiServer(configMgr, accountMgr, networkManager, pinMgr);
+    const port = await server.start(0);
+
+    try {
+      // Verify PIN while logged in as S-1-5-21-1000-1001
+      const verifyRes = await fetch(`http://127.0.0.1:${port}/api/verify-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: '778899' }),
+      });
+      assert.strictEqual(verifyRes.status, 200);
+      const { sessionToken } = await verifyRes.json() as any;
+
+      // Token is valid for current console user
+      const check1 = await fetch(`http://127.0.0.1:${port}/api/status`, {
+        headers: { 'x-management-session': sessionToken },
+      });
+      const data1 = await check1.json() as any;
+      assert.strictEqual(data1.managementUnlocked, true);
+
+      // Fast User Switch occurs: console switched to S-1-5-21-1000-1002 (Child)
+      accountMgr.setMockConsoleSidForTesting('S-1-5-21-1000-1002');
+
+      // The previous management token MUST NOT be valid for the switched user
+      const check2 = await fetch(`http://127.0.0.1:${port}/api/status`, {
+        headers: { 'x-management-session': sessionToken },
+      });
+      const data2 = await check2.json() as any;
+      assert.strictEqual(data2.managementUnlocked, false);
+
+      const mutateRes = await fetch(`http://127.0.0.1:${port}/api/reconfigure`, {
+        method: 'POST',
+        headers: { 'x-management-session': sessionToken },
+      });
+      assert.strictEqual(mutateRes.status, 401);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it('14. Gate A2: Secure initial Parent PIN creation requires Windows Administrator elevation', async () => {
+    const { ElevatedPairServer } = await import('../src/elevated-pair-server');
+
+    const pairServer = new ElevatedPairServer(configMgr, accountMgr, networkManager, pinMgr);
+    const pairPort = await pairServer.start(0);
+
+    try {
+      await configMgr.saveDeviceConfig({
+        deviceId: 'dev-first-pin-setup',
+        deviceToken: 'dtk_first_pin_token',
+        childId: null,
+        parentId: 'parent-1',
+        deviceName: 'Family Laptop',
+        backendUrl: 'https://safebrowse.porwal.online',
+        pairedAt: new Date().toISOString(),
+        onboardingState: 'ACCOUNT_SETUP_REQUIRED',
+      });
+
+      // Clear any pre-existing PIN
+      await pinMgr.clearPin();
+      assert.strictEqual(await pinMgr.isPinSet(), false);
+
+      // 1. Non-admin / child attempts to configure initial Parent PIN => DENIED (403)
+      configMgr.setMockIsAdministratorForTesting(false);
+      const childPinAttempt = await fetch(`http://127.0.0.1:${pairPort}/api/finish-setup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          parentPin: '741258',
+          mappings: [],
+        }),
+      });
+      assert.strictEqual(childPinAttempt.status, 403);
+      const childData = await childPinAttempt.json() as any;
+      assert.match(childData.error, /Administrator/i);
+      assert.strictEqual(await pinMgr.isPinSet(), false);
+
+      // 2. Elevated parent / administrator sets initial PIN => SUCCESS
+      configMgr.setMockIsAdministratorForTesting(true);
+
+      // 2a. Reject malformed PIN (<6 digits or non-numeric)
+      const badFormat = await fetch(`http://127.0.0.1:${pairPort}/api/finish-setup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          parentPin: '1234',
+          mappings: [],
+        }),
+      });
+      assert.strictEqual(badFormat.status, 400);
+
+      // 2b. Valid 6-8 digit PIN
+      const adminPinAttempt = await fetch(`http://127.0.0.1:${pairPort}/api/finish-setup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          parentPin: '741258',
+          mappings: [],
+        }),
+      });
+      // finish-setup proceeds (may stop at service start in test environment, but sets PIN first)
+      assert.strictEqual(await pinMgr.isPinSet(), true);
+
+      // 3. Confirm verifier record on disk does NOT contain plaintext PIN
+      const pinPath = path.join(configMgr.getSecureDir(), 'parent-pin.json');
+      assert.ok(fs.existsSync(pinPath), 'parent-pin.json must exist');
+      const pinRaw = fs.readFileSync(pinPath, 'utf8');
+      assert.strictEqual(
+        pinRaw.includes('741258'),
+        false,
+        'Parent PIN must NEVER be persisted in plaintext on disk'
+      );
+      const pinRecord = JSON.parse(pinRaw);
+      assert.ok(pinRecord.salt, 'PIN record must have salt');
+      assert.ok(pinRecord.verifier, 'PIN record must have verifier');
+      assert.strictEqual(pinRecord.kdf, 'pbkdf2-sha256-100k');
+
+      // 4. Verification with correct PIN yields 5-minute session
+      const verifyRes = await pinMgr.verifyPin('741258');
+      assert.strictEqual(verifyRes.success, true);
+      assert.ok(verifyRes.sessionToken);
+      assert.strictEqual(pinMgr.validateSession(verifyRes.sessionToken), true);
+    } finally {
+      configMgr.setMockIsAdministratorForTesting(true);
+      await pairServer.stop();
+    }
+  });
 });

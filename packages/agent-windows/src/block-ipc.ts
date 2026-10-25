@@ -41,6 +41,15 @@ export interface ConnectedHelper {
   registeredAt: number;
 }
 
+export interface BlockPresentationResult {
+  type: 'PRESENTATION_RESULT';
+  eventId: string;
+  success: boolean;
+  method?: string;
+  error?: string;
+  timestamp?: number;
+}
+
 export interface PendingBlockPresentation {
   domain: string;
   requestedDomain: string;
@@ -121,6 +130,7 @@ export class BlockIpcServer {
   private activePolicyProvider?: () => ResolvedUserPolicy | null;
   private multiSessionChecker?: () => MultiSessionCheckResult;
   private helperLauncher?: (sessionId?: number) => void;
+  private presentationResultHandler?: (result: BlockPresentationResult) => void;
 
   constructor(
     pipePath: string = getDefaultPipePath(),
@@ -150,6 +160,10 @@ export class BlockIpcServer {
 
   public setHelperLauncher(launcher: (sessionId?: number) => void): void {
     this.helperLauncher = launcher;
+  }
+
+  public onPresentationResult(handler: (result: BlockPresentationResult) => void): void {
+    this.presentationResultHandler = handler;
   }
 
   public getConnectedHelperCount(): number {
@@ -234,6 +248,22 @@ export class BlockIpcServer {
     });
   }
 
+  public isHelperHealthyForSession(sessionId?: number, accountName?: string): boolean {
+    const normAccount = accountName ? accountName.split('\\').pop()?.toLowerCase() : undefined;
+    for (const helper of this.helpers.values()) {
+      if (helper.socket.destroyed) continue;
+      if (sessionId !== undefined && helper.sessionId !== undefined && helper.sessionId !== sessionId) {
+        continue;
+      }
+      if (normAccount && helper.accountName) {
+        const hName = helper.accountName.split('\\').pop()?.toLowerCase();
+        if (hName !== normAccount) continue;
+      }
+      return true;
+    }
+    return false;
+  }
+
   private handleHelperMessage(socket: net.Socket, rawMessage: string): void {
     try {
       const data = JSON.parse(rawMessage);
@@ -256,6 +286,17 @@ export class BlockIpcServer {
 
         // Bounded retry of any pending presentation for this helper session/account
         this.flushPendingPresentationsForHelper(helper);
+      } else if (data.type === 'PRESENTATION_RESULT') {
+        const helper = this.helpers.get(socket);
+        logServiceMessage(
+          data.success ? 'INFO' : 'WARN',
+          `[BlockIpcServer] Helper presentation command delivered (PID=${helper?.pid || 'N/A'}, SessionId=${helper?.sessionId ?? 'N/A'}): eventId='${data.eventId}', browserLaunchDispatched=${data.success}, method='${data.method || 'unknown'}'`
+        );
+        if (this.presentationResultHandler) {
+          try {
+            this.presentationResultHandler(data as BlockPresentationResult);
+          } catch {}
+        }
       }
     } catch {
       // Ignore malformed messages
@@ -293,11 +334,16 @@ export class BlockIpcServer {
           'INFO',
           `[BlockIpcServer] Retrying pending block presentation for scope '${pending.approvalDomain || pending.domain}' (requested: '${pending.requestedDomain || pending.domain}') on newly registered helper (SessionId=${helper.sessionId ?? 'N/A'})`
         );
-        this.presentBlock({
-          requestedDomain: pending.requestedDomain || pending.domain,
-          approvalDomain: pending.approvalDomain || pending.domain,
-          reason: pending.reason,
-        }, undefined, pending.blockPort);
+        this.presentBlock(
+          {
+            requestedDomain: pending.requestedDomain || pending.domain,
+            approvalDomain: pending.approvalDomain || pending.domain,
+            reason: pending.reason,
+          },
+          undefined,
+          pending.blockPort,
+          true // isRetry: bypasses debounce and throttle
+        );
       }
     }
   }
@@ -305,7 +351,8 @@ export class BlockIpcServer {
   public presentBlock(
     target: string | BlockExperienceContext,
     reason?: string,
-    blockPort: number = 8880
+    blockPort: number = 8880,
+    isRetry: boolean = false
   ): { sent: boolean; reason: string; url?: string } {
     const now = Date.now();
     let requestedDomain: string;
@@ -351,15 +398,17 @@ export class BlockIpcServer {
       return { sent: false, reason: 'CONCURRENT_SESSIONS_SAFETY_HOLD' };
     }
 
-    // 3. Debounce: Logical Scope Check (approvalDomain preferred, fallback to requestedDomain)
-    const lastDomainTime = this.lastDomainTriggerTimes.get(debounceKey) || 0;
-    if (now - lastDomainTime < this.domainDebounceMs) {
-      return { sent: false, reason: 'DOMAIN_DEBOUNCED' };
-    }
+    if (!isRetry) {
+      // 3. Debounce: Logical Scope Check (approvalDomain preferred, fallback to requestedDomain)
+      const lastDomainTime = this.lastDomainTriggerTimes.get(debounceKey) || 0;
+      if (now - lastDomainTime < this.domainDebounceMs) {
+        return { sent: false, reason: 'DOMAIN_DEBOUNCED' };
+      }
 
-    // 4. Global Throttle Check (2.5s window)
-    if (now - this.lastGlobalTriggerTime < this.globalThrottleMs) {
-      return { sent: false, reason: 'GLOBAL_THROTTLED' };
+      // 4. Global Throttle Check (2.5s window)
+      if (now - this.lastGlobalTriggerTime < this.globalThrottleMs) {
+        return { sent: false, reason: 'GLOBAL_THROTTLED' };
+      }
     }
 
     // 5. Construct Safe Block Landing URL
@@ -440,10 +489,17 @@ export class BlockIpcServer {
         retried: false,
       });
 
+      logServiceMessage(
+        'WARN',
+        `[BlockIpcServer] Helper missing for session ${activeSessionId ?? 'N/A'} (account: '${activeName || 'N/A'}'). Retaining pending presentation for '${requestedDomain}' and triggering helper recovery.`
+      );
+
       if (this.helperLauncher) {
         try {
           this.helperLauncher(activeSessionId);
-        } catch {}
+        } catch (launcherErr: any) {
+          logServiceMessage('WARN', `[BlockIpcServer] Error invoking helper launcher: ${launcherErr.message}`);
+        }
       }
       return {
         sent: false,

@@ -6,6 +6,7 @@ import * as path from 'path';
 import * as os from 'os';
 import http from 'http';
 import { ConfigManager, DeviceConfig, OnboardingState } from '../src/config-manager';
+import { ParentPinManager } from '../src/parent-pin-manager';
 import { WindowsAccountManager, WindowsProfileMapping } from '../src/account-manager';
 import { GuiServer } from '../src/gui-server';
 import { ElevatedPairServer } from '../src/elevated-pair-server';
@@ -323,11 +324,18 @@ describe('SafeBrowse Stage C.4.2 — Windows Onboarding State Machine & Fail-Saf
       { windowsSid: 'S-1-5-21-1-2-3-1001', windowsUsername: 'ChildUser', childId: 'child_1', enabled: true },
     ]);
 
-    const guiServer = new GuiServer(testConfigMgr, accountMgr, netMgr);
+    const pinMgr = new ParentPinManager(testConfigMgr);
+    await pinMgr.setPin('123456');
+    const session = await pinMgr.verifyPin('123456');
+
+    const guiServer = new GuiServer(testConfigMgr, accountMgr, netMgr, pinMgr);
     const port = await guiServer.start(0);
 
     try {
-      const discRes = await fetch(`http://127.0.0.1:${port}/api/disconnect`, { method: 'POST' });
+      const discRes = await fetch(`http://127.0.0.1:${port}/api/disconnect`, {
+        method: 'POST',
+        headers: { 'x-management-session': session.sessionToken! },
+      });
       assert.strictEqual(discRes.status, 200);
       const discData = await discRes.json() as any;
       assert.strictEqual(discData.success, true);

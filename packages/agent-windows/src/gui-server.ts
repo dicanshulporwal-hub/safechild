@@ -67,10 +67,31 @@ export class GuiServer {
 
         const isPinSet = await this.pinMgr.isPinSet();
         const sessionToken = req.headers['x-management-session'] as string;
-        const isManagementActive = !isPinSet || Boolean(sessionToken && this.pinMgr.validateSession(sessionToken));
+        let activeConsole: { sid: string | null; username: string | null; sessionId?: number | null } | null = null;
+        try {
+          activeConsole = await this.accountMgr.getActiveConsoleSession();
+        } catch {}
 
-        const checkManagementAuth = async (): Promise<boolean> => {
-          return isManagementActive;
+        const isManagementActive = Boolean(
+          isPinSet &&
+          sessionToken &&
+          this.pinMgr.validateSession(sessionToken, activeConsole?.sid || undefined)
+        );
+
+        const checkManagementAuth = async (): Promise<{ authorized: boolean; reason?: string }> => {
+          if (!isPinSet) {
+            return {
+              authorized: false,
+              reason: 'SafeBrowse Parent PIN has not been configured. Protected management is locked.',
+            };
+          }
+          if (!sessionToken || !this.pinMgr.validateSession(sessionToken, activeConsole?.sid || undefined)) {
+            return {
+              authorized: false,
+              reason: 'SafeBrowse Parent PIN authentication required.',
+            };
+          }
+          return { authorized: true };
         };
 
         if (req.method === 'OPTIONS') {
@@ -87,7 +108,11 @@ export class GuiServer {
             try {
               const data = JSON.parse(body || '{}');
               const pin = String(data.pin || '').trim();
-              const result = await this.pinMgr.verifyPin(pin);
+              const result = await this.pinMgr.verifyPin(
+                pin,
+                activeConsole?.sid || undefined,
+                activeConsole?.username || undefined
+              );
               if (!result.success) {
                 res.writeHead(401, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: result.error || 'Invalid Parent PIN.' }));
@@ -290,6 +315,16 @@ export class GuiServer {
         }
 
         if (pathname === '/api/pair' && req.method === 'POST') {
+          const existingConfig = await this.configMgr.loadDeviceConfig();
+          if (existingConfig) {
+            const auth = await checkManagementAuth();
+            if (!auth.authorized) {
+              res.writeHead(401, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: auth.reason || 'SafeBrowse Parent PIN authentication required.' }));
+              return;
+            }
+          }
+
           const isAdmin = await this.configMgr.isAdministrator();
           if (!isAdmin) {
             res.writeHead(403, { 'Content-Type': 'application/json' });
@@ -400,10 +435,13 @@ export class GuiServer {
 
         if ((pathname === '/api/launch-pair' || pathname === '/api/launch-attach') && req.method === 'POST') {
           const config = await this.configMgr.loadSanitizedConfig();
-          if (config && isPinSet && !isManagementActive) {
-            res.writeHead(401, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'SafeBrowse Parent PIN authentication required.' }));
-            return;
+          if (config) {
+            const auth = await checkManagementAuth();
+            if (!auth.authorized) {
+              res.writeHead(401, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: auth.reason || 'SafeBrowse Parent PIN authentication required.' }));
+              return;
+            }
           }
 
           let body = '';
@@ -464,9 +502,10 @@ export class GuiServer {
         }
 
         if ((pathname === '/api/reconfigure' || pathname === '/api/launch-reconfigure') && req.method === 'POST') {
-          if (!await checkManagementAuth()) {
+          const auth = await checkManagementAuth();
+          if (!auth.authorized) {
             res.writeHead(401, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'SafeBrowse Parent PIN authentication required.' }));
+            res.end(JSON.stringify({ error: auth.reason || 'SafeBrowse Parent PIN authentication required.' }));
             return;
           }
 
@@ -509,9 +548,10 @@ export class GuiServer {
         }
 
         if (pathname === '/api/mappings' && req.method === 'POST') {
-          if (!await checkManagementAuth()) {
+          const auth = await checkManagementAuth();
+          if (!auth.authorized) {
             res.writeHead(401, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'SafeBrowse Parent PIN authentication required.' }));
+            res.end(JSON.stringify({ error: auth.reason || 'SafeBrowse Parent PIN authentication required.' }));
             return;
           }
 
@@ -598,9 +638,10 @@ export class GuiServer {
 
         // Endpoint: POST /api/disconnect (Atomic complete teardown)
         if (pathname === '/api/disconnect' && req.method === 'POST') {
-          if (!await checkManagementAuth()) {
+          const auth = await checkManagementAuth();
+          if (!auth.authorized) {
             res.writeHead(401, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'SafeBrowse Parent PIN authentication required to disconnect this computer.' }));
+            res.end(JSON.stringify({ error: auth.reason || 'SafeBrowse Parent PIN authentication required to disconnect this computer.' }));
             return;
           }
 
@@ -675,6 +716,9 @@ export class GuiServer {
         const addr = this.server?.address();
         const actualPort = typeof addr === 'object' && addr ? addr.port : port;
         this.port = actualPort;
+        sessionMonitor.onSessionChange(() => {
+          this.pinMgr.invalidateSession();
+        });
         logServiceMessage('INFO', `[SafeBrowse GUI] Application server running on http://127.0.0.1:${actualPort}`);
         resolve(actualPort);
       });
@@ -709,6 +753,7 @@ export class GuiServer {
   }
 
   public stop(): void {
+    this.pinMgr.invalidateSession();
     if (this.server) {
       this.server.close();
       this.server = null;
@@ -1078,7 +1123,11 @@ export class GuiServer {
 
     function ensureManagementUnlocked() {
       return new Promise((resolve) => {
-        if (!appState.pinConfigured || managementSessionToken) {
+        if (!appState.pinConfigured) {
+          showAlert('SafeBrowse Parent PIN is not configured on this device. Protected management is locked.', true);
+          return resolve(false);
+        }
+        if (managementSessionToken) {
           return resolve(true);
         }
         const modal = document.getElementById('pinModal');

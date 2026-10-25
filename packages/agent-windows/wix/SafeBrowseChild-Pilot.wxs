@@ -153,7 +153,7 @@
       </Component>
     </StandardDirectory>
 
-    <!-- 3. Fail-Safe Uninstall Custom Action: Restores original DNS before stopping service and removing files -->
+    <!-- 3. Fail-Safe Uninstall Custom Action: Restores original DNS and terminates helpers after stopping service, before deleting service and removing files -->
     <CustomAction
         Id="RestoreDnsOnUninstall"
         Directory="INSTALLFOLDER"
@@ -179,7 +179,20 @@
         Execute="immediate"
         Return="asyncNoWait" />
 
+    <!-- Close any running user session helper instances during uninstall -->
+    <util:CloseApplication
+        Id="CloseUserHelperOnUninstall"
+        Target="SafeBrowseUserHelper.exe"
+        CloseMessage="yes"
+        ElevatedCloseMessage="yes"
+        RebootPrompt="no"
+        EndSessionMessage="yes" />
+
     <InstallExecuteSequence>
+      <!-- SafeBrowse C.5.5 Gate A: Network restoration runs Before="StopServices" so binaries and services are intact.
+           RestoreDnsOnUninstall executes "SafeBrowseChild-Pilot.exe --emergency-restore", which stops the service,
+           terminates UserHelpers, tears down firewall rules, restores DNS, and verifies external resolution.
+           Return="check" ensures MSI fails and aborts before removal if network restoration cannot be proven. -->
       <Custom Action="RestoreDnsOnUninstall" Before="StopServices" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="ConfigureServiceRecovery" After="InstallServices" Condition="NOT REMOVE" />
       <Custom Action="LaunchFirstRunWizard" After="InstallFinalize" Condition="NOT REMOVE AND NOT UPGRADINGPRODUCTCODE" />

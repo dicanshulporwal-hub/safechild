@@ -6,6 +6,7 @@ import * as path from 'path';
 import * as os from 'os';
 import http from 'http';
 import { ConfigManager } from '../src/config-manager';
+import { ParentPinManager } from '../src/parent-pin-manager';
 import { WindowsAccountManager, FamilyChildProfile } from '../src/account-manager';
 import { GuiServer } from '../src/gui-server';
 import { ElevatedPairServer } from '../src/elevated-pair-server';
@@ -318,13 +319,19 @@ describe('SafeBrowse Windows Pilot — Elevated Pairing & Privilege Separation S
       pairedAt: new Date().toISOString(),
     });
 
+    const pinMgr = new ParentPinManager(testConfigMgr);
+    await pinMgr.setPin('123456');
+    const session = await pinMgr.verifyPin('123456');
+
     // Start normal unelevated GUI
     testConfigMgr.setMockIsAdministratorForTesting(false);
-    const gui = new GuiServer(testConfigMgr, accountMgr);
+    const gui = new GuiServer(testConfigMgr, accountMgr, undefined, pinMgr);
     const port = await gui.start(0);
 
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/api/status`);
+      const res = await fetch(`http://127.0.0.1:${port}/api/status`, {
+        headers: { 'x-management-session': session.sessionToken! },
+      });
       assert.strictEqual(res.status, 200);
       const body = await res.text();
 
@@ -395,9 +402,13 @@ describe('SafeBrowse Windows Pilot — Elevated Pairing & Privilege Separation S
   });
 
   it('12. Normal GUI automatically transitions from Not Paired to Paired after elevated pairing', async () => {
+    const pinMgr = new ParentPinManager(testConfigMgr);
+    await pinMgr.setPin('123456');
+    const session = await pinMgr.verifyPin('123456');
+
     // 1. Initial unelevated GUI starts with Not Paired state
     testConfigMgr.setMockIsAdministratorForTesting(false);
-    const gui = new GuiServer(testConfigMgr, accountMgr);
+    const gui = new GuiServer(testConfigMgr, accountMgr, undefined, pinMgr);
     const port = await gui.start(0);
 
     try {
@@ -427,7 +438,9 @@ describe('SafeBrowse Windows Pilot — Elevated Pairing & Privilege Separation S
 
       // 3. Normal GUI detects pairing via /api/status reload
       testConfigMgr.setMockIsAdministratorForTesting(false);
-      const res2 = await fetch(`http://127.0.0.1:${port}/api/status`);
+      const res2 = await fetch(`http://127.0.0.1:${port}/api/status`, {
+        headers: { 'x-management-session': session.sessionToken! },
+      });
       const data2: any = await res2.json();
       assert.strictEqual(data2.isPaired, true);
       assert.strictEqual(data2.config.deviceId, 'dev-pilot-v102');

@@ -6,6 +6,7 @@ import * as path from 'path';
 import * as os from 'os';
 import http from 'http';
 import { ConfigManager } from '../src/config-manager';
+import { ParentPinManager } from '../src/parent-pin-manager';
 import { WindowsAccountManager, WindowsProfileMapping } from '../src/account-manager';
 import { GuiServer } from '../src/gui-server';
 import { ElevatedPairServer } from '../src/elevated-pair-server';
@@ -255,7 +256,11 @@ describe('SafeBrowse Windows Stage C.4 — Unified Onboarding Wizard & Cloud Syn
       pairedAt: new Date().toISOString(),
     });
 
-    const gui = new GuiServer(testConfigMgr, accountMgr);
+    const pinMgr = new ParentPinManager(testConfigMgr);
+    await pinMgr.setPin('123456');
+    const session = await pinMgr.verifyPin('123456');
+
+    const gui = new GuiServer(testConfigMgr, accountMgr, undefined, pinMgr);
     const guiPort = await gui.start(0);
 
     // Check status
@@ -274,8 +279,11 @@ describe('SafeBrowse Windows Stage C.4 — Unified Onboarding Wizard & Cloud Syn
     const dashRes = await fetch(`http://127.0.0.1:${guiPort}/api/open-dashboard`, { method: 'POST' });
     assert.strictEqual(dashRes.status, 200);
 
-    // Disconnect device
-    const discRes = await fetch(`http://127.0.0.1:${guiPort}/api/disconnect`, { method: 'POST' });
+    // Disconnect device with valid Parent PIN management session
+    const discRes = await fetch(`http://127.0.0.1:${guiPort}/api/disconnect`, {
+      method: 'POST',
+      headers: { 'x-management-session': session.sessionToken! },
+    });
     assert.strictEqual(discRes.status, 200);
 
     // Verify config removed

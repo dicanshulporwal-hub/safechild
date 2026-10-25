@@ -365,6 +365,13 @@ export class ElevatedPairServer {
 
         // Endpoint: POST /api/finish-setup
         if (pathname === '/api/finish-setup' && req.method === 'POST') {
+          const isAdmin = await this.configMgr.isAdministrator();
+          if (!isAdmin) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Administrator elevation required to configure Parent PIN.' }));
+            return;
+          }
+
           let body = '';
           req.on('data', (c) => (body += c));
           req.on('end', async () => {

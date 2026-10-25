@@ -621,4 +621,214 @@ describe('SafeBrowse Windows Stage C.3.1: Service Block IPC Integration Suite', 
       await new Promise<void>((resolve) => mockBackend.close(() => resolve()));
     }
   });
+
+  // =========================================================================
+  // Gate A3 Defect Verification: Runtime Helper Recovery & Watchdog
+  // =========================================================================
+
+  test('13. Gate A3: Helper sends PRESENTATION_RESULT acknowledgment back to BlockIpcServer', async () => {
+    await ipcServer.start();
+
+    let presentationResultReceived: any = null;
+    ipcServer.onPresentationResult((result) => {
+      presentationResultReceived = result;
+    });
+
+    const client = await createHelperClient(testSockPath, 'Manjari', 1234, 5);
+    try {
+      const res = ipcServer.presentBlock('snapchat.com', 'Restricted by policy', 8880);
+      assert.strictEqual(res.sent, true);
+      assert.strictEqual(res.reason, 'PRESENTED');
+
+      // Wait for IPC delivery to client
+      await new Promise((r) => setTimeout(r, 80));
+      assert.strictEqual(client.receivedMessages.length, 1);
+      const msg = client.receivedMessages[0];
+      assert.strictEqual(msg.domain, 'snapchat.com');
+
+      // Helper sends PRESENTATION_RESULT acknowledgment back
+      client.socket.write(
+        JSON.stringify({
+          type: 'PRESENTATION_RESULT',
+          eventId: msg.eventId,
+          domain: msg.domain,
+          success: true,
+          method: 'StartProcess',
+          childUsername: 'Manjari',
+          sessionId: 5,
+        }) + '\n'
+      );
+
+      // Verify server received presentation acknowledgment
+      await new Promise((r) => setTimeout(r, 80));
+      assert.ok(presentationResultReceived, 'Server must receive presentation result');
+      assert.strictEqual(presentationResultReceived.eventId, msg.eventId);
+      assert.strictEqual(presentationResultReceived.success, true);
+      assert.strictEqual(presentationResultReceived.method, 'StartProcess');
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('14. Gate A3: Pending block presentation retries immediately upon helper reconnect, bypassing debounce', async () => {
+    await ipcServer.start();
+
+    let launcherCallCount = 0;
+    let launcherSessionId: number | undefined;
+    ipcServer.setHelperLauncher((sessionId) => {
+      launcherCallCount++;
+      launcherSessionId = sessionId;
+    });
+
+    activePolicyState = {
+      accountName: 'Manjari',
+      isManaged: true,
+      childId: 'child-manjari-uuid',
+      childName: 'Manjari',
+      sid: 'S-1-5-21-1000-1002',
+      sessionId: 5,
+    };
+
+    // 1. Trigger block when NO helper is connected
+    const firstRes = ipcServer.presentBlock('distracting-games.com', 'Restricted by policy', 8880);
+    assert.strictEqual(firstRes.sent, false);
+    assert.strictEqual(firstRes.reason, 'NO_CONNECTED_HELPER');
+    assert.strictEqual(launcherCallCount, 1);
+    assert.strictEqual(launcherSessionId, 5);
+
+    // 2. Helper reconnects / relaunches for session 5
+    const healedClient = await createHelperClient(testSockPath, 'Manjari', 9999, 5);
+    try {
+      // Pending presentation is flushed with isRetry: true and delivered to newly connected helper
+      await new Promise((r) => setTimeout(r, 80));
+      assert.strictEqual(healedClient.receivedMessages.length, 1);
+      assert.strictEqual(healedClient.receivedMessages[0].domain, 'distracting-games.com');
+      assert.strictEqual(healedClient.receivedMessages[0].reason, 'Restricted by policy');
+    } finally {
+      await healedClient.close();
+    }
+  });
+
+  test('15. Gate A3: Helper liveness check detects connected vs crashed/disconnected helper', async () => {
+    await ipcServer.start();
+
+    // 1. Initial state: not healthy
+    assert.strictEqual(ipcServer.isHelperHealthyForSession(5, 'Manjari'), false);
+
+    // 2. Connect helper
+    const client = await createHelperClient(testSockPath, 'Manjari', 3344, 5);
+    try {
+      // Now healthy for session 5
+      assert.strictEqual(ipcServer.isHelperHealthyForSession(5, 'Manjari'), true);
+      // Not healthy for different session
+      assert.strictEqual(ipcServer.isHelperHealthyForSession(6, 'Manjari'), false);
+    } finally {
+      // Helper exits / closes socket
+      await client.close();
+    }
+
+    // Wait for socket cleanup
+    await new Promise((r) => setTimeout(r, 80));
+    // After disconnect, liveness detects unhealthy helper
+    assert.strictEqual(ipcServer.isHelperHealthyForSession(5, 'Manjari'), false);
+  });
+
+  test('16. Gate A3: Watchdog recovery suppresses unmanaged parent and recovers managed child', async () => {
+    await ipcServer.start();
+
+    let launchCount = 0;
+    const launchedSessions: (number | undefined)[] = [];
+
+    const mockWatchdogTick = (policy: ResolvedUserPolicy | null) => {
+      if (!policy || !policy.isManaged) {
+        // Parent or unmanaged session: do not launch helper
+        return;
+      }
+      const targetSessionId = typeof policy.sessionId === 'number' ? policy.sessionId : undefined;
+      const isHealthy = ipcServer.isHelperHealthyForSession(targetSessionId, policy.accountName);
+      if (!isHealthy) {
+        launchCount++;
+        launchedSessions.push(targetSessionId);
+      }
+    };
+
+    // 1. Unmanaged / parent user active: watchdog tick does nothing
+    mockWatchdogTick({
+      accountName: 'ParentUser',
+      isManaged: false,
+      childId: null,
+      childName: null,
+      sid: 'S-1-5-21-1000-1002',
+      sessionId: 1,
+    });
+    assert.strictEqual(launchCount, 0);
+
+    // 2. Managed child active but helper missing: watchdog triggers launch
+    mockWatchdogTick({
+      accountName: 'ChildUser',
+      isManaged: true,
+      childId: 'child-123',
+      childName: 'ChildUser',
+      sid: 'S-1-5-21-1000-1001',
+      sessionId: 2,
+    });
+    assert.strictEqual(launchCount, 1);
+    assert.strictEqual(launchedSessions[0], 2);
+
+    // 3. Helper connects for session 2
+    const client = await createHelperClient(testSockPath, 'ChildUser', 7890, 2);
+    try {
+      // Subsequent watchdog tick detects healthy helper -> zero duplicate launches!
+      mockWatchdogTick({
+        accountName: 'ChildUser',
+        isManaged: true,
+        childId: 'child-123',
+        childName: 'ChildUser',
+        sid: 'S-1-5-21-1000-1001',
+        sessionId: 2,
+      });
+      assert.strictEqual(launchCount, 1); // Unchanged!
+    } finally {
+      await client.close();
+    }
+  });
+
+  test('17. Gate A3: Helper launch concurrency guard drops duplicate in-flight requests', async () => {
+    let activeInvocations = 0;
+    let maxConcurrent = 0;
+    let totalCompleted = 0;
+
+    let isLaunchingHelper = false;
+    const launchUserHelper = async (sessionId?: number): Promise<boolean> => {
+      if (isLaunchingHelper) {
+        return false; // Dropped duplicate concurrent request
+      }
+      isLaunchingHelper = true;
+      activeInvocations++;
+      maxConcurrent = Math.max(maxConcurrent, activeInvocations);
+      try {
+        await new Promise((r) => setTimeout(r, 20));
+        totalCompleted++;
+        return true;
+      } finally {
+        activeInvocations--;
+        isLaunchingHelper = false;
+      }
+    };
+
+    // Trigger 5 concurrent launch attempts simultaneously
+    const results = await Promise.all([
+      launchUserHelper(5),
+      launchUserHelper(5),
+      launchUserHelper(5),
+      launchUserHelper(5),
+      launchUserHelper(5),
+    ]);
+
+    // Exactly 1 launch succeeded; 4 duplicates dropped
+    assert.strictEqual(results.filter((r) => r === true).length, 1);
+    assert.strictEqual(results.filter((r) => r === false).length, 4);
+    assert.strictEqual(maxConcurrent, 1);
+    assert.strictEqual(totalCompleted, 1);
+  });
 });

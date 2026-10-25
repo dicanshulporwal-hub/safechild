@@ -2319,10 +2319,14 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     );
 
     // System now reboots with WiFi stuck on stale 127.0.0.1 and no resolver running
+    let resetExecuted = false;
     const mockExecutor = async (script: string) => {
+      if (script.includes('ResetServerAddresses') || (script.includes('Set-DnsClientServerAddress') && script.includes('192.168.1.1'))) {
+        resetExecuted = true;
+      }
       if (script.includes('Get-DnsClientServerAddress')) {
         return {
-          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['127.0.0.1'], DhcpEnabled: true }]),
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: resetExecuted ? ['192.168.1.1'] : ['127.0.0.1'], DhcpEnabled: true }]),
           stderr: '',
         };
       }
@@ -2375,7 +2379,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
       }
       if (script.includes('Get-DnsClientServerAddress')) {
         return {
-          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['127.0.0.1'], DhcpEnabled: true }]),
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: resetExecuted ? ['192.168.1.1'] : ['127.0.0.1'], DhcpEnabled: true }]),
           stderr: '',
         };
       }
@@ -3032,7 +3036,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
       }
       if (script.includes('Get-DnsClientServerAddress')) {
         return {
-          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['127.0.0.1'], DhcpEnabled: true }]),
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: resetExecuted ? ['192.168.1.1'] : ['127.0.0.1'], DhcpEnabled: true }]),
           stderr: '',
         };
       }
@@ -4098,9 +4102,13 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const nm = new WindowsNetworkManager(backupFile);
     nm.setPlatformForTesting('win32');
 
+    let resetExecuted = false;
     const executedScripts: string[] = [];
     nm.setCommandExecutorForTesting(async (script: string) => {
       executedScripts.push(script);
+      if (script.includes('ResetServerAddresses')) {
+        resetExecuted = true;
+      }
       if (script.includes('Get-NetIPConfiguration')) {
         return {
           stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Gateway: '192.168.1.1' }]),
@@ -4109,7 +4117,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
       }
       if (script.includes('Get-DnsClientServerAddress')) {
         return {
-          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['127.0.0.1'] }]),
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: resetExecuted ? ['192.168.1.1'] : ['127.0.0.1'] }]),
           stderr: '',
         };
       }
@@ -4141,9 +4149,13 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const nm = new WindowsNetworkManager(backupFile);
     nm.setPlatformForTesting('win32');
 
+    let resetExecuted = false;
     const executedScripts: string[] = [];
     nm.setCommandExecutorForTesting(async (script: string) => {
       executedScripts.push(script);
+      if (script.includes('ResetServerAddresses')) {
+        resetExecuted = true;
+      }
       if (script.includes('Get-NetIPConfiguration')) {
         return {
           stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Gateway: '192.168.1.1' }]),
@@ -4152,7 +4164,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
       }
       if (script.includes('Get-DnsClientServerAddress')) {
         return {
-          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['127.0.0.1'] }]),
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: resetExecuted ? ['192.168.1.1'] : ['127.0.0.1'] }]),
           stderr: '',
         };
       }
@@ -4188,9 +4200,13 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const nm = new WindowsNetworkManager(backupFile);
     nm.setPlatformForTesting('win32');
 
+    let staticRestored = false;
     const executedScripts: string[] = [];
     nm.setCommandExecutorForTesting(async (script: string) => {
       executedScripts.push(script);
+      if (script.includes('Set-DnsClientServerAddress') && script.includes('8.8.8.8')) {
+        staticRestored = true;
+      }
       if (script.includes('Get-NetIPConfiguration')) {
         return {
           stdout: JSON.stringify([{ InterfaceIndex: 12, InterfaceAlias: 'Ethernet', Gateway: '192.168.1.1' }]),
@@ -4199,7 +4215,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
       }
       if (script.includes('Get-DnsClientServerAddress')) {
         return {
-          stdout: JSON.stringify([{ InterfaceIndex: 12, InterfaceAlias: 'Ethernet', ServerAddresses: ['127.0.0.1'] }]),
+          stdout: JSON.stringify([{ InterfaceIndex: 12, InterfaceAlias: 'Ethernet', ServerAddresses: staticRestored ? ['8.8.8.8', '8.8.4.4'] : ['127.0.0.1'] }]),
           stderr: '',
         };
       }
@@ -4244,9 +4260,13 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
       const nm = new WindowsNetworkManager(backupFile);
       nm.setPlatformForTesting('win32');
 
+      let resetExecuted = false;
       const executedScripts: string[] = [];
       nm.setCommandExecutorForTesting(async (script: string) => {
         executedScripts.push(script);
+        if (script.includes('ResetServerAddresses') || (script.includes('Set-DnsClientServerAddress') && script.includes('192.168.1.1'))) {
+          resetExecuted = true;
+        }
         if (script.includes('Get-NetIPConfiguration')) {
           return {
             stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', Gateway: '192.168.1.1' }]),
@@ -4255,7 +4275,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
         }
         if (script.includes('Get-DnsClientServerAddress')) {
           return {
-            stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['127.0.0.1'] }]),
+            stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: resetExecuted ? ['192.168.1.1'] : ['127.0.0.1'] }]),
             stderr: '',
           };
         }
@@ -4718,5 +4738,199 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     client.stop();
     await new Promise<void>((r) => wss.close(() => server.close(() => r())));
     try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+  });
+
+  // =========================================================================
+  // Gate A1 Defect Verification: MSI Uninstall & DNS Restoration Contract
+  // =========================================================================
+
+  it('121. Gate A1: WiX manifest guarantees CloseApplication for UserHelper and RestoreDnsOnUninstall with Return="check"', () => {
+    const wxsPath = path.resolve(__dirname, '../wix/SafeBrowseChild-Pilot.wxs');
+    const wxsContent = fs.readFileSync(wxsPath, 'utf8');
+
+    // 1. Verify CloseApplication closes SafeBrowseUserHelper.exe on uninstall
+    assert.ok(
+      wxsContent.includes('Target="SafeBrowseUserHelper.exe"'),
+      'WiX manifest must declare util:CloseApplication for SafeBrowseUserHelper.exe'
+    );
+    assert.ok(
+      wxsContent.includes('CloseMessage="yes"'),
+      'util:CloseApplication must request graceful close'
+    );
+
+    // 2. Verify CustomAction RestoreDnsOnUninstall has Return="check"
+    const caIndex = wxsContent.indexOf('Id="RestoreDnsOnUninstall"');
+    assert.ok(caIndex !== -1, 'RestoreDnsOnUninstall CustomAction must exist');
+    const caEnd = wxsContent.indexOf('/>', caIndex);
+    const caBlock = wxsContent.substring(caIndex, caEnd);
+    assert.ok(
+      caBlock.includes('Return="check"'),
+      'RestoreDnsOnUninstall must have Return="check" so MSI aborts if network restoration cannot be proven'
+    );
+
+    // 3. Verify sequencing: runs Before="StopServices"
+    const seqIndex = wxsContent.indexOf('<InstallExecuteSequence>');
+    const seqEnd = wxsContent.indexOf('</InstallExecuteSequence>', seqIndex);
+    const seqBlock = wxsContent.substring(seqIndex, seqEnd);
+    assert.ok(
+      seqBlock.includes('Action="RestoreDnsOnUninstall"'),
+      'RestoreDnsOnUninstall must be in InstallExecuteSequence'
+    );
+    assert.ok(
+      seqBlock.includes('Before="StopServices"'),
+      'RestoreDnsOnUninstall must run Before="StopServices"'
+    );
+    assert.ok(
+      seqBlock.includes('Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"'),
+      'RestoreDnsOnUninstall must be guarded by REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE'
+    );
+  });
+
+  it('122. Gate A1: restore-dns.ps1 stops service, kills helpers, clears firewall, flushes cache, and verifies read-back & external resolution', () => {
+    const psScriptPath = path.resolve(__dirname, '../scripts/restore-dns.ps1');
+    assert.ok(fs.existsSync(psScriptPath), 'restore-dns.ps1 must exist');
+    const scriptContent = fs.readFileSync(psScriptPath, 'utf8');
+
+    // 1. Service stopped in Step 1 to prevent reconciliation re-enforcement
+    assert.ok(
+      scriptContent.includes('SafeBrowseChildService'),
+      'restore-dns.ps1 must target SafeBrowseChildService'
+    );
+    assert.ok(
+      scriptContent.includes('Stop-Service'),
+      'restore-dns.ps1 must stop the service before restoration'
+    );
+
+    // 2. Kills UserHelper instances
+    assert.ok(
+      scriptContent.includes('SafeBrowseUserHelper'),
+      'restore-dns.ps1 must terminate SafeBrowseUserHelper processes'
+    );
+
+    // 3. Removes SafeBrowse firewall rules
+    assert.ok(
+      scriptContent.includes('netsh advfirewall firewall delete rule') || scriptContent.includes('Remove-NetFirewallRule'),
+      'restore-dns.ps1 must remove firewall rules'
+    );
+    assert.ok(
+      scriptContent.includes('SafeBrowse'),
+      'restore-dns.ps1 must remove only SafeBrowse-owned firewall rules'
+    );
+
+    // 4. Never restores 127.0.0.1 or ::1
+    assert.ok(
+      scriptContent.includes('127.0.0.1') && scriptContent.includes('::1'),
+      'restore-dns.ps1 must filter loopback addresses'
+    );
+
+    // 5. Flushes DNS cache
+    assert.ok(
+      scriptContent.includes('Clear-DnsClientCache'),
+      'restore-dns.ps1 must flush Windows DNS client cache'
+    );
+
+    // 6. Read-back verification: checks no adapter remains trapped at 127.0.0.1
+    assert.ok(
+      scriptContent.includes('Get-DnsClientServerAddress'),
+      'restore-dns.ps1 must read back DNS configuration'
+    );
+    assert.ok(
+      scriptContent.includes('trapped at 127.0.0.1') || scriptContent.includes('exit 1'),
+      'restore-dns.ps1 must fail if any adapter remains trapped'
+    );
+
+    // 7. External DNS resolution verification
+    assert.ok(
+      scriptContent.includes('Resolve-DnsName'),
+      'restore-dns.ps1 must verify external DNS resolution'
+    );
+  });
+
+  it('123. Gate A1: restoreOriginalDns throws error if read-back detects trapped 127.0.0.1 adapter', async () => {
+    const backupFile = path.join(tmpDir, 'backup-test-gate-a1.json');
+    fs.writeFileSync(
+      backupFile,
+      JSON.stringify([
+        { InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['192.168.1.1'], DhcpEnabled: true }
+      ])
+    );
+
+    const nm = new WindowsNetworkManager(backupFile);
+    nm.setPlatformForTesting('win32');
+
+    // Simulate adapter that fails to reset (remains trapped at 127.0.0.1)
+    nm.setCommandExecutorForTesting(async (script: string) => {
+      if (script.includes('Get-DnsClientServerAddress')) {
+        return {
+          stdout: JSON.stringify([{ InterfaceIndex: 6, InterfaceAlias: 'Wi-Fi', ServerAddresses: ['127.0.0.1'] }]),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    // restoreOriginalDns MUST reject and surface the trapped adapter in the error message
+    await assert.rejects(
+      async () => {
+        await nm.restoreOriginalDns();
+      },
+      (err: any) => {
+        return err.message.includes('DNS read-back verification failed') &&
+               err.message.includes('Wi-Fi') &&
+               err.message.includes('127.0.0.1');
+      }
+    );
+  });
+
+  it('124. Gate A1 / Item 4: Canonical SafeBrowse firewall rules are strictly deterministic and absent after teardown', async () => {
+    const { WindowsFirewallEngine } = await import('../src/wfp-engine');
+
+    // 1. Verify exact canonical rule names
+    const expectedCanonicalRules = [
+      'SafeBrowse_Block_DoT_853_TCP',
+      'SafeBrowse_Block_DoT_853_UDP',
+      'SafeBrowse_Block_DoH_Bootstrap',
+    ];
+    assert.deepStrictEqual(
+      WindowsFirewallEngine.SAFEBROWSE_RULE_NAMES,
+      expectedCanonicalRules,
+      'WindowsFirewallEngine must define the 3 exact canonical rule names'
+    );
+
+    // 2. Teardown execution targets only canonical rules and never runs advfirewall reset
+    const engine = new WindowsFirewallEngine();
+    const deletedRules: string[] = [];
+    const execCommands: string[] = [];
+
+    // Check script files for canonical rule alignment
+    const restorePsPath = path.resolve(__dirname, '../scripts/restore-dns.ps1');
+    const restorePsContent = fs.readFileSync(restorePsPath, 'utf8');
+    for (const rule of expectedCanonicalRules) {
+      assert.ok(
+        restorePsContent.includes(rule),
+        `restore-dns.ps1 must explicitly remove canonical rule: ${rule}`
+      );
+    }
+
+    const hostCsPath = path.resolve(__dirname, '../service-host/SafeBrowseServiceHost.cs');
+    const hostCsContent = fs.readFileSync(hostCsPath, 'utf8');
+    for (const rule of expectedCanonicalRules) {
+      assert.ok(
+        hostCsContent.includes(rule),
+        `SafeBrowseServiceHost.cs must explicitly remove canonical rule: ${rule}`
+      );
+    }
+
+    // Ensure non-existent rules (e.g. proxy or IPC firewall rules) are not referenced
+    assert.strictEqual(
+      restorePsContent.includes('SafeBrowse Local DNS Proxy'),
+      false,
+      'restore-dns.ps1 must not target non-existent proxy firewall rule'
+    );
+    assert.strictEqual(
+      restorePsContent.includes('SafeBrowse User Helper Block IPC'),
+      false,
+      'restore-dns.ps1 must not target non-existent IPC firewall rule'
+    );
   });
 });
