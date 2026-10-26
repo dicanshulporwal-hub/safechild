@@ -363,6 +363,60 @@ export class ElevatedPairServer {
           return;
         }
 
+        // Endpoint: POST /api/bootstrap-pin (Dedicated elevated bootstrap for paired devices without Parent PIN)
+        if (pathname === '/api/bootstrap-pin' && req.method === 'POST') {
+          const isAdmin = await this.configMgr.isAdministrator();
+          if (!isAdmin) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Administrator elevation required to configure Parent PIN.' }));
+            return;
+          }
+
+          const secureConfig = await this.configMgr.loadDeviceConfig();
+          if (!secureConfig) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Device is not paired.' }));
+            return;
+          }
+
+          const isPinSet = await this.pinMgr.isPinSet();
+          if (isPinSet) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Parent PIN is already configured on this device.' }));
+            return;
+          }
+
+          let body = '';
+          req.on('data', (c) => (body += c));
+          req.on('end', async () => {
+            try {
+              const data = JSON.parse(body || '{}');
+              const parentPin = String(data.parentPin || data.pin || '').trim();
+              const confirmPin = data.confirmPin !== undefined ? String(data.confirmPin).trim() : null;
+
+              if (!/^\d{6,8}$/.test(parentPin)) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'SafeBrowse Parent PIN must be between 6 and 8 numeric digits.' }));
+                return;
+              }
+
+              if (confirmPin !== null && confirmPin !== parentPin) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'PIN confirmation does not match.' }));
+                return;
+              }
+
+              await this.pinMgr.setPin(parentPin);
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: true, message: 'Parent PIN configured successfully.' }));
+            } catch (err: any) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: err.message }));
+            }
+          });
+          return;
+        }
+
         // Endpoint: POST /api/finish-setup
         if (pathname === '/api/finish-setup' && req.method === 'POST') {
           const isAdmin = await this.configMgr.isAdministrator();

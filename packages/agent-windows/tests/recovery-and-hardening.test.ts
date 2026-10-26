@@ -128,9 +128,9 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
   });
 
   // ----------------------------------------------------
-  // Test 1: Service stop requests emergency DNS restoration before forced kill
+  // Test 1: Service stop stops child enforcement before emergency DNS restoration
   // ----------------------------------------------------
-  it('1. service stop requests emergency DNS restoration before forced kill', () => {
+  it('1. service stop stops child enforcement before emergency DNS restoration', () => {
     const csPath = path.resolve(__dirname, '../service-host/SafeBrowseServiceHost.cs');
     assert.strictEqual(fs.existsSync(csPath), true, 'SafeBrowseServiceHost.cs must exist');
     const csContent = fs.readFileSync(csPath, 'utf8');
@@ -139,14 +139,14 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const onStopBody = extractCsMethod(csContent, 'protected override void OnStop()');
 
     const stoppingIdx = onStopBody.indexOf('_stopping = true');
-    const restoreIdx = onStopBody.indexOf('RunEmergencyRestore');
     const stopChildIdx = onStopBody.indexOf('StopChildProcess');
+    const restoreIdx = onStopBody.indexOf('RunEmergencyRestore');
 
     assert.ok(stoppingIdx !== -1, '_stopping = true must be set in OnStop');
-    assert.ok(restoreIdx !== -1, 'RunEmergencyRestore must be invoked in OnStop');
     assert.ok(stopChildIdx !== -1, 'StopChildProcess must be invoked in OnStop');
-    assert.ok(stoppingIdx < restoreIdx, '_stopping = true must occur before RunEmergencyRestore');
-    assert.ok(restoreIdx < stopChildIdx, 'RunEmergencyRestore must precede StopChildProcess');
+    assert.ok(restoreIdx !== -1, 'RunEmergencyRestore must be invoked in OnStop');
+    assert.ok(stoppingIdx < stopChildIdx, '_stopping = true must occur before StopChildProcess');
+    assert.ok(stopChildIdx < restoreIdx, 'StopChildProcess must precede RunEmergencyRestore so reconciliation cannot re-enforce 127.0.0.1');
   });
 
   // ----------------------------------------------------
@@ -591,8 +591,8 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
       'WiX file must define RestoreDnsOnUninstall custom action'
     );
     assert.ok(
-      wxsContent.includes('Before="StopServices"'),
-      'RestoreDnsOnUninstall must be sequenced Before="StopServices" so binaries and services are intact'
+      wxsContent.includes('After="StopServices"'),
+      'RestoreDnsOnUninstall must be sequenced After="StopServices" so service is stopped cleanly before verification'
     );
   });
 
@@ -1279,9 +1279,9 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
   });
 
   // ----------------------------------------------------
-  // Test 33: WiX uninstall restore ordering remains RestoreDnsOnUninstall Before="StopServices" with NOT UPGRADINGPRODUCTCODE
+  // Test 33: WiX uninstall restore ordering sequences RestoreDnsOnUninstall After="StopServices" with NOT UPGRADINGPRODUCTCODE
   // ----------------------------------------------------
-  it('33. WiX uninstall restore ordering remains RestoreDnsOnUninstall Before="StopServices" with NOT UPGRADINGPRODUCTCODE', () => {
+  it('33. WiX uninstall restore ordering sequences RestoreDnsOnUninstall After="StopServices" with NOT UPGRADINGPRODUCTCODE', () => {
     const wxsPath = path.resolve(__dirname, '../wix/SafeBrowseChild-Pilot.wxs');
     const wxsContent = fs.readFileSync(wxsPath, 'utf8');
 
@@ -1295,8 +1295,8 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
       'RestoreDnsOnUninstall must be in InstallExecuteSequence'
     );
     assert.ok(
-      seqBlock.includes('Before="StopServices"'),
-      'RestoreDnsOnUninstall must run Before="StopServices"'
+      seqBlock.includes('After="StopServices"'),
+      'RestoreDnsOnUninstall must run After="StopServices"'
     );
     assert.ok(
       seqBlock.includes('Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"'),
@@ -4768,7 +4768,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
       'RestoreDnsOnUninstall must have Return="check" so MSI aborts if network restoration cannot be proven'
     );
 
-    // 3. Verify sequencing: runs Before="StopServices"
+    // 3. Verify sequencing: runs After="StopServices"
     const seqIndex = wxsContent.indexOf('<InstallExecuteSequence>');
     const seqEnd = wxsContent.indexOf('</InstallExecuteSequence>', seqIndex);
     const seqBlock = wxsContent.substring(seqIndex, seqEnd);
@@ -4777,8 +4777,8 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
       'RestoreDnsOnUninstall must be in InstallExecuteSequence'
     );
     assert.ok(
-      seqBlock.includes('Before="StopServices"'),
-      'RestoreDnsOnUninstall must run Before="StopServices"'
+      seqBlock.includes('After="StopServices"'),
+      'RestoreDnsOnUninstall must run After="StopServices"'
     );
     assert.ok(
       seqBlock.includes('Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"'),
@@ -4931,6 +4931,45 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
       restorePsContent.includes('SafeBrowse User Helper Block IPC'),
       false,
       'restore-dns.ps1 must not target non-existent IPC firewall rule'
+    );
+  });
+
+  it('125. Gate A1 / Blocker 1: Lifecycle architecture guarantees no recursion and child enforcement stopped before restoration', () => {
+    // 1. Verify --emergency-restore in agent-cli.ts does NOT call Stop-Service (eliminating deadlock / recursion)
+    const agentCliPath = path.resolve(__dirname, '../src/agent-cli.ts');
+    const agentCliContent = fs.readFileSync(agentCliPath, 'utf8');
+    const restoreIdx = agentCliContent.indexOf("args.includes('--emergency-restore')");
+    assert.ok(restoreIdx !== -1, 'agent-cli.ts must handle --emergency-restore');
+    const restoreBlock = agentCliContent.substring(restoreIdx, restoreIdx + 500);
+    assert.strictEqual(
+      restoreBlock.includes('Stop-Service'),
+      false,
+      '--emergency-restore must NOT invoke Stop-Service to prevent service stop deadlock / recursion'
+    );
+
+    // 2. Verify ServiceHost.OnStop() stops child enforcement process BEFORE RunEmergencyRestore()
+    const serviceHostPath = path.resolve(__dirname, '../service-host/SafeBrowseServiceHost.cs');
+    const serviceHostContent = fs.readFileSync(serviceHostPath, 'utf8');
+    const onStopIdx = serviceHostContent.indexOf('protected override void OnStop()');
+    assert.ok(onStopIdx !== -1, 'SafeBrowseServiceHost.cs must define OnStop()');
+    const onStopBlock = serviceHostContent.substring(onStopIdx, onStopIdx + 800);
+    const stopChildPos = onStopBlock.indexOf('StopChildProcess()');
+    const runRestorePos = onStopBlock.indexOf('RunEmergencyRestore(');
+    assert.ok(stopChildPos !== -1, 'OnStop must invoke StopChildProcess()');
+    assert.ok(runRestorePos !== -1, 'OnStop must invoke RunEmergencyRestore()');
+    assert.ok(
+      stopChildPos < runRestorePos,
+      'OnStop must terminate child enforcement process BEFORE invoking RunEmergencyRestore() to prevent loopback DNS re-enforcement'
+    );
+
+    // 3. Verify WiX sequences RestoreDnsOnUninstall after StopServices and before file deletion
+    const wxsPath = path.resolve(__dirname, '../wix/SafeBrowseChild-Pilot.wxs');
+    const wxsContent = fs.readFileSync(wxsPath, 'utf8');
+    const seqIdx = wxsContent.indexOf('<InstallExecuteSequence>');
+    const seqBlock = wxsContent.substring(seqIdx, wxsContent.indexOf('</InstallExecuteSequence>', seqIdx));
+    assert.ok(
+      seqBlock.includes('Action="RestoreDnsOnUninstall"') && seqBlock.includes('After="StopServices"'),
+      'WiX sequence must execute RestoreDnsOnUninstall after StopServices'
     );
   });
 });

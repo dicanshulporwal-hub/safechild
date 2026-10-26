@@ -180,6 +180,7 @@ export class GuiServer {
                   })),
                   systemStatus: systemStatus ? { dnsEnforced: Boolean(systemStatus.dnsEnforced) } : null,
                   pinConfigured: isPinSet,
+                  parentPinSetupRequired: Boolean(config && !isPinSet),
                   managementUnlocked: false,
                 })
               );
@@ -216,6 +217,7 @@ export class GuiServer {
                 mappings,
                 systemStatus,
                 pinConfigured: isPinSet,
+                parentPinSetupRequired: Boolean(config && !isPinSet),
                 managementUnlocked: true,
               })
             );
@@ -540,6 +542,60 @@ export class GuiServer {
               JSON.stringify({
                 error: isCancelled
                   ? 'Administrator approval is required to reconfigure accounts.'
+                  : e.message,
+              })
+            );
+          }
+          return;
+        }
+
+        if (pathname === '/api/launch-pin-setup' && req.method === 'POST') {
+          const config = await this.configMgr.loadSanitizedConfig();
+          const isPinSet = await this.pinMgr.isPinSet();
+
+          if (!config) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Device is not paired.' }));
+            return;
+          }
+
+          if (isPinSet) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Parent PIN is already configured.' }));
+            return;
+          }
+
+          try {
+            const exePath = process.argv[0];
+            const isNode = exePath.toLowerCase().endsWith('node.exe') || exePath.toLowerCase().endsWith('node');
+            const psPath = this.configMgr.getPowerShellPath();
+
+            if (process.platform === 'win32' && process.env.NODE_ENV !== 'test') {
+              const args = isNode
+                ? `"${process.argv[1]}" --setup-pin`
+                : `--setup-pin`;
+              const psCmd = `Start-Process -FilePath "${exePath}" -ArgumentList '${args}' -Verb RunAs`;
+              await execFileAsync(psPath, [
+                '-NoLogo',
+                '-NoProfile',
+                '-NonInteractive',
+                '-ExecutionPolicy',
+                'Bypass',
+                '-Command',
+                psCmd,
+              ]);
+            }
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, message: 'Administrator elevation requested for Parent PIN setup' }));
+          } catch (e: any) {
+            const msg = (e.stderr || e.message || '').toString();
+            const isCancelled = msg.includes('canceled by the user') || msg.includes('1223');
+            res.writeHead(isCancelled ? 403 : 500, { 'Content-Type': 'application/json' });
+            res.end(
+              JSON.stringify({
+                error: isCancelled
+                  ? 'Administrator approval is required to set up Parent PIN.'
                   : e.message,
               })
             );

@@ -766,4 +766,136 @@ describe('SafeBrowse Stage C.5 — Family-Level Onboarding, Cloud Truth & Parent
       await pairServer.stop();
     }
   });
+
+  it('15. Gate A Blocker 2: Legacy paired device with no PIN supports secure elevated bootstrap and remains fail-closed until configured', async () => {
+    const { ElevatedPairServer } = await import('../src/elevated-pair-server');
+
+    // Scenario: Legacy/pilot device that was already paired, but no parent-pin.json exists
+    await configMgr.saveDeviceConfig({
+      deviceId: 'dev-legacy-no-pin',
+      deviceToken: 'dtk_legacy_no_pin',
+      childId: null,
+      parentId: 'p-legacy',
+      deviceName: 'Family Living Room PC',
+      backendUrl: 'https://safebrowse.porwal.online',
+      pairedAt: new Date().toISOString(),
+      onboardingState: 'PROTECTED',
+    });
+    await pinMgr.clearPin();
+    assert.strictEqual(await pinMgr.isPinSet(), false);
+
+    const guiServer = new GuiServer(configMgr, accountMgr, networkManager, pinMgr);
+    const guiPort = await guiServer.start(0);
+
+    const pairServer = new ElevatedPairServer(configMgr, accountMgr, networkManager, pinMgr);
+    const pairPort = await pairServer.start(0);
+
+    try {
+      // 1. In view-only status: parentPinSetupRequired is true, pinConfigured is false, managementUnlocked is false
+      const statusRes = await fetch(`http://127.0.0.1:${guiPort}/api/status`);
+      assert.strictEqual(statusRes.status, 200);
+      const statusData = await statusRes.json() as any;
+      assert.strictEqual(statusData.pinConfigured, false);
+      assert.strictEqual(statusData.parentPinSetupRequired, true);
+      assert.strictEqual(statusData.managementUnlocked, false);
+
+      // 2. Protected mutations remain strictly locked (401)
+      const mutRes = await fetch(`http://127.0.0.1:${guiPort}/api/reconfigure`, { method: 'POST' });
+      assert.strictEqual(mutRes.status, 401);
+      const mutData = await mutRes.json() as any;
+      assert.match(mutData.error, /Parent PIN has not been configured/);
+
+      // 3. Child/standard non-admin user attempts bootstrap PIN -> 403 Forbidden
+      configMgr.setMockIsAdministratorForTesting(false);
+      const childBootstrapRes = await fetch(`http://127.0.0.1:${pairPort}/api/bootstrap-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentPin: '987654', confirmPin: '987654' }),
+      });
+      assert.strictEqual(childBootstrapRes.status, 403);
+      const childBootstrapData = await childBootstrapRes.json() as any;
+      assert.match(childBootstrapData.error, /Administrator/i);
+      assert.strictEqual(await pinMgr.isPinSet(), false);
+
+      // 4. Elevated administrator enters mismatched or malformed PINs -> 400 Bad Request
+      configMgr.setMockIsAdministratorForTesting(true);
+
+      const mismatchRes = await fetch(`http://127.0.0.1:${pairPort}/api/bootstrap-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentPin: '987654', confirmPin: '987655' }),
+      });
+      assert.strictEqual(mismatchRes.status, 400);
+      const mismatchData = await mismatchRes.json() as any;
+      assert.match(mismatchData.error, /not match/i);
+
+      const malformedRes = await fetch(`http://127.0.0.1:${pairPort}/api/bootstrap-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentPin: '1234', confirmPin: '1234' }),
+      });
+      assert.strictEqual(malformedRes.status, 400);
+      const malformedData = await malformedRes.json() as any;
+      assert.match(malformedData.error, /between 6 and 8/i);
+
+      // 5. Elevated administrator successfully configures initial PIN
+      const successBootstrapRes = await fetch(`http://127.0.0.1:${pairPort}/api/bootstrap-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentPin: '987654', confirmPin: '987654' }),
+      });
+      assert.strictEqual(successBootstrapRes.status, 200);
+      const successBootstrapData = await successBootstrapRes.json() as any;
+      assert.strictEqual(successBootstrapData.success, true);
+      assert.strictEqual(await pinMgr.isPinSet(), true);
+
+      // 6. Calling bootstrap-pin when PIN is ALREADY configured -> 400 Bad Request
+      const reBootstrapRes = await fetch(`http://127.0.0.1:${pairPort}/api/bootstrap-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentPin: '112233', confirmPin: '112233' }),
+      });
+      assert.strictEqual(reBootstrapRes.status, 400);
+      const reBootstrapData = await reBootstrapRes.json() as any;
+      assert.match(reBootstrapData.error, /already configured/i);
+
+      // 7. GUI launch-pin-setup when PIN is ALREADY set -> 400 Bad Request
+      const launchWhenSetRes = await fetch(`http://127.0.0.1:${guiPort}/api/launch-pin-setup`, { method: 'POST' });
+      assert.strictEqual(launchWhenSetRes.status, 400);
+      const launchWhenSetData = await launchWhenSetRes.json() as any;
+      assert.match(launchWhenSetData.error, /already configured/i);
+
+      // 8. View-only status now reports parentPinSetupRequired: false and pinConfigured: true
+      const postSetupStatus = await fetch(`http://127.0.0.1:${guiPort}/api/status`);
+      assert.strictEqual(postSetupStatus.status, 200);
+      const postSetupData = await postSetupStatus.json() as any;
+      assert.strictEqual(postSetupData.pinConfigured, true);
+      assert.strictEqual(postSetupData.parentPinSetupRequired, false);
+      assert.strictEqual(postSetupData.managementUnlocked, false);
+
+      // 9. Standard PIN verification with the newly created PIN unlocks 5-minute management session
+      const verifyRes = await fetch(`http://127.0.0.1:${guiPort}/api/verify-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: '987654' }),
+      });
+      assert.strictEqual(verifyRes.status, 200);
+      const verifyData = await verifyRes.json() as any;
+      assert.strictEqual(verifyData.success, true);
+      assert.ok(verifyData.sessionToken);
+
+      // 10. Status with valid session token is unlocked
+      const unlockedStatus = await fetch(`http://127.0.0.1:${guiPort}/api/status`, {
+        headers: { 'x-management-session': verifyData.sessionToken },
+      });
+      assert.strictEqual(unlockedStatus.status, 200);
+      const unlockedData = await unlockedStatus.json() as any;
+      assert.strictEqual(unlockedData.managementUnlocked, true);
+      assert.strictEqual(unlockedData.parentPinSetupRequired, false);
+    } finally {
+      configMgr.setMockIsAdministratorForTesting(true);
+      guiServer.stop();
+      await pairServer.stop();
+    }
+  });
 });

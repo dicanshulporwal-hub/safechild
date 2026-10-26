@@ -831,4 +831,161 @@ describe('SafeBrowse Windows Stage C.3.1: Service Block IPC Integration Suite', 
     assert.strictEqual(maxConcurrent, 1);
     assert.strictEqual(totalCompleted, 1);
   });
+
+  test('18. Gate A Blocker 3: Helper hung / IPC-unhealthy recovery invokes --recover-helper and replaces target session process only', async () => {
+    await ipcServer.start();
+
+    // Track simulated processes per session: Map<sessionId, { pid: number; killed: boolean }[]>
+    const simulatedProcesses: Array<{ pid: number; sessionId: number; killed: boolean }> = [
+      { pid: 4001, sessionId: 4, killed: false }, // Session 4 (e.g. parent or other session)
+      { pid: 5001, sessionId: 5, killed: false }, // Session 5 (hung child helper, deadlocked/disconnected)
+    ];
+
+    const launchedCommands: string[] = [];
+
+    // ServiceHost.EnsureUserHelperRunning simulation logic
+    const simulateEnsureUserHelperRunning = (sessionId: number, forceRestart: boolean): boolean => {
+      // Find existing process in session
+      const existing = simulatedProcesses.find((p) => p.sessionId === sessionId && !p.killed);
+      if (existing) {
+        if (!forceRestart) {
+          // Normal mode: already running, do nothing
+          return true;
+        }
+        // Recovery mode: terminate ONLY the target session's process
+        existing.killed = true;
+      }
+
+      // Launch fresh process in target session
+      const newPid = Math.floor(10000 + Math.random() * 90000);
+      simulatedProcesses.push({ pid: newPid, sessionId, killed: false });
+      return true;
+    };
+
+    // Node launchUserHelper simulation matching agent-cli.ts
+    let isLaunchingHelper = false;
+    const launchUserHelper = async (sessionId?: number, isRecovery: boolean = false): Promise<boolean> => {
+      if (isLaunchingHelper) {
+        return false;
+      }
+      isLaunchingHelper = true;
+      try {
+        const helperTargetSession = typeof sessionId === 'number' ? sessionId : 5;
+        // In normal mode, skip if already healthy on IPC
+        if (!isRecovery && ipcServer.isHelperHealthyForSession(helperTargetSession)) {
+          return true;
+        }
+
+        const flag = isRecovery ? '--recover-helper' : '--launch-helper';
+        launchedCommands.push(`SafeBrowseServiceHost.exe ${flag} ${helperTargetSession}`);
+        simulateEnsureUserHelperRunning(helperTargetSession, isRecovery);
+        await new Promise((r) => setTimeout(r, 20));
+        return true;
+      } finally {
+        isLaunchingHelper = false;
+      }
+    };
+
+    // 1. Initial State:
+    // Session 5 has a live OS process (PID 5001), but has NOT registered or is hung on IPC
+    assert.strictEqual(ipcServer.isHelperHealthyForSession(5), false);
+    assert.strictEqual(simulatedProcesses.find((p) => p.pid === 5001)?.killed, false);
+    assert.strictEqual(simulatedProcesses.find((p) => p.pid === 4001)?.killed, false);
+
+    // 2. Normal launch mode (!isRecovery) against an existing process does NOT kill it
+    const normalResult = await launchUserHelper(5, false);
+    assert.strictEqual(normalResult, true);
+    assert.strictEqual(launchedCommands[0], 'SafeBrowseServiceHost.exe --launch-helper 5');
+    // In normal mode, the existing process is NOT killed
+    assert.strictEqual(simulatedProcesses.find((p) => p.pid === 5001)?.killed, false);
+
+    // 3. Block presentation occurs while helper is hung/unregistered
+    activePolicyState = {
+      accountName: 'mporwal',
+      isManaged: true,
+      childId: 'child-rahul-101',
+      childName: 'Rahul',
+      sid: 'S-1-5-21-12345-1005',
+      sessionId: 5,
+    };
+
+    const presentRes = ipcServer.presentBlock('suspicious-gaming.com', 'Restricted by policy', 8880);
+    assert.strictEqual(presentRes.sent, false);
+    assert.strictEqual(presentRes.reason, 'NO_CONNECTED_HELPER');
+
+    // 4. Recovery mode (isRecovery = true) is triggered by watchdog/reconciliation
+    const recoveryResult = await launchUserHelper(5, true);
+    assert.strictEqual(recoveryResult, true);
+    assert.strictEqual(launchedCommands[1], 'SafeBrowseServiceHost.exe --recover-helper 5');
+
+    // 5. Blocker 3 assertion: PID 5001 (Session 5) is KILLED, but PID 4001 (Session 4) is UNTOUCHED
+    assert.strictEqual(
+      simulatedProcesses.find((p) => p.pid === 5001)?.killed,
+      true,
+      'Recovery must terminate the hung/unregistered helper process in target session 5'
+    );
+    assert.strictEqual(
+      simulatedProcesses.find((p) => p.pid === 4001)?.killed,
+      false,
+      'Recovery must NOT terminate processes in other sessions (Session 4)'
+    );
+
+    // 6. Concurrency guard test: concurrent recovery calls are guarded by isLaunchingHelper
+    const concurrentLaunches = await Promise.all([
+      launchUserHelper(5, true),
+      launchUserHelper(5, true),
+      launchUserHelper(5, true),
+    ]);
+    // Exactly 1 succeeds, remaining are dropped
+    assert.strictEqual(concurrentLaunches.filter((r) => r === true).length, 1);
+    assert.strictEqual(concurrentLaunches.filter((r) => r === false).length, 2);
+
+    // 7. Parent/unmanaged session suppresses recovery:
+    const mockWatchdogCheck = async (policy: ResolvedUserPolicy | null) => {
+      if (!policy || !policy.isManaged) {
+        // Parent or unmanaged session suppresses helper recovery
+        return false;
+      }
+      const targetSessionId = typeof policy.sessionId === 'number' ? policy.sessionId : undefined;
+      const isHealthy = ipcServer.isHelperHealthyForSession(targetSessionId, policy.accountName);
+      if (!isHealthy) {
+        return launchUserHelper(targetSessionId, true);
+      }
+      return false;
+    };
+
+    const unmanagedCheckResult = await mockWatchdogCheck({
+      accountName: 'anshulporwal',
+      isManaged: false,
+      childId: null,
+      childName: null,
+      sid: 'S-1-5-21-12345-1004',
+      sessionId: 4,
+    });
+    assert.strictEqual(unmanagedCheckResult, false, 'Watchdog must suppress recovery for unmanaged parent');
+
+    // 8. Newly launched replacement helper connects and registers on IPC
+    const recoveredClient = await createHelperClient(testSockPath, 'mporwal', 5002, 5);
+    try {
+      // IPC server now recognizes helper in session 5 as healthy
+      assert.strictEqual(ipcServer.isHelperHealthyForSession(5, 'mporwal'), true);
+
+      // 9. Pending block presentation ('suspicious-gaming.com') retries and is delivered to recovered client!
+      await new Promise((r) => setTimeout(r, 80));
+      assert.strictEqual(recoveredClient.receivedMessages.length, 1);
+      assert.strictEqual(recoveredClient.receivedMessages[0].domain, 'suspicious-gaming.com');
+      assert.strictEqual(recoveredClient.receivedMessages[0].reason, 'Restricted by policy');
+
+      // 10. Subsequent normal launch request skips because helper is now healthy on IPC
+      const skippedNormal = await launchUserHelper(5, false);
+      assert.strictEqual(skippedNormal, true);
+      assert.strictEqual(
+        launchedCommands[launchedCommands.length - 1] !== 'SafeBrowseServiceHost.exe --launch-helper 5',
+        true,
+        'Duplicate launch must be skipped when helper is already healthy on IPC'
+      );
+    } finally {
+      await recoveredClient.close();
+    }
+  });
 });

@@ -189,11 +189,12 @@
         EndSessionMessage="yes" />
 
     <InstallExecuteSequence>
-      <!-- SafeBrowse C.5.5 Gate A: Network restoration runs Before="StopServices" so binaries and services are intact.
-           RestoreDnsOnUninstall executes "SafeBrowseChild-Pilot.exe --emergency-restore", which stops the service,
-           terminates UserHelpers, tears down firewall rules, restores DNS, and verifies external resolution.
+      <!-- SafeBrowse C.5.5 Gate A: Network restoration runs After="StopServices" so service is stopped cleanly,
+           and runs before DeleteServices/RemoveFiles so binaries are intact.
+           RestoreDnsOnUninstall executes "SafeBrowseChild-Pilot.exe --emergency-restore", which verifies
+           clean network restoration (no trapped adapters, working external DNS) while binaries are intact.
            Return="check" ensures MSI fails and aborts before removal if network restoration cannot be proven. -->
-      <Custom Action="RestoreDnsOnUninstall" Before="StopServices" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="RestoreDnsOnUninstall" After="StopServices" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="ConfigureServiceRecovery" After="InstallServices" Condition="NOT REMOVE" />
       <Custom Action="LaunchFirstRunWizard" After="InstallFinalize" Condition="NOT REMOVE AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>

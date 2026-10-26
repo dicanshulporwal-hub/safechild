@@ -886,7 +886,7 @@ namespace SafeBrowse
             }
         }
 
-        public bool EnsureUserHelperRunning(uint sessionId)
+        public bool EnsureUserHelperRunning(uint sessionId, bool forceRestart = false)
         {
             if (sessionId == 0 || sessionId == 0xFFFFFFFF) return false;
 
@@ -908,7 +908,16 @@ namespace SafeBrowse
                     {
                         if (p.SessionId == (int)sessionId && !p.HasExited)
                         {
-                            return true; // Already running and healthy
+                            if (forceRestart)
+                            {
+                                Log(string.Format("[RECOVERY] Terminating hung/unregistered SafeBrowseUserHelper in Session {0} (PID {1})...", sessionId, p.Id));
+                                p.Kill();
+                                p.WaitForExit(3000);
+                            }
+                            else
+                            {
+                                return true; // Already running and healthy
+                            }
                         }
                     }
                     catch { }
@@ -918,7 +927,7 @@ namespace SafeBrowse
                     }
                 }
 
-                Log(string.Format("[HELPER] Launch requested for Session {0}...", sessionId));
+                Log(string.Format("[HELPER] Launch requested for Session {0} (forceRestart={1})...", sessionId, forceRestart));
                 IntPtr hToken = IntPtr.Zero;
                 if (WTSQueryUserToken(sessionId, out hToken))
                 {
@@ -1042,21 +1051,21 @@ namespace SafeBrowse
             Log("[INFO] SafeBrowse Service Host stop requested.");
             _stopping = true;
 
-            // 1. Terminate all SafeBrowseUserHelper instances
+            // 1. Stop child enforcement process BEFORE DNS restoration to prevent reconciliation loop from re-applying loopback DNS
+            Log("[INFO] Stopping child enforcement process...");
+            StopChildProcess();
+
+            // 2. Terminate all SafeBrowseUserHelper instances
             Log("[INFO] Terminating all SafeBrowse UserHelper instances...");
             TerminateAllUserHelpers();
 
-            // 2. Restore network DNS to original state before service completes shutdown
+            // 3. Restore network DNS to original state before service completes shutdown
             Log("[INFO] Initiating network DNS restoration...");
             bool restored = RunEmergencyRestore(2, 20000);
             if (!restored)
             {
                 Log("[CRITICAL] Service stop: DNS restoration could not be confirmed after retries.");
             }
-
-            // 3. Stop child enforcement process
-            Log("[INFO] Stopping child enforcement process...");
-            StopChildProcess();
 
             // 4. Close Job Object handle
             if (_jobHandle != IntPtr.Zero)
@@ -1399,8 +1408,9 @@ namespace SafeBrowse
 
         public static void Main(string[] args)
         {
-            if (args != null && args.Length > 0 && args[0] == "--launch-helper")
+            if (args != null && args.Length > 0 && (args[0] == "--launch-helper" || args[0] == "--recover-helper"))
             {
+                bool forceRecovery = args[0] == "--recover-helper";
                 uint targetSession = 0;
                 if (args.Length > 1 && uint.TryParse(args[1], out targetSession)) { }
                 else { targetSession = WTSGetActiveConsoleSessionId(); }
@@ -1408,7 +1418,7 @@ namespace SafeBrowse
                 if (targetSession != 0 && targetSession != 0xFFFFFFFF)
                 {
                     SafeBrowseServiceHost host = new SafeBrowseServiceHost();
-                    bool launched = host.EnsureUserHelperRunning(targetSession);
+                    bool launched = host.EnsureUserHelperRunning(targetSession, forceRecovery);
                     Environment.Exit(launched ? 0 : 1);
                 }
                 Environment.Exit(1);
