@@ -17,9 +17,12 @@ import {
 
 const execAsync = promisify(exec);
 
+export type ElevatedPairServerMode = 'PAIRING' | 'PIN_BOOTSTRAP';
+
 export class ElevatedPairServer {
   private server: http.Server | null = null;
   private port: number = 8887;
+  private mode: ElevatedPairServerMode = 'PAIRING';
   private configMgr: ConfigManager;
   private accountMgr: WindowsAccountManager;
   private networkMgr: WindowsNetworkManager;
@@ -33,8 +36,10 @@ export class ElevatedPairServer {
     customConfigMgr?: ConfigManager,
     customAccountMgr?: WindowsAccountManager,
     customNetworkMgr?: WindowsNetworkManager,
-    customPinMgr?: ParentPinManager
+    customPinMgr?: ParentPinManager,
+    mode: ElevatedPairServerMode = 'PAIRING'
   ) {
+    this.mode = mode;
     this.configMgr = customConfigMgr || configManager;
     this.accountMgr = customAccountMgr || accountManager;
     this.networkMgr = customNetworkMgr || networkManager;
@@ -42,6 +47,14 @@ export class ElevatedPairServer {
     if (this.networkMgr.setConfigManagerForTesting) {
       this.networkMgr.setConfigManagerForTesting(this.configMgr);
     }
+  }
+
+  public getMode(): ElevatedPairServerMode {
+    return this.mode;
+  }
+
+  public setMode(mode: ElevatedPairServerMode): void {
+    this.mode = mode;
   }
 
   public getPort(): number {
@@ -85,9 +98,11 @@ export class ElevatedPairServer {
           const onboardingState = this.configMgr.getOnboardingState();
           const onboardingReason = this.configMgr.getOnboardingReason();
           const hasMappings = await this.accountMgr.hasProfileMappings();
+          const isPinSet = await this.pinMgr.isPinSet();
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(
             JSON.stringify({
+              mode: this.mode,
               isElevated: isAdmin,
               isPaired: Boolean(sanitized),
               deviceId: sanitized?.deviceId || null,
@@ -95,6 +110,8 @@ export class ElevatedPairServer {
               onboardingState,
               onboardingReason,
               hasMappings,
+              isPinSet,
+              parentPinSetupRequired: Boolean(sanitized && !isPinSet),
             })
           );
           return;
@@ -139,6 +156,11 @@ export class ElevatedPairServer {
 
         // Endpoint: POST /api/reconnect (Clears stale validation credentials and resets state to NOT_CONNECTED)
         if (pathname === '/api/reconnect' && req.method === 'POST') {
+          if (this.mode === 'PIN_BOOTSTRAP') {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Reconnect is not permitted in PIN bootstrap mode.' }));
+            return;
+          }
           const isAdmin = await this.configMgr.isAdministrator();
           if (!isAdmin && (process.platform === 'win32' || this.configMgr.getPlatform() === 'win32')) {
             res.writeHead(403, { 'Content-Type': 'application/json' });
@@ -162,6 +184,11 @@ export class ElevatedPairServer {
 
         // Endpoint: POST /api/claim-and-pair
         if (pathname === '/api/claim-and-pair' && req.method === 'POST') {
+          if (this.mode === 'PIN_BOOTSTRAP') {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Pairing is not permitted in PIN bootstrap mode.' }));
+            return;
+          }
           const isAdmin = await this.configMgr.isAdministrator();
           if (!isAdmin && (process.platform === 'win32' || this.configMgr.getPlatform() === 'win32')) {
             res.writeHead(403, { 'Content-Type': 'application/json' });
@@ -329,6 +356,11 @@ export class ElevatedPairServer {
 
         // Endpoint: GET /api/accounts
         if (pathname === '/api/accounts' && req.method === 'GET') {
+          if (this.mode === 'PIN_BOOTSTRAP') {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Account discovery is not permitted in PIN bootstrap mode.' }));
+            return;
+          }
           try {
             const accounts = await this.accountMgr.discoverAccounts();
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -342,6 +374,11 @@ export class ElevatedPairServer {
 
         // Endpoint: GET /api/family-profiles
         if (pathname === '/api/family-profiles' && req.method === 'GET') {
+          if (this.mode === 'PIN_BOOTSTRAP') {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Family profiles are not permitted in PIN bootstrap mode.' }));
+            return;
+          }
           try {
             const secureConfig = await this.configMgr.loadDeviceConfig();
             if (!secureConfig) {
@@ -392,7 +429,7 @@ export class ElevatedPairServer {
             try {
               const data = JSON.parse(body || '{}');
               const parentPin = String(data.parentPin || data.pin || '').trim();
-              const confirmPin = data.confirmPin !== undefined ? String(data.confirmPin).trim() : null;
+              const confirmPin = String(data.confirmPin !== undefined ? data.confirmPin : '').trim();
 
               if (!/^\d{6,8}$/.test(parentPin)) {
                 res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -400,7 +437,7 @@ export class ElevatedPairServer {
                 return;
               }
 
-              if (confirmPin !== null && confirmPin !== parentPin) {
+              if (!confirmPin || confirmPin !== parentPin) {
                 res.writeHead(400, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'PIN confirmation does not match.' }));
                 return;
@@ -419,6 +456,11 @@ export class ElevatedPairServer {
 
         // Endpoint: POST /api/finish-setup
         if (pathname === '/api/finish-setup' && req.method === 'POST') {
+          if (this.mode === 'PIN_BOOTSTRAP') {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Account setup is not permitted in PIN bootstrap mode.' }));
+            return;
+          }
           const isAdmin = await this.configMgr.isAdministrator();
           if (!isAdmin) {
             res.writeHead(403, { 'Content-Type': 'application/json' });
@@ -578,11 +620,14 @@ export class ElevatedPairServer {
         }
 
         // Serve HTML UI
-        const queryCode = (parsed.query?.code as string) || this.prefillCode || '';
-        const queryName = (parsed.query?.name as string) || this.prefillName || 'Family Laptop';
-
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(this.renderHtml(queryCode, queryName));
+        if (this.mode === 'PIN_BOOTSTRAP') {
+          res.end(this.renderPinBootstrapHtml());
+        } else {
+          const queryCode = (parsed.query?.code as string) || this.prefillCode || '';
+          const queryName = (parsed.query?.name as string) || this.prefillName || 'Family Laptop';
+          res.end(this.renderHtml(queryCode, queryName));
+        }
       });
 
       server.listen(preferredPort, '127.0.0.1', () => {
@@ -1575,6 +1620,380 @@ export class ElevatedPairServer {
           showScreen('screenAlreadyConnected');
         }
       } catch {}
+    });
+  </script>
+</body>
+</html>`;
+  }
+
+  private renderPinBootstrapHtml(): string {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SafeBrowse — Parent PIN Setup</title>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #090d16;
+      --card-bg: rgba(17, 24, 39, 0.95);
+      --border: #1e293b;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      background: radial-gradient(circle at 50% 10%, #1e1b4b 0%, var(--bg) 100%);
+      color: var(--text);
+      margin: 0;
+      padding: 24px 20px;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    .container {
+      max-width: 580px;
+      width: 100%;
+      background: var(--card-bg);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 24px;
+      padding: 36px;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.8);
+      backdrop-filter: blur(20px);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 24px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+    }
+    .brand-left {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .brand-icon {
+      background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+      color: white;
+      width: 48px;
+      height: 48px;
+      border-radius: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 10px 15px -3px rgba(37, 99, 235, 0.4);
+    }
+    h1 { margin: 0; font-size: 20px; font-weight: 800; }
+    .subtitle { color: var(--text-muted); font-size: 13px; margin-top: 3px; }
+    .badge-admin {
+      background: rgba(37, 99, 235, 0.15);
+      border: 1px solid rgba(37, 99, 235, 0.4);
+      color: #93c5fd;
+      padding: 6px 12px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .view { display: none; }
+    .view.active { display: block; animation: fadeIn 0.25s ease-out; }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .callout {
+      background: rgba(30, 41, 59, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 16px;
+      padding: 16px 20px;
+      margin-bottom: 24px;
+      font-size: 13px;
+      color: #cbd5e1;
+      line-height: 1.6;
+    }
+    .input-group {
+      margin-bottom: 20px;
+      text-align: left;
+    }
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 700;
+      color: #cbd5e1;
+      margin-bottom: 8px;
+    }
+    input[type="password"] {
+      width: 100%;
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px 16px;
+      color: #fff;
+      font-size: 22px;
+      font-family: 'Courier New', monospace;
+      font-weight: 800;
+      letter-spacing: 6px;
+      text-align: center;
+      outline: none;
+      transition: all 0.2s;
+    }
+    input[type="password"]:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
+    }
+    .alert {
+      padding: 14px 18px;
+      border-radius: 12px;
+      margin-bottom: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      display: none;
+      line-height: 1.5;
+    }
+    .alert-error {
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      color: #fca5a5;
+    }
+    .alert-success {
+      background: rgba(34, 197, 94, 0.15);
+      border: 1px solid rgba(34, 197, 94, 0.4);
+      color: #86efac;
+    }
+    .button-row {
+      display: flex;
+      gap: 12px;
+      margin-top: 28px;
+    }
+    .btn {
+      flex: 1;
+      padding: 14px 20px;
+      border-radius: 12px;
+      font-weight: 700;
+      font-size: 14px;
+      cursor: pointer;
+      border: none;
+      transition: all 0.2s;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+    }
+    .btn-primary:hover {
+      background: var(--accent-hover);
+      box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
+    }
+    .btn-primary:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+    .btn-secondary {
+      background: rgba(30, 41, 59, 0.8);
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover {
+      background: rgba(51, 65, 85, 0.8);
+      color: #fff;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="brand">
+      <div class="brand-left">
+        <div class="brand-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+        </div>
+        <div>
+          <h1>SafeBrowse Administrator Parent PIN Setup</h1>
+          <div class="subtitle">Create Parent Security Lock</div>
+        </div>
+      </div>
+      <div class="badge-admin">
+        <span>🛡️</span>
+        <span>ADMINISTRATOR APPROVED</span>
+      </div>
+    </div>
+
+    <div id="alertBox" class="alert"></div>
+
+    <!-- ERROR VIEW (If not elevated, unpaired, or PIN already configured) -->
+    <div id="viewError" class="view">
+      <div style="text-align: center; padding: 20px 0;">
+        <div style="width: 64px; height: 64px; border-radius: 50%; background: rgba(239, 68, 68, 0.2); border: 2px solid var(--danger); color: var(--danger); font-size: 32px; display: flex; align-items: center; justify-content: center; margin: 0 auto 20px;">
+          ⚠️
+        </div>
+        <h2 id="errorTitle" style="font-size: 22px; font-weight: 800; margin: 0 0 10px 0;">Setup Not Available</h2>
+        <p id="errorMessage" style="color: var(--text-muted); font-size: 14px; line-height: 1.6; max-width: 480px; margin: 0 auto 24px;"></p>
+        <button class="btn btn-secondary" style="max-width: 200px; margin: 0 auto;" onclick="cancelSetup()">Close</button>
+      </div>
+    </div>
+
+    <!-- FORM VIEW -->
+    <div id="viewForm" class="view active">
+      <h2 style="font-size: 22px; font-weight: 800; margin: 0 0 8px 0;">Set Up Parent PIN</h2>
+      <p style="color: var(--text-muted); font-size: 14px; line-height: 1.6; margin-bottom: 24px;">
+        This computer is connected to your SafeBrowse family account, but does not yet have a Parent PIN. Create a 6 to 8 digit PIN to protect device management and account configuration.
+      </p>
+
+      <div class="input-group">
+        <label for="parentPin">SafeBrowse Parent PIN (6–8 digits)</label>
+        <input type="password" id="parentPin" placeholder="••••••" maxlength="8" pattern="[0-9]*" inputmode="numeric" autofocus>
+      </div>
+
+      <div class="input-group">
+        <label for="confirmPin">Confirm Parent PIN</label>
+        <input type="password" id="confirmPin" placeholder="••••••" maxlength="8" pattern="[0-9]*" inputmode="numeric">
+      </div>
+
+      <div class="callout" style="margin-top: 20px;">
+        🔒 <strong>Tamper Protection:</strong> Standard child accounts cannot modify settings or bypass protection without this PIN. Creating this PIN does not automatically unlock management sessions.
+      </div>
+
+      <div class="button-row">
+        <button class="btn btn-primary" id="btnSavePin" onclick="submitBootstrapPin()">Save Parent PIN</button>
+        <button class="btn btn-secondary" onclick="cancelSetup()">Cancel</button>
+      </div>
+    </div>
+
+    <!-- SUCCESS VIEW -->
+    <div id="viewSuccess" class="view">
+      <div style="text-align: center; padding: 20px 0;">
+        <div style="width: 64px; height: 64px; border-radius: 50%; background: rgba(34, 197, 94, 0.2); border: 2px solid var(--success); color: var(--success); font-size: 32px; display: flex; align-items: center; justify-content: center; margin: 0 auto 20px;">
+          ✓
+        </div>
+        <h2 style="font-size: 24px; font-weight: 800; margin: 0 0 10px 0;">Parent PIN configured successfully</h2>
+        <p style="color: var(--text-muted); font-size: 15px; line-height: 1.6; max-width: 480px; margin: 0 auto 24px;">
+          Your SafeBrowse Parent PIN has been set securely. Management settings remain locked. You can now unlock management in the main SafeBrowse window using your new PIN.
+        </p>
+        <button class="btn btn-primary" style="max-width: 260px; margin: 0 auto;" onclick="closeSetup()">Close & Return to SafeBrowse</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function showAlert(msg, isError = false) {
+      const b = document.getElementById('alertBox');
+      b.className = 'alert ' + (isError ? 'alert-error' : 'alert-success');
+      b.innerText = msg;
+      b.style.display = 'block';
+    }
+
+    function clearAlert() {
+      const b = document.getElementById('alertBox');
+      b.style.display = 'none';
+    }
+
+    function showView(id) {
+      clearAlert();
+      document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+      const target = document.getElementById(id);
+      if (target) target.classList.add('active');
+    }
+
+    function showError(title, message) {
+      document.getElementById('errorTitle').innerText = title;
+      document.getElementById('errorMessage').innerText = message;
+      showView('viewError');
+    }
+
+    async function submitBootstrapPin() {
+      const pin = (document.getElementById('parentPin')?.value || '').trim();
+      const confirm = (document.getElementById('confirmPin')?.value || '').trim();
+      const btn = document.getElementById('btnSavePin');
+
+      if (!/^\\d{6,8}$/.test(pin)) {
+        showAlert('SafeBrowse Parent PIN must be between 6 and 8 numeric digits.', true);
+        return;
+      }
+
+      if (pin !== confirm) {
+        showAlert('PIN confirmation does not match.', true);
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerText = 'Saving Parent PIN...';
+      clearAlert();
+
+      try {
+        const res = await fetch('/api/bootstrap-pin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ parentPin: pin, confirmPin: confirm })
+        });
+
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.success) {
+          showView('viewSuccess');
+          setTimeout(() => closeSetup(), 3000);
+        } else {
+          showAlert(data.error || 'Failed to configure Parent PIN.', true);
+          btn.disabled = false;
+          btn.innerText = 'Save Parent PIN';
+        }
+      } catch (e) {
+        showAlert('Error communicating with service: ' + e.message, true);
+        btn.disabled = false;
+        btn.innerText = 'Save Parent PIN';
+      }
+    }
+
+    async function cancelSetup() {
+      try {
+        await fetch('/api/cancel', { method: 'POST' });
+      } catch {}
+      window.close();
+    }
+
+    async function closeSetup() {
+      try {
+        await fetch('/api/close', { method: 'POST' });
+      } catch {}
+      window.close();
+    }
+
+    window.addEventListener('DOMContentLoaded', async () => {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+
+        if (!data.isElevated) {
+          showError('Administrator Elevation Required', 'Administrator privileges are required to configure the Parent PIN.');
+          return;
+        }
+
+        if (!data.isPaired) {
+          showError('Device Not Paired', 'This computer is not paired to a SafeBrowse family account. Run normal setup first.');
+          return;
+        }
+
+        if (data.isPinSet) {
+          showError('PIN Already Configured', 'Parent PIN is already configured on this computer. Use the main SafeBrowse window to enter your PIN.');
+          return;
+        }
+
+        showView('viewForm');
+      } catch (err) {
+        showError('Service Connection Error', 'Failed to communicate with SafeBrowse service: ' + err.message);
+      }
     });
   </script>
 </body>

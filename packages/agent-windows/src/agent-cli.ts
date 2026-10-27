@@ -8,6 +8,7 @@ import { networkManager, logServiceMessage, CurrentEnforcementInspection } from 
 import { accountManager } from './account-manager';
 import { sessionMonitor } from './session-monitor';
 import { activityReporter } from './activity-reporter';
+import { parentPinManager } from './parent-pin-manager';
 import { guiServer } from './gui-server';
 import { normalizePairingCode, CURRENT_WINDOWS_PROTOCOL_VERSION } from '@safebrowse/shared';
 import * as fs from 'fs';
@@ -1290,9 +1291,27 @@ async function main() {
       process.exit(5); // ERROR_ACCESS_DENIED
     }
 
+    const cfg = await configManager.loadDeviceConfig();
+    if (!cfg) {
+      console.error('[SafeBrowse] Error: Device is not paired. Run normal pairing setup first.');
+      process.exit(1);
+    }
+
+    const isPinSet = await parentPinManager.isPinSet();
+    if (isPinSet) {
+      console.error('[SafeBrowse] Error: Parent PIN is already configured on this device.');
+      process.exit(1);
+    }
+
     console.log('[SafeBrowse] Starting SafeBrowse Administrator Parent PIN Setup...');
     const { ElevatedPairServer } = await import('./elevated-pair-server');
-    const server = new ElevatedPairServer();
+    const server = new ElevatedPairServer(
+      configManager,
+      accountManager,
+      networkManager,
+      parentPinManager,
+      'PIN_BOOTSTRAP'
+    );
     const port = await server.start(8887);
     await server.launchWindow();
     console.log(`[SafeBrowse] Elevated Parent PIN setup running at http://127.0.0.1:${port}.`);

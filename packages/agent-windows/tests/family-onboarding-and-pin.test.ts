@@ -787,7 +787,7 @@ describe('SafeBrowse Stage C.5 — Family-Level Onboarding, Cloud Truth & Parent
     const guiServer = new GuiServer(configMgr, accountMgr, networkManager, pinMgr);
     const guiPort = await guiServer.start(0);
 
-    const pairServer = new ElevatedPairServer(configMgr, accountMgr, networkManager, pinMgr);
+    const pairServer = new ElevatedPairServer(configMgr, accountMgr, networkManager, pinMgr, 'PIN_BOOTSTRAP');
     const pairPort = await pairServer.start(0);
 
     try {
@@ -896,6 +896,203 @@ describe('SafeBrowse Stage C.5 — Family-Level Onboarding, Cloud Truth & Parent
       configMgr.setMockIsAdministratorForTesting(true);
       guiServer.stop();
       await pairServer.stop();
+    }
+  });
+
+  it('16. Gate A Final: Dedicated PIN bootstrap mode satisfies all 10 security invariants', async () => {
+    const { ElevatedPairServer } = await import('../src/elevated-pair-server');
+
+    // 1. Structural check: --setup-pin in agent-cli.ts launches PIN_BOOTSTRAP mode, not default pairing
+    const agentCliPath = path.resolve(__dirname, '../src/agent-cli.ts');
+    const agentCliContent = fs.readFileSync(agentCliPath, 'utf8');
+    const setupPinIdx = agentCliContent.indexOf("args.includes('--setup-pin')");
+    assert.ok(setupPinIdx !== -1, 'agent-cli.ts must handle --setup-pin');
+    const setupPinBlock = agentCliContent.substring(setupPinIdx, setupPinIdx + 2000);
+    assert.ok(
+      setupPinBlock.includes("'PIN_BOOTSTRAP'"),
+      'agent-cli.ts --setup-pin must instantiate ElevatedPairServer with PIN_BOOTSTRAP mode'
+    );
+    assert.ok(
+      !setupPinBlock.includes('new ElevatedPairServer()'),
+      'agent-cli.ts --setup-pin must NOT use default PAIRING mode'
+    );
+
+    // Initial State: Paired device with NO Parent PIN
+    await configMgr.saveDeviceConfig({
+      deviceId: 'dev-bootstrap-invariants',
+      deviceToken: 'dtk_invariants',
+      childId: null,
+      parentId: 'p-invariants',
+      deviceName: 'Family PC',
+      backendUrl: 'https://safebrowse.porwal.online',
+      pairedAt: new Date().toISOString(),
+      onboardingState: 'PROTECTED',
+    });
+    await pinMgr.clearPin();
+    assert.strictEqual(await pinMgr.isPinSet(), false);
+
+    const bootstrapServer = new ElevatedPairServer(configMgr, accountMgr, networkManager, pinMgr, 'PIN_BOOTSTRAP');
+    const bPort = await bootstrapServer.start(0);
+
+    const guiServer = new GuiServer(configMgr, accountMgr, networkManager, pinMgr);
+    const gPort = await guiServer.start(0);
+
+    try {
+      // 2. Mode check and status
+      assert.strictEqual(bootstrapServer.getMode(), 'PIN_BOOTSTRAP');
+      const statusRes = await fetch(`http://127.0.0.1:${bPort}/api/status`);
+      const statusData = await statusRes.json() as any;
+      assert.strictEqual(statusData.mode, 'PIN_BOOTSTRAP');
+      assert.strictEqual(statusData.isPaired, true);
+      assert.strictEqual(statusData.isPinSet, false);
+      assert.strictEqual(statusData.parentPinSetupRequired, true);
+
+      // 3. Paired + no PIN => Dedicated PIN-bootstrap HTML screen served
+      const htmlRes = await fetch(`http://127.0.0.1:${bPort}/`);
+      assert.strictEqual(htmlRes.status, 200);
+      const html = await htmlRes.text();
+      assert.ok(html.includes('SafeBrowse Administrator Parent PIN Setup'), 'Must serve PIN bootstrap title');
+      assert.ok(html.includes('id="parentPin"'), 'Must contain parentPin input field');
+      assert.ok(html.includes('id="confirmPin"'), 'Must contain confirmPin input field');
+
+      // 7. Bootstrap UI submits specifically to /api/bootstrap-pin
+      assert.ok(html.includes('/api/bootstrap-pin'), 'Bootstrap UI must post to /api/bootstrap-pin');
+      assert.ok(html.includes('submitBootstrapPin'), 'Must contain submitBootstrapPin handler');
+
+      // 8. Bootstrap mode does NOT expose pairing, account mapping, or reconnect UI
+      assert.strictEqual(html.includes('id="pairingCode"'), false, 'Must NOT contain pairingCode input');
+      assert.strictEqual(html.includes('id="accountsContainer"'), false, 'Must NOT contain accounts container');
+      assert.strictEqual(html.includes('screenAccounts'), false, 'Must NOT contain accounts screen');
+      assert.strictEqual(html.includes('reconnectComputer'), false, 'Must NOT expose reconnect UI');
+      assert.strictEqual(html.includes('/api/claim-and-pair'), false, 'Must NOT reference claim-and-pair in HTML');
+      assert.strictEqual(html.includes('/api/finish-setup'), false, 'Must NOT reference finish-setup in HTML');
+
+      // Mutation endpoints blocked in PIN_BOOTSTRAP mode
+      const blockedClaim = await fetch(`http://127.0.0.1:${bPort}/api/claim-and-pair`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: 'ABCD1234' }),
+      });
+      assert.strictEqual(blockedClaim.status, 403);
+
+      const blockedFinish = await fetch(`http://127.0.0.1:${bPort}/api/finish-setup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mappings: [], parentPin: '123456' }),
+      });
+      assert.strictEqual(blockedFinish.status, 403);
+
+      const blockedAccounts = await fetch(`http://127.0.0.1:${bPort}/api/accounts`);
+      assert.strictEqual(blockedAccounts.status, 403);
+
+      const blockedProfiles = await fetch(`http://127.0.0.1:${bPort}/api/family-profiles`);
+      assert.strictEqual(blockedProfiles.status, 403);
+
+      const blockedReconnect = await fetch(`http://127.0.0.1:${bPort}/api/reconnect`, { method: 'POST' });
+      assert.strictEqual(blockedReconnect.status, 403);
+
+      // 3. Unpaired => bootstrap rejected
+      await configMgr.deleteDeviceConfig();
+      const unpairBootstrap = await fetch(`http://127.0.0.1:${bPort}/api/bootstrap-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentPin: '829103', confirmPin: '829103' }),
+      });
+      assert.strictEqual(unpairBootstrap.status, 400);
+      const unpairData = await unpairBootstrap.json() as any;
+      assert.match(unpairData.error, /Device is not paired/i);
+
+      // Restore device config
+      await configMgr.saveDeviceConfig({
+        deviceId: 'dev-bootstrap-invariants',
+        deviceToken: 'dtk_invariants',
+        childId: null,
+        parentId: 'p-invariants',
+        deviceName: 'Family PC',
+        backendUrl: 'https://safebrowse.porwal.online',
+        pairedAt: new Date().toISOString(),
+        onboardingState: 'PROTECTED',
+      });
+
+      // 5. Non-admin => rejected
+      configMgr.setMockIsAdministratorForTesting(false);
+      const nonAdminBootstrap = await fetch(`http://127.0.0.1:${bPort}/api/bootstrap-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentPin: '829103', confirmPin: '829103' }),
+      });
+      assert.strictEqual(nonAdminBootstrap.status, 403);
+      configMgr.setMockIsAdministratorForTesting(true);
+
+      // Malformed PIN (< 6 digits) => rejected
+      const malformedBootstrap = await fetch(`http://127.0.0.1:${bPort}/api/bootstrap-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentPin: '123', confirmPin: '123' }),
+      });
+      assert.strictEqual(malformedBootstrap.status, 400);
+
+      // Mismatched confirmation => rejected
+      const mismatchBootstrap = await fetch(`http://127.0.0.1:${bPort}/api/bootstrap-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentPin: '829103', confirmPin: '829104' }),
+      });
+      assert.strictEqual(mismatchBootstrap.status, 400);
+
+      // 6. Valid 6-8 digit PIN + matching confirmation => verifier created
+      const validBootstrap = await fetch(`http://127.0.0.1:${bPort}/api/bootstrap-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentPin: '829103', confirmPin: '829103' }),
+      });
+      assert.strictEqual(validBootstrap.status, 200);
+      const validData = await validBootstrap.json() as any;
+      assert.strictEqual(validData.success, true);
+      assert.strictEqual(await pinMgr.isPinSet(), true);
+
+      // 9. Successful bootstrap does NOT grant management session automatically
+      assert.strictEqual(validData.sessionToken, undefined, 'Must not issue session token on bootstrap');
+
+      // Verify on GuiServer: management remains locked!
+      const lockedCheck = await fetch(`http://127.0.0.1:${gPort}/api/status`);
+      const lockedData = await lockedCheck.json() as any;
+      assert.strictEqual(lockedData.managementUnlocked, false);
+      assert.strictEqual(lockedData.pinConfigured, true);
+      assert.strictEqual(lockedData.parentPinSetupRequired, false);
+
+      // 4. Existing PIN => subsequent bootstrap rejected
+      const existingPinBootstrap = await fetch(`http://127.0.0.1:${bPort}/api/bootstrap-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parentPin: '112233', confirmPin: '112233' }),
+      });
+      assert.strictEqual(existingPinBootstrap.status, 400);
+      const existingData = await existingPinBootstrap.json() as any;
+      assert.match(existingData.error, /already configured/i);
+
+      // 10. Normal PIN verification is still required afterward to unlock 5-minute session
+      const verifyRes = await fetch(`http://127.0.0.1:${gPort}/api/verify-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: '829103' }),
+      });
+      assert.strictEqual(verifyRes.status, 200);
+      const verifyData = await verifyRes.json() as any;
+      assert.strictEqual(verifyData.success, true);
+      assert.ok(verifyData.sessionToken);
+
+      // Session validates and unlocks management
+      assert.strictEqual(pinMgr.validateSession(verifyData.sessionToken), true);
+      const unlockedCheck = await fetch(`http://127.0.0.1:${gPort}/api/status`, {
+        headers: { 'x-management-session': verifyData.sessionToken },
+      });
+      const unlockedData = await unlockedCheck.json() as any;
+      assert.strictEqual(unlockedData.managementUnlocked, true);
+    } finally {
+      configMgr.setMockIsAdministratorForTesting(true);
+      guiServer.stop();
+      await bootstrapServer.stop();
     }
   });
 });
