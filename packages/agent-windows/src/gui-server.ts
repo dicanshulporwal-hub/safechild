@@ -479,16 +479,20 @@ export class GuiServer {
                 const args = isNode
                   ? `"${process.argv[1]}" --attach-device${extraArgs}`
                   : `--attach-device${extraArgs}`;
-                const psCmd = `Start-Process -FilePath "${exePath}" -ArgumentList '${args}' -Verb RunAs`;
-                await execFileAsync(psPath, [
-                  '-NoLogo',
-                  '-NoProfile',
-                  '-NonInteractive',
-                  '-ExecutionPolicy',
-                  'Bypass',
-                  '-Command',
-                  psCmd,
-                ]);
+                const psCmd = `Start-Process -FilePath "${exePath}" -ArgumentList '${args}' -Verb RunAs -WindowStyle Hidden`;
+                await execFileAsync(
+                  psPath,
+                  [
+                    '-NoLogo',
+                    '-NoProfile',
+                    '-NonInteractive',
+                    '-ExecutionPolicy',
+                    'Bypass',
+                    '-Command',
+                    psCmd,
+                  ],
+                  { windowsHide: true }
+                );
               }
 
               res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -526,7 +530,7 @@ export class GuiServer {
               const args = isNode
                 ? `"${process.argv[1]}" --configure-accounts`
                 : `--configure-accounts`;
-              const psCmd = `Start-Process -FilePath "${exePath}" -ArgumentList '${args}' -Verb RunAs`;
+              const psCmd = `Start-Process -FilePath "${exePath}" -ArgumentList '${args}' -Verb RunAs -WindowStyle Hidden`;
               await execFileAsync(psPath, [
                 '-NoLogo',
                 '-NoProfile',
@@ -580,7 +584,7 @@ export class GuiServer {
               const args = isNode
                 ? `"${process.argv[1]}" --setup-pin`
                 : `--setup-pin`;
-              const psCmd = `Start-Process -FilePath "${exePath}" -ArgumentList '${args}' -Verb RunAs`;
+              const psCmd = `Start-Process -FilePath "${exePath}" -ArgumentList '${args}' -Verb RunAs -WindowStyle Hidden`;
               await execFileAsync(psPath, [
                 '-NoLogo',
                 '-NoProfile',
@@ -795,18 +799,34 @@ export class GuiServer {
     const url = `http://127.0.0.1:${this.port}`;
 
     if (process.platform === 'win32') {
-      try {
-        // Attempt to launch Microsoft Edge in standalone desktop application mode
-        const cmd = `start msedge.exe --app="${url}" --window-size=880,720 --user-data-dir="%LOCALAPPDATA%\\SafeBrowse\\gui-edge-profile"`;
-        await execAsync(cmd);
-        return;
-      } catch (e) {
-        // Fallback to standard Windows shell execution
+      const edgeCandidates = [
+        path.join(process.env['ProgramFiles(x86)'] || '', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        path.join(process.env.ProgramFiles || '', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      ].filter(Boolean);
+      const edgePath = edgeCandidates.find((candidate) => fs.existsSync(candidate));
+      const localAppData = process.env.LOCALAPPDATA || os.tmpdir();
+      const userDataDir = path.join(localAppData, 'SafeBrowse', 'gui-edge-profile');
+
+      if (edgePath) {
         try {
-          await execAsync(`start "" "${url}"`);
+          await execFileAsync(
+            edgePath,
+            [`--app=${url}`, '--start-maximized', `--user-data-dir=${userDataDir}`],
+            { windowsHide: true }
+          );
           return;
         } catch {}
       }
+
+      // Fallback without a visible cmd.exe window.
+      try {
+        await execFileAsync(
+          'rundll32.exe',
+          ['url.dll,FileProtocolHandler', url],
+          { windowsHide: true }
+        );
+        return;
+      } catch {}
     } else {
       try {
         await execAsync(`xdg-open "${url}" || open "${url}"`);
@@ -849,14 +869,14 @@ export class GuiServer {
       background: radial-gradient(circle at 50% 10%, #1e1b4b 0%, var(--bg) 100%);
       color: var(--text);
       margin: 0;
-      padding: 32px 20px;
+      padding: 24px;
       min-height: 100vh;
       display: flex;
       justify-content: center;
-      align-items: center;
+      align-items: flex-start;
     }
     .container {
-      max-width: 720px;
+      max-width: 1080px;
       width: 100%;
       background: var(--card-bg);
       border: 1px solid rgba(255, 255, 255, 0.08);
@@ -886,6 +906,26 @@ export class GuiServer {
     .subtitle { color: var(--text-muted); font-size: 14px; margin-top: 4px; }
     .screen { display: none; }
     .screen.active { display: block; animation: fadeIn 0.25s ease-out; }
+    .startup-loader {
+      min-height: 420px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      gap: 16px;
+    }
+    .spinner {
+      width: 44px;
+      height: 44px;
+      border: 4px solid rgba(148, 163, 184, 0.22);
+      border-top-color: #60a5fa;
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    .loading-title { font-size: 18px; font-weight: 800; }
+    .loading-copy { color: var(--text-muted); font-size: 14px; max-width: 520px; line-height: 1.5; }
+    @keyframes spin { to { transform: rotate(360deg); } }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
 
     /* Button styles */
@@ -1007,8 +1047,17 @@ export class GuiServer {
 
     <div id="alertBox" class="alert"></div>
 
-    <!-- SCREEN 1: WELCOME -->
-    <div id="screenWelcome" class="screen active">
+    <!-- INITIAL AUTHORITATIVE STATE CHECK -->
+    <div id="screenLoading" class="screen active">
+      <div class="startup-loader">
+        <div class="spinner" aria-hidden="true"></div>
+        <div class="loading-title">Checking SafeBrowse protection...</div>
+        <div class="loading-copy">Please wait while SafeBrowse verifies this computer's connection, account mappings and protection status.</div>
+      </div>
+    </div>
+
+    <!-- SCREEN 1: WELCOME (shown only after an authoritative unpaired result) -->
+    <div id="screenWelcome" class="screen">
       <h2 style="font-size: 22px; font-weight: 800; margin: 0 0 12px 0;">Protect children using this Windows computer</h2>
       <p style="color: var(--text-muted); font-size: 15px; line-height: 1.6; margin-bottom: 28px;">
         SafeBrowse protects children on shared laptops without affecting parents or unmanaged accounts.
@@ -1722,29 +1771,40 @@ export class GuiServer {
       }
     }
 
-    // Auto-load initial state. Retry briefly before showing onboarding so a paired
-    // device never flashes or sticks on "Connect This Computer" during service startup.
+    // Resolve authoritative device state before exposing any pairing action.
+    // A paired laptop must never flash the "Connect This Computer" screen while status loads.
     window.addEventListener('DOMContentLoaded', async () => {
-      for (let attempt = 0; attempt < 4; attempt++) {
+      showScreen('screenLoading');
+      let authoritativeUnpairedResponses = 0;
+
+      for (let attempt = 0; attempt < 8; attempt++) {
         try {
           const res = await fetch('/api/status', { cache: 'no-store' });
           if (res.ok) {
             const data = await res.json();
             appState.isPaired = Boolean(data.isPaired);
             appState.pinConfigured = Boolean(data.pinConfigured);
+
             if (data.isPaired) {
               showScreen('screenStatus');
               return;
             }
-            if (attempt === 3) {
+
+            authoritativeUnpairedResponses += 1;
+            if (authoritativeUnpairedResponses >= 3) {
               showScreen('screenWelcome');
               return;
             }
           }
         } catch {}
-        await new Promise(resolve => setTimeout(resolve, 750));
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
-      showScreen('screenWelcome');
+
+      // Do not expose pairing after an indeterminate startup failure.
+      const loadingCopy = document.querySelector('#screenLoading .loading-copy');
+      if (loadingCopy) {
+        loadingCopy.textContent = 'SafeBrowse could not confirm this computer\'s status yet. Check the SafeBrowse service and try again.';
+      }
     });
 
     // Background watcher for elevated pairing completion
