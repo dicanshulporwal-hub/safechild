@@ -1318,7 +1318,7 @@ export class GuiServer {
         btn.disabled = true;
         btn.innerText = 'Requesting elevation...';
       }
-      showAlert('Administrator approval requested... Please approve the Windows UAC prompt to reconfigure accounts.', false);
+      showAlert('Windows administrator approval is required to change account mappings. Approve the UAC prompt; SafeBrowse will open a secure settings window and refresh this status automatically after Save.', false);
 
       try {
         const res = await fetch('/api/reconfigure', {
@@ -1345,7 +1345,7 @@ export class GuiServer {
       } finally {
         if (btn) {
           btn.disabled = false;
-          btn.innerText = 'Reconfigure Accounts';
+          btn.innerText = 'Change Computer Users';
         }
       }
     }
