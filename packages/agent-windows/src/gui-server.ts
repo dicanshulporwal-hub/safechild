@@ -1133,7 +1133,14 @@ export class GuiServer {
     </div>
 
     <!-- SCREEN 4: PROTECTION STATUS -->
-    <div id="screenStatus" class="screen">
+    <div id="screenStatus" class="screen" style="position:relative;">
+      <div id="statusLoading" style="display:none; margin-bottom:20px; padding:18px; border:1px solid rgba(59,130,246,0.35); border-radius:16px; background:rgba(59,130,246,0.10); align-items:center; gap:14px;">
+        <div class="spinner" style="width:30px; height:30px; flex:0 0 auto;" aria-hidden="true"></div>
+        <div>
+          <div style="font-weight:800; color:#dbeafe;">Refreshing protection status...</div>
+          <div style="font-size:12px; color:#94a3b8; margin-top:3px;">Please wait. SafeBrowse is checking the active account, mappings and protection service.</div>
+        </div>
+      </div>
       <h2 style="font-size: 22px; font-weight: 800; margin: 0 0 8px 0;">Protection Status</h2>
       <p style="color: var(--text-muted); font-size: 14px; margin-bottom: 24px;">
         Active protection telemetry and live console session state.
@@ -1631,6 +1638,15 @@ export class GuiServer {
     }
 
     async function loadStatusScreen(silent = false) {
+      const statusLoading = document.getElementById('statusLoading');
+      const statusScreen = document.getElementById('screenStatus');
+      if (!silent) {
+        if (statusLoading) statusLoading.style.display = 'flex';
+        if (statusScreen) {
+          statusScreen.querySelectorAll('button').forEach(btn => btn.disabled = true);
+        }
+      }
+
       try {
         const [statRes, accRes] = await Promise.all([
           fetch('/api/status', {
@@ -1715,6 +1731,13 @@ export class GuiServer {
         }
       } catch (e) {
         if (!silent) showAlert('Failed to refresh status: ' + e.message, true);
+      } finally {
+        if (!silent) {
+          if (statusLoading) statusLoading.style.display = 'none';
+          if (statusScreen) {
+            statusScreen.querySelectorAll('button').forEach(btn => btn.disabled = false);
+          }
+        }
       }
     }
 
