@@ -114,6 +114,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
     const backupPath = path.join(os.tmpdir(), 'sb-test-proxy-fail-' + Date.now() + '.json');
     const net = new WindowsNetworkManager(backupPath);
     net.setPlatformForTesting('win32');
+    net.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     const executedCommands: string[] = [];
     const mockExecutor = async (script: string) => {
@@ -205,6 +206,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
     const backupPath = path.join(os.tmpdir(), 'sb-test-tunnel-isolation-' + Date.now() + '.json');
     const net = new WindowsNetworkManager(backupPath);
     net.setPlatformForTesting('win32');
+    net.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     const executedCommands: string[] = [];
     const mockExecutor = async (script: string) => {
@@ -234,6 +236,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       // Only Interface 6 was targeted
       assert.ok(executedCommands.some((c) => c.includes('InterfaceIndex 6')));
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       await dnsServer.close();
@@ -248,6 +251,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
     const backupPath = path.join(os.tmpdir(), 'sb-test-success-' + Date.now() + '.json');
     const net = new WindowsNetworkManager(backupPath);
     net.setPlatformForTesting('win32');
+    net.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     const executedCommands: string[] = [];
     const mockExecutor = async (script: string) => {
@@ -277,6 +281,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       assert.ok(executedCommands.some((c) => c.includes('Get-DnsClientServerAddress') && c.includes('-ErrorAction Stop')));
       assert.ok(executedCommands.some((c) => c.includes('Clear-DnsClientCache')));
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       await dnsServer.close();
@@ -296,6 +301,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
     );
     const net = new WindowsNetworkManager(backupPath);
     net.setPlatformForTesting('win32');
+    net.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     const executedCommands: string[] = [];
     const mockExecutor = async (script: string) => {
@@ -324,6 +330,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
         )
       );
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       await dnsServer.close();
@@ -343,6 +350,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
     );
     const net = new WindowsNetworkManager(backupPath);
     net.setPlatformForTesting('win32');
+    net.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     const executedCommands: string[] = [];
     const mockExecutor = async (script: string) => {
@@ -371,6 +379,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       // Rollback triggered
       assert.ok(executedCommands.some((c) => c.includes('Set-DnsClientServerAddress') && c.includes('192.168.1.1')));
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       await dnsServer.close();
@@ -401,6 +410,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       assert.match(result.message, /No active IPv4 internet-facing adapters with default gateway found/);
       assert.ok(!executedCommands.some((c) => c.includes('Set-DnsClientServerAddress')));
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       await dnsServer.close();
@@ -471,6 +481,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       assert.match(result.message, /rollback failed \(Rollback DNS assignment failed\)/);
       assert.match(result.details || '', /Rollback Error: Rollback DNS assignment failed/);
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       await dnsServer.close();
@@ -489,6 +500,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
     );
     const net = new WindowsNetworkManager(backupPath);
     net.setPlatformForTesting('win32');
+    net.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     const executedCommands: string[] = [];
     const mockExecutor = async (script: string) => {
@@ -509,6 +521,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
         )
       );
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       try {
@@ -526,6 +539,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
     );
     const net = new WindowsNetworkManager(backupPath);
     net.setPlatformForTesting('win32');
+    net.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     const executedCommands: string[] = [];
     const mockExecutor = async (script: string) => {
@@ -546,6 +560,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
         )
       );
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       try {
@@ -558,6 +573,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
     const nonExistentBackup = path.join(os.tmpdir(), 'sb-non-existent-' + Date.now() + '.json');
     const net = new WindowsNetworkManager(nonExistentBackup);
     net.setPlatformForTesting('win32');
+    net.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     const executedScripts: string[] = [];
     const mockExecutor = async (script: string) => {
@@ -574,6 +590,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       // Interface 11 (Tailscale) was not targeted
       assert.ok(!executedScripts.some((s) => s.includes("InterfaceIndex 11")));
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
     }
@@ -1124,6 +1141,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       assert.strictEqual(attemptCount, 2);
       assert.ok(attemptsRecorded.includes(2));
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       await dnsServer.close();
@@ -1168,6 +1186,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       assert.strictEqual(attemptCount, 4);
       assert.strictEqual(attemptsRecorded.length, 4);
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       await dnsServer.close();
@@ -1184,6 +1203,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
     );
     const net = new WindowsNetworkManager(backupPath);
     net.setPlatformForTesting('win32');
+    net.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     let attemptCount = 0;
     const mockExecutor = async (script: string) => {
@@ -1225,6 +1245,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       assert.strictEqual(attemptCount, 1);
       assert.strictEqual(attemptsRecorded.length, 1);
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       await dnsServer.close();
@@ -1286,6 +1307,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       assert.ok(statuses.includes('DEGRADED'));
       assert.ok(statuses.includes('ACTIVE'));
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       await dnsServer.close();
@@ -1305,6 +1327,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
     );
     const net = new WindowsNetworkManager(backupPath);
     net.setPlatformForTesting('win32');
+    net.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     const executedCommands: string[] = [];
     const mockExecutor = async (script: string) => {
@@ -1336,6 +1359,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       assert.match(result.message, /Read-back verification failed/);
       assert.ok(executedCommands.some((c) => c.includes('192.168.1.1')));
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       await dnsServer.close();
@@ -1355,6 +1379,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
     );
     const net = new WindowsNetworkManager(backupPath);
     net.setPlatformForTesting('win32');
+    net.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     const executedCommands: string[] = [];
     const mockExecutor = async (script: string) => {
@@ -1415,6 +1440,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       );
       assert.strictEqual(tsRollback.length, 0, 'Tailscale adapter must never be modified during rollback');
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       await dnsServer.close();
@@ -1623,6 +1649,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       const setDnsCalls = executedCommands.filter((c) => c.includes('Set-DnsClientServerAddress'));
       assert.strictEqual(setDnsCalls.length, 0, 'No Set-DnsClientServerAddress must be invoked when already enforced');
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       await dnsServer.close();
@@ -1672,6 +1699,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       const setDnsCalls = executedCommands.filter((c) => c.includes('Set-DnsClientServerAddress'));
       assert.strictEqual(setDnsCalls.length, 0, 'No Set-DnsClientServerAddress when DNS query fails');
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       await dnsServer.close();
@@ -1823,6 +1851,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
         'inspectCurrentEnforcement DNS script must use array-safe Count handling'
       );
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       await dnsServer.close();
@@ -1911,6 +1940,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       const setDnsCalls = executedCommands.filter((c) => c.includes('Set-DnsClientServerAddress'));
       assert.strictEqual(setDnsCalls.length, 0, 'No Set-DnsClientServerAddress calls on query failure');
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       await dnsServer.close();
@@ -2011,6 +2041,7 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
       const setDnsCalls = executedCommands.filter((c) => c.includes('Set-DnsClientServerAddress'));
       assert.strictEqual(setDnsCalls.length, 0, 'Zero DNS writes on stable protected network');
     } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
       net.setPlatformForTesting(null);
       net.setCommandExecutorForTesting(null);
       await dnsServer.close();
@@ -2240,6 +2271,50 @@ describe('SafeBrowse Windows NetworkManager & Fail-Safe Activation Tests', () =>
     } finally {
       net.stopReconciliationLoop();
       try { if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath); } catch {}
+    }
+  });
+
+  it('53. restoreOriginalDns fails closed when external DNS verification fails after DNS restoration', async () => {
+    const backupPath = path.join(os.tmpdir(), 'sb-test-restore-extfail-' + Date.now() + '.json');
+    fs.writeFileSync(
+      backupPath,
+      JSON.stringify([{ InterfaceIndex: 6, ServerAddresses: ['192.168.1.1'], InterfaceAlias: 'Wi-Fi' }]),
+      'utf8'
+    );
+    const net = new WindowsNetworkManager(backupPath);
+    net.setPlatformForTesting('win32');
+    net.setExternalDnsResolutionCheckerForTesting(async () => false);
+
+    const executedCommands: string[] = [];
+    const mockExecutor = async (script: string) => {
+      executedCommands.push(script);
+      return { stdout: '', stderr: '' };
+    };
+    net.setCommandExecutorForTesting(mockExecutor);
+
+    try {
+      await assert.rejects(
+        async () => {
+          await net.restoreOriginalDns();
+        },
+        /External DNS resolution verification failed: cannot resolve external domain after restoration/
+      );
+      assert.ok(
+        executedCommands.some(
+          (c) =>
+            c.includes('Set-DnsClientServerAddress') &&
+            c.includes('InterfaceIndex 6') &&
+            c.includes("'192.168.1.1'")
+        ),
+        'Must attempt DNS restoration before external resolution verification'
+      );
+    } finally {
+      net.setExternalDnsResolutionCheckerForTesting(null);
+      net.setCommandExecutorForTesting(null);
+      net.setPlatformForTesting(null);
+      try {
+        if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
+      } catch {}
     }
   });
 });

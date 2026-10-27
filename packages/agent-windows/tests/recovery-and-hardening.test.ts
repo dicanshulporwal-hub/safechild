@@ -748,6 +748,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const executedCommands: string[] = [];
     const nm = new WindowsNetworkManager(backupPath);
     nm.setPlatformForTesting('win32');
+    nm.setExternalDnsResolutionCheckerForTesting(async () => true);
     nm.setCommandExecutorForTesting(async (script) => {
       executedCommands.push(script);
       return { stdout: '', stderr: '' };
@@ -793,6 +794,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const executedCommands: string[] = [];
     const nm = new WindowsNetworkManager(backupPath);
     nm.setPlatformForTesting('win32');
+    nm.setExternalDnsResolutionCheckerForTesting(async () => true);
     nm.setCommandExecutorForTesting(async (script) => {
       executedCommands.push(script);
       return { stdout: '', stderr: '' };
@@ -831,6 +833,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
 
     const nm = new WindowsNetworkManager(missingBackupPath);
     nm.setPlatformForTesting('win32');
+    nm.setExternalDnsResolutionCheckerForTesting(async () => true);
     nm.setCommandExecutorForTesting(async (script) => {
       executedCommands.push(script);
       return { stdout: '', stderr: '' };
@@ -1463,6 +1466,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const backupFile = path.join(tmpDir, 'backup-test-38.json');
     const nm = new WindowsNetworkManager(backupFile);
     nm.setPlatformForTesting('win32');
+    nm.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     const executedCommands: string[] = [];
     nm.setCommandExecutorForTesting(async (script) => {
@@ -1513,6 +1517,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
 
     const nm = new WindowsNetworkManager(backupFile);
     nm.setPlatformForTesting('win32');
+    nm.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     const executedCommands: string[] = [];
     nm.setCommandExecutorForTesting(async (script) => {
@@ -1617,6 +1622,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
 
       // Verify Win32 restore produces exact static restore command
       nm.setPlatformForTesting('win32');
+      nm.setExternalDnsResolutionCheckerForTesting(async () => true);
       const executedCommands: string[] = [];
       nm.setCommandExecutorForTesting(async (script) => {
         executedCommands.push(script);
@@ -2081,6 +2087,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const backupFile = path.join(tmpDir, 'backup-test-53.json');
     const nm = new WindowsNetworkManager(backupFile);
     nm.setPlatformForTesting('win32');
+    nm.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     const executedCommands: string[] = [];
     nm.setCommandExecutorForTesting(async (script) => {
@@ -3394,6 +3401,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
 
     const nm = new WindowsNetworkManager(backupFile);
     nm.setPlatformForTesting('win32');
+    nm.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     let executedReset = false;
     let executedStaticSet = false;
@@ -3434,6 +3442,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
 
     const nm = new WindowsNetworkManager(backupFile);
     nm.setPlatformForTesting('win32');
+    nm.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     const executedCommands: string[] = [];
     nm.setCommandExecutorForTesting(async (script: string) => {
