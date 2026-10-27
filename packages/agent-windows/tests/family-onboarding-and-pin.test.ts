@@ -9,6 +9,7 @@ import { ConfigManager, DeviceConfig } from '../src/config-manager';
 import { WindowsAccountManager, WindowsProfileMapping } from '../src/account-manager';
 import { ParentPinManager } from '../src/parent-pin-manager';
 import { GuiServer } from '../src/gui-server';
+import { ElevatedConfigServer } from '../src/elevated-config-server';
 import { ElevatedPairServer } from '../src/elevated-pair-server';
 import { networkManager } from '../src/network-manager';
 
@@ -1163,4 +1164,42 @@ describe('SafeBrowse Stage C.5 — Family-Level Onboarding, Cloud Truth & Parent
       await bootstrapServer.stop();
     }
   });
+
+  it('17. C.5.5 UX regression: paired-state loader, maximized windows and hidden console launch', async () => {
+    const guiServer = new GuiServer(configMgr, accountMgr, networkManager, pinMgr);
+    const elevatedServer = new ElevatedConfigServer(configMgr, accountMgr);
+
+    const guiHtml = (guiServer as any).renderHtml() as string;
+    const elevatedHtml = (elevatedServer as any).renderHtml() as string;
+
+    // Main GUI must start in a blocking loader, never on Connect This Computer.
+    assert.ok(
+      guiHtml.includes('id="screenLoading" class="screen active"'),
+      'Main GUI must initially render the authoritative protection-state loader'
+    );
+    assert.strictEqual(
+      guiHtml.includes('id="screenWelcome" class="screen active"'),
+      false,
+      'Connect This Computer must never be the initial active screen'
+    );
+    assert.match(guiHtml, /Please wait while SafeBrowse verifies this computer/i);
+
+    // Elevated account synchronization must block interaction and explain progress.
+    assert.match(elevatedHtml, /Synchronizing SafeBrowse/i);
+    assert.match(elevatedHtml, /No changes can be made until this finishes/i);
+    assert.ok(elevatedHtml.includes('id="content" style="display:none;"'));
+
+    // Source-level Windows launch contract: maximized app windows, no fixed tiny size,
+    // and no visible elevated console window.
+    const guiSource = fs.readFileSync(path.resolve(__dirname, '../src/gui-server.ts'), 'utf8');
+    const elevatedSource = fs.readFileSync(path.resolve(__dirname, '../src/elevated-config-server.ts'), 'utf8');
+
+    assert.ok(guiSource.includes("'--start-maximized'"), 'Main GUI must request maximized Edge app mode');
+    assert.ok(elevatedSource.includes("'--start-maximized'"), 'Elevated GUI must request maximized Edge app mode');
+    assert.strictEqual(guiSource.includes('--window-size='), false, 'Main GUI must not force an 880x720 window');
+    assert.strictEqual(elevatedSource.includes('--window-size='), false, 'Elevated GUI must not force an 820x700 window');
+    assert.ok(guiSource.includes('-WindowStyle Hidden'), 'Elevated SEA launch must hide its console window');
+    assert.ok(guiSource.includes('{ windowsHide: true }'), 'PowerShell/browser launch helpers must suppress console windows');
+  });
+
 });
