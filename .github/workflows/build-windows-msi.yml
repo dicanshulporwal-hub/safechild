@@ -12,6 +12,7 @@ on:
   push:
     branches:
       - feature/stage11-step4-device-enforcement
+      - fix/c5.5-windows-ux-loading
 
 jobs:
   build-windows-msi:
