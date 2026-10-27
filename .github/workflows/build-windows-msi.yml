@@ -12,6 +12,7 @@ on:
   push:
     branches:
       - feature/stage11-step4-device-enforcement
+      - fix/c5.5-physical-validation-ux
 
 jobs:
   build-windows-msi:
