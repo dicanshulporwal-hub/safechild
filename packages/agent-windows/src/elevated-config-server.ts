@@ -15,6 +15,7 @@ import {
 import { logServiceMessage } from './network-manager';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export class ElevatedConfigServer {
   private server: http.Server | null = null;
@@ -254,16 +255,33 @@ export class ElevatedConfigServer {
   public async launchWindow(): Promise<void> {
     const url = `http://127.0.0.1:${this.port}`;
     if (process.platform === 'win32') {
-      try {
-        const cmd = `start msedge.exe --app="${url}" --window-size=820,700 --user-data-dir="%LOCALAPPDATA%\\SafeBrowse\\elevated-edge-profile"`;
-        await execAsync(cmd);
-        return;
-      } catch (e) {
+      const edgeCandidates = [
+        path.join(process.env['ProgramFiles(x86)'] || '', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        path.join(process.env.ProgramFiles || '', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      ].filter(Boolean);
+      const edgePath = edgeCandidates.find((candidate) => fs.existsSync(candidate));
+      const localAppData = process.env.LOCALAPPDATA || process.env.TEMP || 'C:\\Windows\\Temp';
+      const userDataDir = path.join(localAppData, 'SafeBrowse', 'elevated-edge-profile');
+
+      if (edgePath) {
         try {
-          await execAsync(`start "" "${url}"`);
+          await execFileAsync(
+            edgePath,
+            [`--app=${url}`, '--start-maximized', `--user-data-dir=${userDataDir}`],
+            { windowsHide: true }
+          );
           return;
         } catch {}
       }
+
+      try {
+        await execFileAsync(
+          'rundll32.exe',
+          ['url.dll,FileProtocolHandler', url],
+          { windowsHide: true }
+        );
+        return;
+      } catch {}
     } else {
       try {
         await execAsync(`xdg-open "${url}" || open "${url}"`);
@@ -309,14 +327,14 @@ export class ElevatedConfigServer {
       background: radial-gradient(circle at 50% 10%, #1e1b4b 0%, var(--bg) 100%);
       color: var(--text);
       margin: 0;
-      padding: 24px 20px;
+      padding: 24px;
       min-height: 100vh;
       display: flex;
       justify-content: center;
-      align-items: center;
+      align-items: flex-start;
     }
     .container {
-      max-width: 760px;
+      max-width: 1180px;
       width: 100%;
       background: var(--card-bg);
       border: 1px solid rgba(255, 255, 255, 0.1);
@@ -427,6 +445,27 @@ export class ElevatedConfigServer {
 
     .tag-protected { color: var(--success); font-weight: 800; font-size: 13px; }
     .tag-bypass { color: var(--warning); font-weight: 800; font-size: 13px; }
+    .busy-panel {
+      min-height: 360px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      gap: 14px;
+      color: var(--text-muted);
+    }
+    .spinner {
+      width: 46px;
+      height: 46px;
+      border: 4px solid rgba(148, 163, 184, 0.22);
+      border-top-color: #60a5fa;
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    .busy-title { color: var(--text); font-size: 18px; font-weight: 800; }
+    .busy-copy { max-width: 560px; font-size: 13px; line-height: 1.5; }
+    @keyframes spin { to { transform: rotate(360deg); } }
 
     .button-row {
       display: flex;
@@ -490,8 +529,10 @@ export class ElevatedConfigServer {
 
     <div id="syncStatus" class="sync-status" style="display:none;"></div>
 
-    <div id="loading" style="text-align:center; padding: 40px; color: var(--text-muted); font-size: 14px;">
-      Loading accounts and synchronizing family profiles...
+    <div id="loading" class="busy-panel" role="status" aria-live="polite">
+      <div class="spinner" aria-hidden="true"></div>
+      <div class="busy-title">Synchronizing SafeBrowse...</div>
+      <div class="busy-copy">Please wait while SafeBrowse loads Windows accounts, verifies saved mappings and synchronizes child profiles from the Family Cloud. No changes can be made until this finishes.</div>
     </div>
 
     <div id="content" style="display:none;">
@@ -519,7 +560,7 @@ export class ElevatedConfigServer {
       </table>
 
       <div class="button-row">
-        <button class="btn btn-secondary" onclick="handleCancel()">Cancel</button>
+        <button class="btn btn-secondary" id="btnCancel" onclick="handleCancel()">Cancel</button>
         <button class="btn btn-primary" id="btnSave" onclick="handleSave()">Save Settings & Protect Laptop</button>
       </div>
     </div>
@@ -552,6 +593,7 @@ export class ElevatedConfigServer {
         configData = await res.json();
         document.getElementById('loading').style.display = 'none';
         document.getElementById('content').style.display = 'block';
+        document.getElementById('content').setAttribute('aria-busy', 'false');
 
         // Render sync status
         const syncEl = document.getElementById('syncStatus');
@@ -649,8 +691,12 @@ export class ElevatedConfigServer {
 
     async function handleSave() {
       const btn = document.getElementById('btnSave');
+      const cancelBtn = document.getElementById('btnCancel');
       btn.disabled = true;
+      if (cancelBtn) cancelBtn.disabled = true;
+      document.querySelectorAll('select').forEach(el => el.disabled = true);
       btn.innerText = 'Saving & applying protection...';
+      showAlert('Applying account mappings and synchronizing protection. Please wait...', 'info');
 
       const mappings = [];
       configData.accounts.forEach((acc, idx) => {
@@ -692,11 +738,15 @@ export class ElevatedConfigServer {
         } else {
           showAlert(data.error || 'Failed to save settings.');
           btn.disabled = false;
+          if (cancelBtn) cancelBtn.disabled = false;
+          document.querySelectorAll('select').forEach(el => el.disabled = false);
           btn.innerText = 'Save Settings & Protect Laptop';
         }
       } catch (e) {
         showAlert('Network error: ' + e.message);
         btn.disabled = false;
+        if (cancelBtn) cancelBtn.disabled = false;
+        document.querySelectorAll('select').forEach(el => el.disabled = false);
         btn.innerText = 'Save Settings & Protect Laptop';
       }
     }
