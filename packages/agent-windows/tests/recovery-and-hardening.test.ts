@@ -2308,6 +2308,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
 
     const nm = new WindowsNetworkManager(backupFile);
     nm.setPlatformForTesting('win32');
+    nm.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     // Simulate CIM shutdown error on shutdown restore
     nm.setCommandExecutorForTesting(async (script) => {
@@ -2378,6 +2379,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
 
     const nm = new WindowsNetworkManager(backupFile);
     nm.setPlatformForTesting('win32');
+    nm.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     let resetExecuted = false;
     const mockExecutor = async (script: string) => {
@@ -2559,6 +2561,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     const backupFile = path.join(tmpDir, 'backup-test-reboot-7.json');
     const nm = new WindowsNetworkManager(backupFile);
     nm.setPlatformForTesting('win32');
+    nm.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     const executedScripts: string[] = [];
     nm.setCommandExecutorForTesting(async (script: string) => {
@@ -3031,6 +3034,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
 
     const nm = new WindowsNetworkManager(backupFile);
     nm.setPlatformForTesting('win32');
+    nm.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     let resetExecuted = false;
 
@@ -4110,6 +4114,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     );
     const nm = new WindowsNetworkManager(backupFile);
     nm.setPlatformForTesting('win32');
+    nm.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     let resetExecuted = false;
     const executedScripts: string[] = [];
@@ -4157,6 +4162,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     );
     const nm = new WindowsNetworkManager(backupFile);
     nm.setPlatformForTesting('win32');
+    nm.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     let resetExecuted = false;
     const executedScripts: string[] = [];
@@ -4208,6 +4214,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     );
     const nm = new WindowsNetworkManager(backupFile);
     nm.setPlatformForTesting('win32');
+    nm.setExternalDnsResolutionCheckerForTesting(async () => true);
 
     let staticRestored = false;
     const executedScripts: string[] = [];
@@ -4268,6 +4275,7 @@ describe('SafeBrowse Windows — Recovery and Hardening Suite', () => {
     for (let cycle = 1; cycle <= 3; cycle++) {
       const nm = new WindowsNetworkManager(backupFile);
       nm.setPlatformForTesting('win32');
+      nm.setExternalDnsResolutionCheckerForTesting(async () => true);
 
       let resetExecuted = false;
       const executedScripts: string[] = [];
