@@ -24,7 +24,11 @@ export class ParentPinManager {
   private configMgr: ConfigManager;
   private customPinFilePath: string | null = null;
   private activeSession: ManagementSession | null = null;
+  private failedAttempts = 0;
+  private lockedUntil = 0;
   public static readonly SESSION_TTL_MS = 5 * 60 * 1000; // 5 minutes
+  public static readonly MAX_FAILED_ATTEMPTS = 3;
+  public static readonly LOCKOUT_MS = 60 * 1000; // 60-second local retry lockout
 
   constructor(customConfigMgr?: ConfigManager, customPinFilePath?: string) {
     this.configMgr = customConfigMgr || configManager;
@@ -112,7 +116,29 @@ export class ParentPinManager {
     pin: string,
     boundSid?: string,
     boundUsername?: string
-  ): Promise<{ success: boolean; sessionToken?: string; error?: string }> {
+  ): Promise<{
+    success: boolean;
+    sessionToken?: string;
+    error?: string;
+    attemptsRemaining?: number;
+    retryAfterMs?: number;
+    locked?: boolean;
+  }> {
+    const now = Date.now();
+    if (this.lockedUntil > now) {
+      return {
+        success: false,
+        error: 'Too many incorrect PIN attempts. Try again shortly.',
+        attemptsRemaining: 0,
+        retryAfterMs: this.lockedUntil - now,
+        locked: true,
+      };
+    }
+    if (this.lockedUntil && this.lockedUntil <= now) {
+      this.failedAttempts = 0;
+      this.lockedUntil = 0;
+    }
+
     const cleanPin = String(pin || '').trim();
     if (!/^\d{6,8}$/.test(cleanPin)) {
       return { success: false, error: 'Invalid PIN format. PIN must be 6-8 digits.' };
@@ -148,13 +174,34 @@ export class ParentPinManager {
       expectedBuf.length !== candidateBuf.length ||
       !crypto.timingSafeEqual(expectedBuf, candidateBuf)
     ) {
-      logServiceMessage('WARN', '[ParentPinManager] Parent PIN verification failed (incorrect PIN entered).');
-      return { success: false, error: 'Incorrect SafeBrowse Parent PIN.' };
+      this.failedAttempts += 1;
+      const attemptsRemaining = Math.max(0, ParentPinManager.MAX_FAILED_ATTEMPTS - this.failedAttempts);
+      if (attemptsRemaining === 0) {
+        this.lockedUntil = Date.now() + ParentPinManager.LOCKOUT_MS;
+        logServiceMessage('WARN', '[ParentPinManager] Parent PIN locked temporarily after 3 incorrect attempts.');
+        return {
+          success: false,
+          error: 'Incorrect SafeBrowse Parent PIN. Too many attempts; PIN entry is temporarily locked.',
+          attemptsRemaining: 0,
+          retryAfterMs: ParentPinManager.LOCKOUT_MS,
+          locked: true,
+        };
+      }
+      logServiceMessage('WARN', `[ParentPinManager] Parent PIN verification failed. ${attemptsRemaining} attempt(s) remaining.`);
+      return {
+        success: false,
+        error: `Incorrect SafeBrowse Parent PIN. ${attemptsRemaining} attempt${attemptsRemaining === 1 ? '' : 's'} remaining.`,
+        attemptsRemaining,
+        locked: false,
+      };
     }
+
+    // Successful verification clears the local failure counter.
+    this.failedAttempts = 0;
+    this.lockedUntil = 0;
 
     // Generate short-lived management session
     const token = `mgmt_${crypto.randomBytes(24).toString('hex')}`;
-    const now = Date.now();
     this.activeSession = {
       token,
       createdAt: now,
@@ -211,6 +258,8 @@ export class ParentPinManager {
    */
   public async clearPin(): Promise<void> {
     this.invalidateSession();
+    this.failedAttempts = 0;
+    this.lockedUntil = 0;
     try {
       const pinPath = this.getPinFilePath();
       if (fs.existsSync(pinPath)) {

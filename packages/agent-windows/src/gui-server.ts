@@ -114,8 +114,14 @@ export class GuiServer {
                 activeConsole?.username || undefined
               );
               if (!result.success) {
-                res.writeHead(401, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: result.error || 'Invalid Parent PIN.' }));
+                const statusCode = result.locked ? 429 : 401;
+                res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                  error: result.error || 'Invalid Parent PIN.',
+                  attemptsRemaining: result.attemptsRemaining,
+                  retryAfterMs: result.retryAfterMs,
+                  locked: Boolean(result.locked),
+                }));
                 return;
               }
               res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1154,11 +1160,12 @@ export class GuiServer {
         <div style="font-size: 32px; margin-bottom: 12px;">🔒</div>
         <h3 style="margin: 0 0 8px 0; font-size: 18px; font-weight: 800; color: #fff;">Parent Lock</h3>
         <p style="font-size: 13px; color: #94a3b8; margin-bottom: 20px;">Enter your SafeBrowse Parent PIN to unlock settings.</p>
-        <div style="margin-bottom: 20px;">
+        <div style="margin-bottom: 10px;">
           <input type="password" id="modalPinInput" maxlength="8" inputmode="numeric" placeholder="••••••" style="width: 100%; padding: 12px 16px; background: #0f172a; border: 1px solid #374151; border-radius: 12px; font-size: 20px; text-align: center; color: #fff; letter-spacing: 4px; outline: none;" onkeydown="if(event.key==='Enter') submitPinModal()">
         </div>
+        <div id="pinErrorText" style="display:none; color:#fca5a5; font-size:12px; font-weight:700; line-height:1.4; margin:0 0 14px 0;"></div>
         <div style="display: flex; gap: 10px;">
-          <button class="btn btn-primary" style="flex: 1;" onclick="submitPinModal()">Unlock</button>
+          <button class="btn btn-primary" id="btnPinUnlock" style="flex: 1;" onclick="submitPinModal()">Unlock</button>
           <button class="btn btn-secondary" style="flex: 1;" onclick="closePinModal()">Cancel</button>
         </div>
       </div>
@@ -1190,6 +1197,16 @@ export class GuiServer {
         const input = document.getElementById('modalPinInput');
         if (!modal || !input) return resolve(false);
         input.value = '';
+        const pinError = document.getElementById('pinErrorText');
+        if (pinError) {
+          pinError.style.display = 'none';
+          pinError.innerText = '';
+        }
+        const unlockBtn = document.getElementById('btnPinUnlock');
+        if (unlockBtn) {
+          unlockBtn.disabled = false;
+          unlockBtn.innerText = 'Unlock';
+        }
         modal.style.display = 'flex';
         input.focus();
         window._pinResolver = resolve;
@@ -1215,10 +1232,44 @@ export class GuiServer {
           if (window._pinResolver) window._pinResolver(true);
           loadStatusScreen(true);
         } else {
-          showAlert(data.error || 'Incorrect SafeBrowse Parent PIN.', true);
+          const pinError = document.getElementById('pinErrorText');
+          const message = data.error || 'Incorrect SafeBrowse Parent PIN.';
+          if (pinError) {
+            pinError.innerText = message;
+            pinError.style.display = 'block';
+          }
+          input.value = '';
+          input.focus();
+
+          if (data.locked && data.retryAfterMs) {
+            const unlockBtn = document.getElementById('btnPinUnlock');
+            const retrySeconds = Math.max(1, Math.ceil(data.retryAfterMs / 1000));
+            if (unlockBtn) {
+              unlockBtn.disabled = true;
+              unlockBtn.innerText = 'Locked (' + retrySeconds + 's)';
+              let remaining = retrySeconds;
+              const timer = setInterval(() => {
+                remaining -= 1;
+                if (remaining <= 0) {
+                  clearInterval(timer);
+                  unlockBtn.disabled = false;
+                  unlockBtn.innerText = 'Unlock';
+                  if (pinError) {
+                    pinError.innerText = 'You can try the Parent PIN again.';
+                  }
+                } else {
+                  unlockBtn.innerText = 'Locked (' + remaining + 's)';
+                }
+              }, 1000);
+            }
+          }
         }
       } catch (err) {
-        showAlert('Error verifying PIN: ' + err.message, true);
+        const pinError = document.getElementById('pinErrorText');
+        if (pinError) {
+          pinError.innerText = 'Error verifying PIN: ' + err.message;
+          pinError.style.display = 'block';
+        }
       }
     }
 
@@ -1267,7 +1318,7 @@ export class GuiServer {
         btn.disabled = true;
         btn.innerText = 'Requesting elevation...';
       }
-      showAlert('Administrator approval requested... Please approve the Windows UAC prompt to reconfigure accounts.', false);
+      showAlert('Windows administrator approval is required to change account mappings. Approve the UAC prompt; SafeBrowse will open a secure settings window and refresh this status automatically after Save.', false);
 
       try {
         const res = await fetch('/api/reconfigure', {
@@ -1294,7 +1345,7 @@ export class GuiServer {
       } finally {
         if (btn) {
           btn.disabled = false;
-          btn.innerText = 'Reconfigure Accounts';
+          btn.innerText = 'Change Computer Users';
         }
       }
     }
@@ -1671,19 +1722,29 @@ export class GuiServer {
       }
     }
 
-    // Auto-load initial state
-    window.addEventListener('DOMContentLoaded', () => {
-      fetch('/api/status')
-        .then(r => r.json())
-        .then(data => {
-          if (data.isPaired) {
-            appState.isPaired = true;
-            showScreen('screenStatus');
-          } else {
-            showScreen('screenWelcome');
+    // Auto-load initial state. Retry briefly before showing onboarding so a paired
+    // device never flashes or sticks on "Connect This Computer" during service startup.
+    window.addEventListener('DOMContentLoaded', async () => {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+          const res = await fetch('/api/status', { cache: 'no-store' });
+          if (res.ok) {
+            const data = await res.json();
+            appState.isPaired = Boolean(data.isPaired);
+            appState.pinConfigured = Boolean(data.pinConfigured);
+            if (data.isPaired) {
+              showScreen('screenStatus');
+              return;
+            }
+            if (attempt === 3) {
+              showScreen('screenWelcome');
+              return;
+            }
           }
-        })
-        .catch(() => showScreen('screenWelcome'));
+        } catch {}
+        await new Promise(resolve => setTimeout(resolve, 750));
+      }
+      showScreen('screenWelcome');
     });
 
     // Background watcher for elevated pairing completion
