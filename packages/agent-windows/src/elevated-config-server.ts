@@ -175,7 +175,7 @@ export class ElevatedConfigServer {
               }
 
               res.writeHead(200, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ success: true }));
+              res.end(JSON.stringify({ success: true, count: mappings.length }));
 
               // Gracefully shut down after sending response
               setTimeout(() => {
@@ -495,16 +495,22 @@ export class ElevatedConfigServer {
     </div>
 
     <div id="content" style="display:none;">
-      <p style="color: var(--text-muted); font-size: 14px; margin-bottom: 16px;">
-        Assign each Windows account to a child profile, or designate it as Parent / Unmanaged. Protection applies instantly without requiring a computer restart.
+      <div class="alert alert-info" style="display:block; margin-bottom:16px;">
+        Windows requires administrator approval to change protected account mappings. This secure settings window will close automatically after Save, and the main SafeBrowse window will refresh.
+      </div>
+      <p style="color: var(--text-muted); font-size: 14px; margin-bottom: 8px;">
+        Assign each distinct Windows account to a child profile, or leave it as Parent / Unmanaged. Similar account names can represent different Windows identities.
+      </p>
+      <p style="color: #64748b; font-size: 12px; margin: 0 0 16px 0;">
+        A change is not applied until you click <strong style="color:#cbd5e1;">Save Settings & Protect Laptop</strong>.
       </p>
 
       <table>
         <thead>
           <tr style="color: var(--text-muted); font-size: 12px; font-weight: 700; text-transform: uppercase; text-align: left;">
             <th style="padding: 10px 16px;">Windows Account</th>
-            <th style="padding: 10px 16px;">Protect As (Child Profile)</th>
-            <th style="padding: 10px 16px;">Status</th>
+            <th style="padding: 10px 16px;">Assignment</th>
+            <th style="padding: 10px 16px;">Saved / Pending</th>
           </tr>
         </thead>
         <tbody id="accountsBody">
@@ -585,14 +591,15 @@ export class ElevatedConfigServer {
 
         const tr = document.createElement('tr');
 
-        let optionsHtml = '<option value="">Parent / Unmanaged (Protection OFF)</option>';
+        let optionsHtml = '<option value="">Parent / Unmanaged (No child filtering)</option>';
         (configData.familyProfiles || []).forEach(p => {
           const isSelected = selectedChildId === p.id ? 'selected' : '';
-          optionsHtml += '<option value="' + p.id + '" ' + isSelected + '>' + p.name + ' (Child Profile)</option>';
+          optionsHtml += '<option value="' + p.id + '" ' + isSelected + '>Child: ' + p.name + ' (Protected)</option>';
         });
 
         const isProtected = Boolean(selectedChildId);
         const isCurrent = Boolean(acc.isCurrentConsoleUser);
+        tr.dataset.savedChildId = selectedChildId || '';
 
         tr.innerHTML =
           '<td>' +
@@ -601,7 +608,8 @@ export class ElevatedConfigServer {
               (isCurrent ? ' <span class="badge-current">ACTIVE USER</span>' : '') +
             '</div>' +
             '<div class="desc-text">' +
-              (isCurrent ? 'Active Console Account' : 'Standard Windows Account') +
+              (isCurrent ? 'Active Console Account' : 'Windows Account') +
+              (acc.sid ? ' · SID …' + acc.sid.slice(-8) : '') +
             '</div>' +
           '</td>' +
           '<td>' +
@@ -611,7 +619,7 @@ export class ElevatedConfigServer {
           '</td>' +
           '<td>' +
             '<span id="tag_' + idx + '" class="' + (isProtected ? 'tag-protected' : 'tag-bypass') + '">' +
-              (isProtected ? '● PROTECTED' : '○ BYPASSED') +
+              (isProtected ? '● CHILD PROTECTED · SAVED' : '○ PARENT / UNMANAGED · SAVED') +
             '</span>' +
           '</td>';
 
@@ -622,9 +630,21 @@ export class ElevatedConfigServer {
     function updateTag(idx) {
       const sel = document.getElementById('sel_' + idx);
       const tag = document.getElementById('tag_' + idx);
-      const isProtected = Boolean(sel.value);
+      const row = sel ? sel.closest('tr') : null;
+      const savedChildId = row ? (row.dataset.savedChildId || '') : '';
+      const selectedChildId = sel ? (sel.value || '') : '';
+      const changed = savedChildId !== selectedChildId;
+      const isProtected = Boolean(selectedChildId);
       tag.className = isProtected ? 'tag-protected' : 'tag-bypass';
-      tag.innerText = isProtected ? '● PROTECTED' : '○ BYPASSED';
+
+      if (changed) {
+        const selectedText = sel.options[sel.selectedIndex]?.text || '';
+        tag.innerText = '● PENDING: ' + selectedText;
+        tag.style.color = '#93c5fd';
+      } else {
+        tag.style.color = '';
+        tag.innerText = isProtected ? '● CHILD PROTECTED · SAVED' : '○ PARENT / UNMANAGED · SAVED';
+      }
     }
 
     async function handleSave() {
@@ -657,10 +677,18 @@ export class ElevatedConfigServer {
         const data = await res.json().catch(() => ({}));
 
         if (res.ok && data.success) {
-          showAlert('Shared laptop settings saved successfully! Updating protection...', 'success');
+          const count = Number(data.count || mappings.length);
+          showAlert(count + ' account assignment' + (count === 1 ? '' : 's') + ' saved successfully. Returning to Protection Status...', 'success');
+          configData.mappings = mappings;
+          configData.accounts.forEach((_, idx) => {
+            const sel = document.getElementById('sel_' + idx);
+            const row = sel ? sel.closest('tr') : null;
+            if (row && sel) row.dataset.savedChildId = sel.value || '';
+            updateTag(idx);
+          });
           setTimeout(() => {
             window.close();
-          }, 1200);
+          }, 1600);
         } else {
           showAlert(data.error || 'Failed to save settings.');
           btn.disabled = false;
