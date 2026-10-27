@@ -574,6 +574,74 @@ describe('SafeBrowse Stage C.5 — Family-Level Onboarding, Cloud Truth & Parent
     }
   });
 
+  it('11b. Gate A2: Three wrong PINs show remaining attempts and temporarily lock verification', async () => {
+    await configMgr.saveDeviceConfig({
+      deviceId: 'dev-pin-lockout',
+      deviceToken: 'dtk_pin_lockout',
+      childId: null,
+      parentId: 'p1',
+      deviceName: 'Family Laptop',
+      backendUrl: 'https://safebrowse.porwal.online',
+      pairedAt: new Date().toISOString(),
+      onboardingState: 'PROTECTED',
+    });
+    await pinMgr.setPin('246810');
+
+    const server = new GuiServer(configMgr, accountMgr, networkManager, pinMgr);
+    const port = await server.start(0);
+
+    try {
+      for (const expectedRemaining of [2, 1]) {
+        const wrongRes = await fetch(`http://127.0.0.1:${port}/api/verify-pin`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pin: '999999' }),
+        });
+        assert.strictEqual(wrongRes.status, 401);
+        const wrongData = await wrongRes.json() as any;
+        assert.strictEqual(wrongData.attemptsRemaining, expectedRemaining);
+        assert.strictEqual(wrongData.locked, false);
+        assert.match(wrongData.error, new RegExp(String(expectedRemaining)));
+      }
+
+      const thirdWrong = await fetch(`http://127.0.0.1:${port}/api/verify-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: '999999' }),
+      });
+      assert.strictEqual(thirdWrong.status, 429);
+      const lockedData = await thirdWrong.json() as any;
+      assert.strictEqual(lockedData.attemptsRemaining, 0);
+      assert.strictEqual(lockedData.locked, true);
+      assert.ok(lockedData.retryAfterMs > 0);
+
+      const correctWhileLocked = await fetch(`http://127.0.0.1:${port}/api/verify-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: '246810' }),
+      });
+      assert.strictEqual(correctWhileLocked.status, 429);
+
+      const originalNow = Date.now;
+      try {
+        Date.now = () => originalNow() + ParentPinManager.LOCKOUT_MS + 1000;
+        const correctAfterLockout = await fetch(`http://127.0.0.1:${port}/api/verify-pin`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pin: '246810' }),
+        });
+        assert.strictEqual(correctAfterLockout.status, 200);
+        const successData = await correctAfterLockout.json() as any;
+        assert.strictEqual(successData.success, true);
+        assert.ok(successData.sessionToken);
+      } finally {
+        Date.now = originalNow;
+      }
+    } finally {
+      server.stop();
+    }
+  });
+
   it('12. Gate A2: Valid PIN but non-admin action requiring Windows elevation is rejected', async () => {
     await configMgr.saveDeviceConfig({
       deviceId: 'dev-elevation-test',
