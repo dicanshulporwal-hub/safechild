@@ -3,8 +3,7 @@ import url from 'url';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { exec, execFile } from 'child_process';
-import { promisify } from 'util';
+import { safeExecAsync, safeExecFileAsync } from './process-exec';
 import { configManager, DeviceConfig, ConfigManager } from './config-manager';
 import {
   accountManager,
@@ -19,8 +18,6 @@ import { networkManager, WindowsNetworkManager, logServiceMessage } from './netw
 import { parentPinManager, ParentPinManager } from './parent-pin-manager';
 import { normalizePairingCode, CURRENT_WINDOWS_PROTOCOL_VERSION } from '@safebrowse/shared';
 
-const execAsync = promisify(exec);
-const execFileAsync = promisify(execFile);
 
 export class GuiServer {
   private server: http.Server | null = null;
@@ -138,6 +135,8 @@ export class GuiServer {
         if (pathname === '/api/status' && req.method === 'GET') {
           try {
             const config = await this.configMgr.loadSanitizedConfig();
+            const isLocallyConfigured = this.configMgr.isConfigured() || Boolean(config);
+            const pairingStatus = this.configMgr.getPairingStatus();
             const mappings = await this.accountMgr.loadProfileMappings();
             const activeSession = await this.accountMgr.getActiveConsoleSession();
             const activePolicy = await this.accountMgr.resolveUserPolicy(activeSession.sid, activeSession.username);
@@ -159,7 +158,8 @@ export class GuiServer {
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(
                 JSON.stringify({
-                  isPaired: Boolean(config),
+                  isPaired: isLocallyConfigured,
+                  pairingStatus,
                   onboardingState: this.configMgr.getOnboardingState(),
                   onboardingReason: this.configMgr.getOnboardingReason(),
                   agentVersion: WINDOWS_AGENT_VERSION,
@@ -196,7 +196,8 @@ export class GuiServer {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(
               JSON.stringify({
-                isPaired: Boolean(config),
+                isPaired: isLocallyConfigured,
+                pairingStatus,
                 onboardingState: this.configMgr.getOnboardingState(),
                 onboardingReason: this.configMgr.getOnboardingReason(),
                 agentVersion: WINDOWS_AGENT_VERSION,
@@ -417,7 +418,7 @@ export class GuiServer {
               // Signal SafeBrowse service to start or reload if on Windows
               if (process.platform === 'win32') {
                 try {
-                  await execAsync('sc.exe start SafeBrowseChildService');
+                  await safeExecAsync('sc.exe start SafeBrowseChildService', { windowsHide: true });
                 } catch {}
               }
 
@@ -480,7 +481,7 @@ export class GuiServer {
                   ? `"${process.argv[1]}" --attach-device${extraArgs}`
                   : `--attach-device${extraArgs}`;
                 const psCmd = `Start-Process -FilePath "${exePath}" -ArgumentList '${args}' -Verb RunAs -WindowStyle Hidden`;
-                await execFileAsync(
+                await safeExecFileAsync(
                   psPath,
                   [
                     '-NoLogo',
@@ -531,15 +532,19 @@ export class GuiServer {
                 ? `"${process.argv[1]}" --configure-accounts`
                 : `--configure-accounts`;
               const psCmd = `Start-Process -FilePath "${exePath}" -ArgumentList '${args}' -Verb RunAs -WindowStyle Hidden`;
-              await execFileAsync(psPath, [
-                '-NoLogo',
-                '-NoProfile',
-                '-NonInteractive',
-                '-ExecutionPolicy',
-                'Bypass',
-                '-Command',
-                psCmd,
-              ]);
+              await safeExecFileAsync(
+                psPath,
+                [
+                  '-NoLogo',
+                  '-NoProfile',
+                  '-NonInteractive',
+                  '-ExecutionPolicy',
+                  'Bypass',
+                  '-Command',
+                  psCmd,
+                ],
+                { windowsHide: true }
+              );
             }
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -585,15 +590,19 @@ export class GuiServer {
                 ? `"${process.argv[1]}" --setup-pin`
                 : `--setup-pin`;
               const psCmd = `Start-Process -FilePath "${exePath}" -ArgumentList '${args}' -Verb RunAs -WindowStyle Hidden`;
-              await execFileAsync(psPath, [
-                '-NoLogo',
-                '-NoProfile',
-                '-NonInteractive',
-                '-ExecutionPolicy',
-                'Bypass',
-                '-Command',
-                psCmd,
-              ]);
+              await safeExecFileAsync(
+                psPath,
+                [
+                  '-NoLogo',
+                  '-NoProfile',
+                  '-NonInteractive',
+                  '-ExecutionPolicy',
+                  'Bypass',
+                  '-Command',
+                  psCmd,
+                ],
+                { windowsHide: true }
+              );
             }
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -662,10 +671,10 @@ export class GuiServer {
             const config = await this.configMgr.loadSanitizedConfig();
             const dashUrl = config?.backendUrl || 'https://safebrowse.porwal.online';
             if (process.platform === 'win32') {
-              await execAsync(`start "" "${dashUrl}"`);
+              await safeExecAsync(`start "" /max "${dashUrl}"`, { windowsHide: true });
             } else if (process.env.NODE_ENV !== 'test') {
               try {
-                await execAsync(`xdg-open "${dashUrl}" || open "${dashUrl}"`);
+                await safeExecAsync(`xdg-open "${dashUrl}" || open "${dashUrl}"`);
               } catch {}
             }
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -809,7 +818,7 @@ export class GuiServer {
 
       if (edgePath) {
         try {
-          await execFileAsync(
+          await safeExecFileAsync(
             edgePath,
             [`--app=${url}`, '--start-maximized', `--user-data-dir=${userDataDir}`],
             { windowsHide: true }
@@ -818,9 +827,22 @@ export class GuiServer {
         } catch {}
       }
 
+      try {
+        // Attempt to launch Microsoft Edge in standalone desktop application mode maximized
+        const cmd = `start msedge.exe --app="${url}" --start-maximized --user-data-dir="%LOCALAPPDATA%\\SafeBrowse\\gui-edge-profile"`;
+        await safeExecAsync(cmd, { windowsHide: true });
+        return;
+      } catch (e) {
+        // Fallback to standard Windows shell execution maximized
+        try {
+          await safeExecAsync(`start "" /max "${url}"`, { windowsHide: true });
+          return;
+        } catch {}
+      }
+
       // Fallback without a visible cmd.exe window.
       try {
-        await execFileAsync(
+        await safeExecFileAsync(
           'rundll32.exe',
           ['url.dll,FileProtocolHandler', url],
           { windowsHide: true }
@@ -829,7 +851,7 @@ export class GuiServer {
       } catch {}
     } else {
       try {
-        await execAsync(`xdg-open "${url}" || open "${url}"`);
+        await safeExecAsync(`xdg-open "${url}" || open "${url}"`);
       } catch {}
     }
   }
@@ -884,6 +906,17 @@ export class GuiServer {
       padding: 40px;
       box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
       backdrop-filter: blur(20px);
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .sync-spinner {
+      width: 20px;
+      height: 20px;
+      border: 2px solid rgba(255, 255, 255, 0.2);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      display: inline-block;
+      vertical-align: middle;
     }
     .brand {
       display: flex;
@@ -1146,6 +1179,15 @@ export class GuiServer {
         Active protection telemetry and live console session state.
       </p>
 
+      <div id="syncBanner" style="display:none; background: rgba(37, 99, 235, 0.15); border: 1px solid rgba(37, 99, 235, 0.35); border-radius: 16px; padding: 14px 18px; margin-bottom: 20px; text-align: left;">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div class="sync-spinner" style="width: 18px; height: 18px; border: 2px solid rgba(147, 197, 253, 0.3); border-top-color: #93c5fd; border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
+          <div style="font-size: 13px; font-weight: 700; color: #bfdbfe;" id="syncBannerText">
+            Connected — Syncing protection settings...
+          </div>
+        </div>
+      </div>
+
       <div id="multiSessionBanner" style="display:none; background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.4); border-radius: 16px; padding: 18px; margin-bottom: 24px; text-align: left;">
         <div style="display: flex; align-items: flex-start; gap: 12px;">
           <span style="font-size: 20px;">⚠️</span>
@@ -1355,7 +1397,9 @@ export class GuiServer {
       try {
         const res = await fetch('/api/status');
         const data = await res.json();
-        if (data.isPaired) {
+        if (data.isPaired || data.pairingStatus === 'CONNECTED' || data.pairingStatus === 'CONNECTED_LOCAL' || data.pairingStatus === 'SYNCING') {
+          appState.isPaired = true;
+          try { localStorage.setItem('sb_paired', '1'); } catch {}
           showScreen('screenStatus');
         } else {
           showScreen('screenPair');
@@ -1665,6 +1709,22 @@ export class GuiServer {
         document.getElementById('statUser').innerText = data.activeSession?.username || 'System Console';
         document.getElementById('statUserSid').innerText = data.activeSession?.isManaged ? 'Child account' : 'Parent / unmanaged account';
 
+        const syncBanner = document.getElementById('syncBanner');
+        if (syncBanner) {
+          if (data.pairingStatus === 'SYNCING' || data.pairingStatus === 'CONNECTED_LOCAL') {
+            syncBanner.style.display = 'block';
+            const bannerText = document.getElementById('syncBannerText');
+            if (bannerText) {
+              bannerText.innerText =
+                data.pairingStatus === 'SYNCING'
+                  ? 'Connected — Syncing protection settings with cloud...'
+                  : 'Connected (Local) — Verifying active protection...';
+            }
+          } else {
+            syncBanner.style.display = 'none';
+          }
+        }
+
         if (data.hasMultipleSessions) {
           document.getElementById('multiSessionBanner').style.display = 'block';
           if (data.sessionWarning) {
@@ -1784,6 +1844,7 @@ export class GuiServer {
         const data = await res.json().catch(() => ({}));
         if (res.ok && data.success) {
           managementSessionToken = null;
+          try { localStorage.removeItem('sb_paired'); } catch {}
           showAlert('Device disconnected successfully.');
           setTimeout(() => location.reload(), 1000);
         } else {
@@ -1798,6 +1859,11 @@ export class GuiServer {
     // A paired laptop must never flash the "Connect This Computer" screen while status loads.
     window.addEventListener('DOMContentLoaded', async () => {
       showScreen('screenLoading');
+
+      const wasPairedLocally = (function() {
+        try { return localStorage.getItem('sb_paired') === '1'; } catch { return false; }
+      })();
+
       let authoritativeUnpairedResponses = 0;
 
       for (let attempt = 0; attempt < 8; attempt++) {
@@ -1805,16 +1871,19 @@ export class GuiServer {
           const res = await fetch('/api/status', { cache: 'no-store' });
           if (res.ok) {
             const data = await res.json();
-            appState.isPaired = Boolean(data.isPaired);
+            const isPaired = Boolean(data.isPaired || data.pairingStatus === 'CONNECTED' || data.pairingStatus === 'CONNECTED_LOCAL' || data.pairingStatus === 'SYNCING');
+            appState.isPaired = isPaired;
             appState.pinConfigured = Boolean(data.pinConfigured);
 
-            if (data.isPaired) {
+            if (isPaired) {
+              try { localStorage.setItem('sb_paired', '1'); } catch {}
               showScreen('screenStatus');
               return;
             }
 
             authoritativeUnpairedResponses += 1;
-            if (authoritativeUnpairedResponses >= 3) {
+            if (authoritativeUnpairedResponses >= 3 && !wasPairedLocally) {
+              try { localStorage.removeItem('sb_paired'); } catch {}
               showScreen('screenWelcome');
               return;
             }
@@ -1823,10 +1892,18 @@ export class GuiServer {
         await new Promise(resolve => setTimeout(resolve, 500));
       }
 
+      if (wasPairedLocally) {
+        appState.isPaired = true;
+        showScreen('screenStatus');
+        return;
+      }
+
       // Do not expose pairing after an indeterminate startup failure.
       const loadingCopy = document.querySelector('#screenLoading .loading-copy');
       if (loadingCopy) {
         loadingCopy.textContent = 'SafeBrowse could not confirm this computer\'s status yet. Check the SafeBrowse service and try again.';
+      }
+    });
       }
     });
 
@@ -1836,8 +1913,9 @@ export class GuiServer {
         try {
           const res = await fetch('/api/status');
           const data = await res.json();
-          if (data && data.isPaired) {
+          if (data && (data.isPaired || data.pairingStatus === 'CONNECTED' || data.pairingStatus === 'CONNECTED_LOCAL' || data.pairingStatus === 'SYNCING')) {
             appState.isPaired = true;
+            try { localStorage.setItem('sb_paired', '1'); } catch {}
             showAlert('Device attached successfully! Welcome to SafeBrowse.');
             showScreen('screenStatus');
           }

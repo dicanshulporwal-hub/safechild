@@ -1,12 +1,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as dgram from 'dgram';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
+import { safeExecFileAsync } from './process-exec';
 import { configManager } from './config-manager';
 import { firewallEngine } from './wfp-engine';
-
-const execFileAsync = promisify(execFile);
 
 /**
  * Appends diagnostic log message to C:\ProgramData\SafeBrowse\logs\agent-service.log
@@ -512,15 +509,19 @@ export class WindowsNetworkManager {
   private defaultExecutor: NetworkCommandExecutor = async (script: string) => {
     const psPath = configManager.getPowerShellPath();
     const b64 = Buffer.from(script, 'utf16le').toString('base64');
-    return await execFileAsync(psPath, [
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-EncodedCommand',
-      b64,
-    ]);
+    return await safeExecFileAsync(
+      psPath,
+      [
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-EncodedCommand',
+        b64,
+      ],
+      { windowsHide: true }
+    );
   };
 
   /**
@@ -531,13 +532,32 @@ export class WindowsNetworkManager {
     return await executor(script);
   }
 
+  private inFlightDiscovery: Promise<AdapterDiscoveryResult> | null = null;
+  private inFlightDnsQuery: { key: string; promise: Promise<AdapterDnsQueryResult[]> } | null = null;
+
   /**
    * Discovers active IPv4 internet-facing adapters.
    * PRIMARY: Uses the IPv4 routing table (Get-NetRoute -DestinationPrefix '0.0.0.0/0')
    * FALLBACK: Get-NetIPConfiguration if primary route discovery returns no eligible adapter.
    * Distinguishes ELIGIBLE_ADAPTER_FOUND, NO_NETWORK_ROUTE, and DISCOVERY_COMMAND_FAILED.
+   * Concurrent callers share any in-flight discovery operation to avoid duplicate PowerShell executions.
    */
   public async discoverTargetAdapters(suppressLogs: boolean = false): Promise<AdapterDiscoveryResult> {
+    if (this.inFlightDiscovery) {
+      return await this.inFlightDiscovery;
+    }
+    const promise = this.doDiscoverTargetAdapters(suppressLogs);
+    this.inFlightDiscovery = promise;
+    try {
+      return await promise;
+    } finally {
+      if (this.inFlightDiscovery === promise) {
+        this.inFlightDiscovery = null;
+      }
+    }
+  }
+
+  private async doDiscoverTargetAdapters(suppressLogs: boolean = false): Promise<AdapterDiscoveryResult> {
     if (this.getPlatform() !== 'win32') {
       if (this.mockAdapters !== null) {
         const evaluations: CandidateEvaluation[] = [];
@@ -1806,6 +1826,27 @@ export class WindowsNetworkManager {
   public async queryDnsStateForAdapters(
     targetAdapters: TargetAdapterInfo[]
   ): Promise<AdapterDnsQueryResult[]> {
+    const key = targetAdapters
+      .map((a) => a.InterfaceIndex)
+      .sort((a, b) => a - b)
+      .join(',');
+    if (this.inFlightDnsQuery && this.inFlightDnsQuery.key === key) {
+      return await this.inFlightDnsQuery.promise;
+    }
+    const promise = this.doQueryDnsStateForAdapters(targetAdapters);
+    this.inFlightDnsQuery = { key, promise };
+    try {
+      return await promise;
+    } finally {
+      if (this.inFlightDnsQuery?.promise === promise) {
+        this.inFlightDnsQuery = null;
+      }
+    }
+  }
+
+  private async doQueryDnsStateForAdapters(
+    targetAdapters: TargetAdapterInfo[]
+  ): Promise<AdapterDnsQueryResult[]> {
     if (this.getPlatform() !== 'win32') {
       // Non-Windows / test simulation: derive state from mockAdapters
       return targetAdapters.map((target) => {
@@ -2729,7 +2770,7 @@ export class WindowsNetworkManager {
         await this.executePowerShell('$ErrorActionPreference = \'SilentlyContinue\'; Clear-DnsClientCache');
       } catch {}
       try {
-        await execFileAsync('ipconfig', ['/flushdns']);
+        await safeExecFileAsync('ipconfig', ['/flushdns'], { windowsHide: true });
       } catch {}
     }
   }

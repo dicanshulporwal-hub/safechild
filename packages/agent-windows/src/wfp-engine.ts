@@ -1,7 +1,4 @@
-import { exec } from 'child_process';
-import { promisify } from 'util';
-
-const execAsync = promisify(exec);
+import { safeExecAsync } from './process-exec';
 
 export interface FirewallEngineOptions {
   enableDoTBlocking?: boolean;
@@ -62,8 +59,8 @@ export class WindowsFirewallEngine {
       if (this.options.enableDoTBlocking !== false) {
         const dotRuleName = 'SafeBrowse_Block_DoT_853_TCP';
         const dotUdpRuleName = 'SafeBrowse_Block_DoT_853_UDP';
-        await execAsync(`netsh advfirewall firewall add rule name="${dotRuleName}" dir=out action=block protocol=TCP remoteport=853`);
-        await execAsync(`netsh advfirewall firewall add rule name="${dotUdpRuleName}" dir=out action=block protocol=UDP remoteport=853`);
+        await safeExecAsync(`netsh advfirewall firewall add rule name="${dotRuleName}" dir=out action=block protocol=TCP remoteport=853`, { windowsHide: true });
+        await safeExecAsync(`netsh advfirewall firewall add rule name="${dotUdpRuleName}" dir=out action=block protocol=UDP remoteport=853`, { windowsHide: true });
         this.activeRules.push(dotRuleName, dotUdpRuleName);
       }
 
@@ -71,7 +68,7 @@ export class WindowsFirewallEngine {
       if (this.options.enableDoHBlocking !== false) {
         const dohRuleName = 'SafeBrowse_Block_DoH_Bootstrap';
         const remoteIpList = this.KNOWN_DOH_IPS.join(',');
-        await execAsync(`netsh advfirewall firewall add rule name="${dohRuleName}" dir=out action=block protocol=TCP remoteip="${remoteIpList}" remoteport=443`);
+        await safeExecAsync(`netsh advfirewall firewall add rule name="${dohRuleName}" dir=out action=block protocol=TCP remoteip="${remoteIpList}" remoteport=443`, { windowsHide: true });
         this.activeRules.push(dohRuleName);
       }
 
@@ -99,7 +96,7 @@ export class WindowsFirewallEngine {
 
     for (const rule of rulesToDelete) {
       try {
-        await execAsync(`netsh advfirewall firewall delete rule name="${rule}"`);
+        await safeExecAsync(`netsh advfirewall firewall delete rule name="${rule}"`, { windowsHide: true });
       } catch (e) {
         // Silently ignore if rule does not exist - ensures full idempotency
       }

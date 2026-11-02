@@ -1,11 +1,8 @@
-import { exec } from 'child_process';
-import { promisify } from 'util';
+import { safeExecAsync } from './process-exec';
 import * as fs from 'fs';
 import * as path from 'path';
 import { networkManager } from './network-manager';
 import { firewallEngine } from './wfp-engine';
-
-const execAsync = promisify(exec);
 
 export class WindowsUninstaller {
   private installDir: string;
@@ -27,10 +24,10 @@ export class WindowsUninstaller {
     console.log('[Step 1/5] Stopping and removing SafeBrowse Windows Service...');
     if (process.platform === 'win32') {
       try {
-        await execAsync(`sc.exe stop ${this.serviceName}`);
+        await safeExecAsync(`sc.exe stop ${this.serviceName}`, { windowsHide: true });
       } catch (e) {}
       try {
-        await execAsync(`sc.exe delete ${this.serviceName}`);
+        await safeExecAsync(`sc.exe delete ${this.serviceName}`, { windowsHide: true });
         console.log('✅ SafeBrowseChildService stopped and unregistered.');
       } catch (e) {}
     }

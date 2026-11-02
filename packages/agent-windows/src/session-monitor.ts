@@ -1,11 +1,8 @@
 import * as fs from 'fs';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
+import { safeExecFileAsync } from './process-exec';
 import { accountManager, WindowsAccountManager, ResolvedUserPolicy, MultiSessionCheckResult } from './account-manager';
 import { configManager } from './config-manager';
 import { logServiceMessage } from './network-manager';
-
-const execFileAsync = promisify(execFile);
 
 export type SessionChangeCallback = (userPolicy: ResolvedUserPolicy, previousPolicy: ResolvedUserPolicy | null) => void;
 
@@ -90,15 +87,19 @@ export class WindowsSessionMonitor {
 
     try {
       const psPath = configManager.getPowerShellPath();
-      await execFileAsync(psPath, [
-        '-NoLogo',
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        'Clear-DnsClientCache -ErrorAction SilentlyContinue',
-      ]);
+      await safeExecFileAsync(
+        psPath,
+        [
+          '-NoLogo',
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-Command',
+          'Clear-DnsClientCache -ErrorAction SilentlyContinue',
+        ],
+        { windowsHide: true }
+      );
       logServiceMessage('INFO', '[SessionMonitor] [OK] Windows DNS client cache successfully flushed on user switch.');
     } catch (err: any) {
       logServiceMessage('WARN', `[SessionMonitor] DNS cache flush notice: ${err.message}`);

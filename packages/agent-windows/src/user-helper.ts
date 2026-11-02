@@ -1,6 +1,6 @@
 import * as net from 'net';
 import * as os from 'os';
-import { spawn } from 'child_process';
+import { safeSpawn } from './process-exec';
 import {
   getDefaultPipePath,
   validateBlockUrl,
@@ -180,9 +180,10 @@ export class SafeBrowseUserSessionHelper {
   private defaultLaunchBrowser(url: string): boolean {
     if (process.platform === 'win32') {
       try {
-        const child = spawn('cmd.exe', ['/c', 'start', '', url], {
+        const child = safeSpawn('cmd.exe', ['/c', 'start', '', '/max', url], {
           detached: true,
           stdio: 'ignore',
+          windowsHide: true,
         });
         child.unref();
         return true;

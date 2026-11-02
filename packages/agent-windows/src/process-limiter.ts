@@ -1,11 +1,8 @@
-import { exec } from 'child_process';
-import { promisify } from 'util';
+import { safeExecAsync } from './process-exec';
 import { Policy, UsageBudget } from '@safebrowse/shared';
 import { DeviceConfig } from './sync-client';
 import { sessionMonitor } from './session-monitor';
 import { ResolvedUserPolicy } from './account-manager';
-
-const execAsync = promisify(exec);
 
 export interface ProcessUsageState {
   processName: string;
@@ -179,7 +176,7 @@ export class WindowsProcessLimiter {
 
     try {
       // tasklist /V in CSV format: "Image Name","PID","Session Name","Session#","Mem Usage","Status","User Name","CPU Time","Window Title"
-      const { stdout } = await execAsync('tasklist /V /FO CSV /NH');
+      const { stdout } = await safeExecAsync('tasklist /V /FO CSV /NH', { windowsHide: true });
       const lines = stdout.split(/\r?\n/);
       const results: ProcessInfo[] = [];
 
@@ -207,7 +204,7 @@ export class WindowsProcessLimiter {
       console.warn(`[Process Limiter] Failed to enumerate processes with tasklist /V: ${e.message}`);
       // Fallback to basic tasklist /FO CSV /NH if /V failed
       try {
-        const { stdout } = await execAsync('tasklist /FO CSV /NH');
+        const { stdout } = await safeExecAsync('tasklist /FO CSV /NH', { windowsHide: true });
         const lines = stdout.split(/\r?\n/);
         const results: ProcessInfo[] = [];
         for (const line of lines) {
@@ -288,7 +285,7 @@ export class WindowsProcessLimiter {
 
     try {
       // STRICTLY PID TARGETED taskkill - NEVER /IM, NEVER image-wide!
-      await execAsync(`taskkill /F /PID ${pid}`);
+      await safeExecAsync(`taskkill /F /PID ${pid}`, { windowsHide: true });
       return true;
     } catch (e: any) {
       console.warn(`[Process Limiter] taskkill notice for PID ${pid} (${imageName}): ${e.message}`);

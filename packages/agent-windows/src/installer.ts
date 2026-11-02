@@ -1,5 +1,4 @@
-import { exec } from 'child_process';
-import { promisify } from 'util';
+import { safeExecAsync } from './process-exec';
 import * as fs from 'fs';
 import * as path from 'path';
 import { configManager, ConfigManager } from './config-manager';
@@ -7,8 +6,6 @@ import { networkManager } from './network-manager';
 import { firewallEngine } from './wfp-engine';
 import { WINDOWS_AGENT_VERSION } from './sync-client';
 import { CURRENT_WINDOWS_PROTOCOL_VERSION } from '@safebrowse/shared';
-
-const execAsync = promisify(exec);
 
 export interface InstallOptions {
   pairingCode?: string;
@@ -31,7 +28,7 @@ export class WindowsInstaller {
   public async checkAdminPrivileges(): Promise<boolean> {
     if (process.platform !== 'win32') return true;
     try {
-      await execAsync('net session');
+      await safeExecAsync('net session', { windowsHide: true });
       return true;
     } catch {
       return false;
@@ -109,7 +106,7 @@ export class WindowsInstaller {
           // Start service now that device is paired
           if (process.platform === 'win32') {
             try {
-              await execAsync(`sc.exe start ${this.serviceName}`);
+              await safeExecAsync(`sc.exe start ${this.serviceName}`, { windowsHide: true });
             } catch {}
           }
         } else {
@@ -145,18 +142,20 @@ export class WindowsInstaller {
 
     try {
       try {
-        await execAsync(`sc.exe stop ${this.serviceName}`);
+        await safeExecAsync(`sc.exe stop ${this.serviceName}`, { windowsHide: true });
       } catch {}
       try {
-        await execAsync(`sc.exe delete ${this.serviceName}`);
+        await safeExecAsync(`sc.exe delete ${this.serviceName}`, { windowsHide: true });
       } catch {}
 
       // Create service with delayed-auto start under LocalSystem
-      await execAsync(
-        `sc.exe create ${this.serviceName} binPath= "${binPath}" start= delayed-auto DisplayName= "SafeBrowse Child Protection Service"`
+      await safeExecAsync(
+        `sc.exe create ${this.serviceName} binPath= "${binPath}" start= delayed-auto DisplayName= "SafeBrowse Child Protection Service"`,
+        { windowsHide: true }
       );
-      await execAsync(
-        `sc.exe description ${this.serviceName} "SafeBrowse DNS filtering and parental policy enforcement service."`
+      await safeExecAsync(
+        `sc.exe description ${this.serviceName} "SafeBrowse DNS filtering and parental policy enforcement service."`,
+        { windowsHide: true }
       );
     } catch (e: any) {
       console.warn(`[Service Registry] Notice: ${e.message}`);
@@ -173,10 +172,10 @@ export class WindowsInstaller {
 
     if (process.platform === 'win32') {
       try {
-        await execAsync(`sc.exe stop ${this.serviceName}`);
+        await safeExecAsync(`sc.exe stop ${this.serviceName}`, { windowsHide: true });
       } catch {}
       try {
-        await execAsync(`sc.exe delete ${this.serviceName}`);
+        await safeExecAsync(`sc.exe delete ${this.serviceName}`, { windowsHide: true });
       } catch {}
     }
     console.log('[Rollback] Safe rollback complete.');

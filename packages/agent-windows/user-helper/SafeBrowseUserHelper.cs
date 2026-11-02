@@ -232,11 +232,12 @@ namespace SafeBrowse.UserHelper
                 // Opens in current interactive user's default browser (Edge, Chrome, Firefox, etc.)
                 ProcessStartInfo psi = new ProcessStartInfo(url)
                 {
-                    UseShellExecute = true
+                    UseShellExecute = true,
+                    WindowStyle = ProcessWindowStyle.Maximized
                 };
                 Process.Start(psi);
                 method = "ShellExecuteEx";
-                LogMessage("INFO", "Launched default browser via Windows ShellExecuteEx.");
+                LogMessage("INFO", "Launched default browser via Windows ShellExecuteEx (Maximized).");
                 return true;
             }
             catch (Exception ex)
@@ -245,9 +246,10 @@ namespace SafeBrowse.UserHelper
                 try
                 {
                     // Fallback to cmd.exe start
-                    ProcessStartInfo fallback = new ProcessStartInfo("cmd.exe", "/c start \"\" \"" + url + "\"")
+                    ProcessStartInfo fallback = new ProcessStartInfo("cmd.exe", "/c start \"\" /max \"" + url + "\"")
                     {
                         CreateNoWindow = true,
+                        WindowStyle = ProcessWindowStyle.Hidden,
                         UseShellExecute = false
                     };
                     Process.Start(fallback);

@@ -13,11 +13,7 @@ import { guiServer } from './gui-server';
 import { normalizePairingCode, CURRENT_WINDOWS_PROTOCOL_VERSION } from '@safebrowse/shared';
 import * as fs from 'fs';
 import * as path from 'path';
-import { exec, execFile } from 'child_process';
-import { promisify } from 'util';
-
-const execAsync = promisify(exec);
-const execFileAsync = promisify(execFile);
+import { safeExecAsync, safeExecFileAsync } from './process-exec';
 
 async function verifyDeviceWithBackend(
   cfg: DeviceConfig
@@ -144,7 +140,7 @@ async function pairDevice(args: string[]): Promise<void> {
     if (process.platform === 'win32') {
       try {
         console.log('[SafeBrowse] Signaling SafeBrowseChildService to start...');
-        await execAsync('sc.exe start SafeBrowseChildService');
+        await safeExecAsync('sc.exe start SafeBrowseChildService', { windowsHide: true });
         console.log('[SafeBrowse] Service start command dispatched successfully.');
       } catch (e: any) {
         console.log(`[SafeBrowse] Note: Service start command notification: ${e.message}`);
@@ -584,7 +580,7 @@ async function runServiceMode(): Promise<void> {
       if (fs.existsSync(hostExe)) {
         const flag = isRecovery ? '--recover-helper' : '--launch-helper';
         const args = targetSession !== undefined ? [flag, String(targetSession)] : [flag];
-        await execFileAsync(hostExe, args);
+        await safeExecFileAsync(hostExe, args, { windowsHide: true });
         logServiceMessage('INFO', `[SafeBrowse Service] [OK] Invoked SafeBrowseServiceHost ${flag} for Session ${targetSession ?? 'active'}`);
         return true;
       } else if (fs.existsSync(helperExe)) {
@@ -852,7 +848,7 @@ export async function queryWindowsServiceStatus(): Promise<ServiceQueryResult> {
   }
 
   try {
-    const { stdout } = await execAsync('sc.exe query SafeBrowseChildService');
+    const { stdout } = await safeExecAsync('sc.exe query SafeBrowseChildService', { windowsHide: true });
     const out = stdout || '';
     let state = 'UNKNOWN';
     let isSupervised = false;
@@ -1103,7 +1099,7 @@ async function showStatus(): Promise<void> {
 
   if (process.platform === 'win32') {
     try {
-      const { stdout } = await execAsync('sc.exe query SafeBrowseChildService');
+      const { stdout } = await safeExecAsync('sc.exe query SafeBrowseChildService', { windowsHide: true });
       console.log('\n[Windows Service Status]');
       console.log(stdout.trim());
     } catch (e: any) {

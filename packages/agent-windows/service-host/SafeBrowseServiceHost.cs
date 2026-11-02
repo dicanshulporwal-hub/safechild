@@ -131,6 +131,7 @@ namespace SafeBrowse
                     Arguments = "/c sc.exe failure SafeBrowseChildService reset= 86400 actions= restart/5000/restart/5000/restart/5000 & sc.exe failureflag SafeBrowseChildService 1",
                     UseShellExecute = false,
                     CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true
                 };
@@ -435,6 +436,7 @@ namespace SafeBrowse
                         Arguments = "-NoProfile -ExecutionPolicy Bypass -Command \"" + psScript + "\"",
                         UseShellExecute = false,
                         CreateNoWindow = true,
+                        WindowStyle = ProcessWindowStyle.Hidden,
                         RedirectStandardOutput = true,
                         RedirectStandardError = true
                     };
@@ -1111,6 +1113,7 @@ namespace SafeBrowse
                         WorkingDirectory = baseDir,
                         UseShellExecute = false,
                         CreateNoWindow = true,
+                        WindowStyle = ProcessWindowStyle.Hidden,
                         RedirectStandardOutput = true,
                         RedirectStandardError = true
                     };
@@ -1235,7 +1238,8 @@ namespace SafeBrowse
                     FileName = "powershell.exe",
                     Arguments = "-NoProfile -ExecutionPolicy Bypass -Command \"" + psScript + "\"",
                     UseShellExecute = false,
-                    CreateNoWindow = true
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
                 };
 
                 using (Process proc = Process.Start(psi))
@@ -1305,6 +1309,7 @@ namespace SafeBrowse
                         WorkingDirectory = baseDir,
                         UseShellExecute = false,
                         CreateNoWindow = true,
+                        WindowStyle = ProcessWindowStyle.Hidden,
                         RedirectStandardOutput = false,
                         RedirectStandardError = false
                     };
@@ -1387,6 +1392,7 @@ namespace SafeBrowse
                         FileName = "taskkill",
                         Arguments = string.Format("/PID {0} /T /F", _childProcess.Id),
                         CreateNoWindow = true,
+                        WindowStyle = ProcessWindowStyle.Hidden,
                         UseShellExecute = false
                     });
                     if (taskkillProcess != null)

@@ -1,9 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { execFile, execSync } from 'child_process';
-import { promisify } from 'util';
-
-const execFileAsync = promisify(execFile);
+import { safeExecFileAsync, safeExecSync } from './process-exec';
 
 export type OnboardingState =
   | 'NOT_CONNECTED'
@@ -193,7 +190,7 @@ export class ConfigManager {
       return true; // Non-Windows dev/test environment defaults to permitted
     }
     try {
-      execSync('net session', { stdio: 'ignore' });
+      safeExecSync('net session', { stdio: 'ignore', windowsHide: true });
       return true;
     } catch {
       return false;
@@ -228,7 +225,7 @@ export class ConfigManager {
     }
     if (this.getPlatform() === 'win32' && process.platform === 'win32') {
       try {
-        execSync(cmd, { stdio: 'pipe' });
+        safeExecSync(cmd, { stdio: 'pipe', windowsHide: true });
       } catch (err: any) {
         const stderr = err.stderr ? err.stderr.toString() : '';
         const msg = stderr.trim() || err.message;
@@ -398,15 +395,19 @@ export class ConfigManager {
     const script = this.getDpapiEncryptScript(plainText);
     const psPath = this.getPowerShellPath();
 
-    const { stdout } = await execFileAsync(psPath, [
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-Command',
-      script,
-    ]);
+    const { stdout } = await safeExecFileAsync(
+      psPath,
+      [
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        script,
+      ],
+      { windowsHide: true }
+    );
 
     const cleanOutput = stdout.replace(/[\r\n\s]+/g, '');
     if (!cleanOutput || !/^[A-Za-z0-9+/=]+$/.test(cleanOutput)) {
@@ -441,15 +442,19 @@ export class ConfigManager {
     const script = this.getDpapiDecryptScript(cleanCipher);
     const psPath = this.getPowerShellPath();
 
-    const { stdout } = await execFileAsync(psPath, [
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-Command',
-      script,
-    ]);
+    const { stdout } = await safeExecFileAsync(
+      psPath,
+      [
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        script,
+      ],
+      { windowsHide: true }
+    );
 
     const cleanOutput = stdout.replace(/[\r\n\s]+/g, '');
     if (!cleanOutput) {
@@ -647,6 +652,27 @@ export class ConfigManager {
 
   private inMemoryOnboardingState: OnboardingState | null = null;
   private inMemoryOnboardingReason: string | null = null;
+
+  public isConfigured(): boolean {
+    if (this.configAccessOverride === 'CONFIGURED') return true;
+    if (this.configAccessOverride === 'NOT_PAIRED') return false;
+    const sanitized = this.loadSanitizedConfigSync();
+    return Boolean(sanitized && sanitized.deviceId);
+  }
+
+  public getPairingStatus(): 'CONNECTED' | 'CONNECTED_LOCAL' | 'SYNCING' | 'UNPAIRED' {
+    if (!this.isConfigured()) {
+      return 'UNPAIRED';
+    }
+    const onboarding = this.getOnboardingState();
+    if (onboarding === 'PROTECTED') {
+      return 'CONNECTED';
+    }
+    if (onboarding === 'CONNECTING' || onboarding === 'ACTIVATING') {
+      return 'SYNCING';
+    }
+    return 'CONNECTED_LOCAL';
+  }
 
   public getOnboardingState(): OnboardingState {
     if (this.inMemoryOnboardingState) {

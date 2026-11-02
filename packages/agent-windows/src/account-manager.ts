@@ -2,11 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
+import { safeExecFileAsync } from './process-exec';
 import { configManager, ConfigManager } from './config-manager';
-
-const execFileAsync = promisify(execFile);
 
 export interface WindowsAccount {
   name: string;
@@ -622,15 +619,19 @@ export class WindowsAccountManager {
     const psScript = WindowsAccountManager.getDiscoveryPowerShellScript();
 
     try {
-      const { stdout } = await execFileAsync(psPath, [
-        '-NoLogo',
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        psScript,
-      ]);
+      const { stdout } = await safeExecFileAsync(
+        psPath,
+        [
+          '-NoLogo',
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-Command',
+          psScript,
+        ],
+        { windowsHide: true }
+      );
 
       const trimmed = (stdout || '').trim();
       if (!trimmed) return [];
@@ -1217,15 +1218,19 @@ export class WindowsAccountManager {
           '}',
         ].join('; ');
 
-        const { stdout } = await execFileAsync(psPath, [
-          '-NoLogo',
-          '-NoProfile',
-          '-NonInteractive',
-          '-ExecutionPolicy',
-          'Bypass',
-          '-Command',
-          psCmd,
-        ]);
+        const { stdout } = await safeExecFileAsync(
+          psPath,
+          [
+            '-NoLogo',
+            '-NoProfile',
+            '-NonInteractive',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-Command',
+            psCmd,
+          ],
+          { windowsHide: true }
+        );
 
         const trimmed = (stdout || '').trim();
         if (trimmed) {
@@ -1343,15 +1348,19 @@ export class WindowsAccountManager {
           '}',
         ].join('; ');
 
-        const { stdout } = await execFileAsync(psPath, [
-          '-NoLogo',
-          '-NoProfile',
-          '-NonInteractive',
-          '-ExecutionPolicy',
-          'Bypass',
-          '-Command',
-          psCmd,
-        ]);
+        const { stdout } = await safeExecFileAsync(
+          psPath,
+          [
+            '-NoLogo',
+            '-NoProfile',
+            '-NonInteractive',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-Command',
+            psCmd,
+          ],
+          { windowsHide: true }
+        );
 
         const trimmed = (stdout || '').trim();
         if (trimmed) {
@@ -1520,15 +1529,19 @@ export class WindowsAccountManager {
         '@{ activeSessions = $active; disconnectedSessions = $disc } | ConvertTo-Json -Compress',
       ].join('; ');
 
-      const { stdout } = await execFileAsync(psPath, [
-        '-NoLogo',
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        psCmd,
-      ]);
+      const { stdout } = await safeExecFileAsync(
+        psPath,
+        [
+          '-NoLogo',
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-Command',
+          psCmd,
+        ],
+        { windowsHide: true }
+      );
 
       const trimmed = (stdout || '').trim();
       if (trimmed) {

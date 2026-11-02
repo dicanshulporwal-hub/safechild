@@ -2,8 +2,7 @@ import http from 'http';
 import url from 'url';
 import * as fs from 'fs';
 import * as path from 'path';
-import { exec, execFile } from 'child_process';
-import { promisify } from 'util';
+import { safeExecAsync, safeExecFileAsync } from './process-exec';
 import { configManager, ConfigManager, DeviceConfig } from './config-manager';
 import {
   accountManager,
@@ -13,9 +12,6 @@ import {
   FamilyChildProfile,
 } from './account-manager';
 import { logServiceMessage } from './network-manager';
-
-const execAsync = promisify(exec);
-const execFileAsync = promisify(execFile);
 
 export class ElevatedConfigServer {
   private server: http.Server | null = null;
@@ -265,7 +261,7 @@ export class ElevatedConfigServer {
 
       if (edgePath) {
         try {
-          await execFileAsync(
+          await safeExecFileAsync(
             edgePath,
             [`--app=${url}`, '--start-maximized', `--user-data-dir=${userDataDir}`],
             { windowsHide: true }
@@ -275,7 +271,18 @@ export class ElevatedConfigServer {
       }
 
       try {
-        await execFileAsync(
+        const cmd = `start msedge.exe --app="${url}" --start-maximized --user-data-dir="%LOCALAPPDATA%\\SafeBrowse\\elevated-edge-profile"`;
+        await safeExecAsync(cmd, { windowsHide: true });
+        return;
+      } catch (e) {
+        try {
+          await safeExecAsync(`start "" /max "${url}"`, { windowsHide: true });
+          return;
+        } catch {}
+      }
+
+      try {
+        await safeExecFileAsync(
           'rundll32.exe',
           ['url.dll,FileProtocolHandler', url],
           { windowsHide: true }
@@ -284,7 +291,7 @@ export class ElevatedConfigServer {
       } catch {}
     } else {
       try {
-        await execAsync(`xdg-open "${url}" || open "${url}"`);
+        await safeExecAsync(`xdg-open "${url}" || open "${url}"`);
       } catch {}
     }
   }

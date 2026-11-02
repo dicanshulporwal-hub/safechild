@@ -2,8 +2,7 @@ import http from 'http';
 import url from 'url';
 import * as fs from 'fs';
 import * as path from 'path';
-import { exec, execFile } from 'child_process';
-import { promisify } from 'util';
+import { safeExecAsync } from './process-exec';
 import { configManager, ConfigManager, DeviceConfig } from './config-manager';
 import { accountManager, WindowsAccountManager } from './account-manager';
 import { networkManager, WindowsNetworkManager, logServiceMessage } from './network-manager';
@@ -15,7 +14,6 @@ import {
   CURRENT_WINDOWS_PROTOCOL_VERSION,
 } from '@safebrowse/shared';
 
-const execAsync = promisify(exec);
 
 export type ElevatedPairServerMode = 'PAIRING' | 'PIN_BOOTSTRAP';
 
@@ -667,7 +665,7 @@ export class ElevatedPairServer {
     try {
       // 1. Dispatch sc start
       try {
-        await execAsync('sc.exe start SafeBrowseChildService');
+        await safeExecAsync('sc.exe start SafeBrowseChildService', { windowsHide: true });
       } catch (startErr: any) {
         const startMsg = (startErr.message || '').toString();
         // If already running (error 1056), proceed to query verification
@@ -680,7 +678,7 @@ export class ElevatedPairServer {
       const maxAttempts = 8;
       for (let i = 0; i < maxAttempts; i++) {
         try {
-          const { stdout } = await execAsync('sc.exe query SafeBrowseChildService');
+          const { stdout } = await safeExecAsync('sc.exe query SafeBrowseChildService', { windowsHide: true });
           if (stdout.includes('STATE') && stdout.includes('RUNNING')) {
             logServiceMessage('INFO', '[ElevatedPairServer] SafeBrowseChildService verified in RUNNING state.');
             return { running: true, message: 'SafeBrowseChildService is running.' };
@@ -768,18 +766,18 @@ export class ElevatedPairServer {
 
     if (process.platform === 'win32') {
       try {
-        const cmd = `start msedge.exe --app="${url}" --window-size=780,640 --user-data-dir="%LOCALAPPDATA%\\SafeBrowse\\elevated-edge-profile"`;
-        await execAsync(cmd);
+        const cmd = `start msedge.exe --app="${url}" --start-maximized --user-data-dir="%LOCALAPPDATA%\\SafeBrowse\\elevated-edge-profile"`;
+        await safeExecAsync(cmd, { windowsHide: true });
         return;
       } catch (e) {
         try {
-          await execAsync(`start "" "${url}"`);
+          await safeExecAsync(`start "" /max "${url}"`, { windowsHide: true });
           return;
         } catch {}
       }
     } else {
       try {
-        await execAsync(`xdg-open "${url}" || open "${url}"`);
+        await safeExecAsync(`xdg-open "${url}" || open "${url}"`);
       } catch {}
     }
   }
@@ -833,8 +831,8 @@ export class ElevatedPairServer {
       align-items: center;
     }
     .container {
-      max-width: 680px;
-      width: 100%;
+      max-width: 880px;
+      width: 94%;
       background: var(--card-bg);
       border: 1px solid rgba(255, 255, 255, 0.1);
       border-radius: 24px;
@@ -1660,8 +1658,8 @@ export class ElevatedPairServer {
       align-items: center;
     }
     .container {
-      max-width: 580px;
-      width: 100%;
+      max-width: 800px;
+      width: 94%;
       background: var(--card-bg);
       border: 1px solid rgba(255, 255, 255, 0.1);
       border-radius: 24px;

@@ -734,6 +734,7 @@ if ($res -notlike "SUCCESS*") { exit 1 }
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', psScript],
       {
         timeout: 8000,
+        windowsHide: true,
         env: { ...process.env, SB_PIPE_PATH: pipePath },
       },
       (err, stdout, stderr) => {
