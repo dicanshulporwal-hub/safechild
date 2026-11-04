@@ -1132,9 +1132,13 @@ export class GuiServer {
     <!-- INITIAL AUTHORITATIVE STATE CHECK -->
     <div id="screenLoading" class="screen active">
       <div class="startup-loader">
-        <div class="spinner" aria-hidden="true"></div>
-        <div class="loading-title">Checking SafeBrowse protection...</div>
-        <div class="loading-copy">Please wait while SafeBrowse verifies this computer's connection, account mappings and protection status.</div>
+        <div id="loadingSpinner" class="spinner" aria-hidden="true"></div>
+        <div id="loadingTitle" class="loading-title">Checking SafeBrowse protection...</div>
+        <div id="loadingCopy" class="loading-copy">Please wait while SafeBrowse verifies this computer's connection, account mappings and protection status.</div>
+        <div id="loadingActions" class="button-row" style="margin-top: 24px; display: none; justify-content: center; gap: 12px;">
+          <button class="btn btn-primary" onclick="initStartupCheck()">Retry Connection</button>
+          <button class="btn btn-secondary" onclick="checkProtectionDiagnostics()">Check Diagnostics</button>
+        </div>
       </div>
     </div>
 
@@ -1861,7 +1865,7 @@ export class GuiServer {
               bannerText.innerText =
                 data.pairingStatus === 'SYNCING'
                   ? 'Connected — Syncing protection settings with cloud...'
-                  : 'Connected (Local) — Verifying active protection...';
+                  : 'Connected (Local) — Cloud synchronization unavailable';
             }
           } else {
             syncBanner.style.display = 'none';
@@ -2027,18 +2031,37 @@ export class GuiServer {
 
     // Resolve authoritative device state before exposing any pairing action.
     // A paired laptop must never flash the "Connect This Computer" screen while status loads.
-    window.addEventListener('DOMContentLoaded', async () => {
+    async function initStartupCheck() {
       showScreen('screenLoading');
+      const loadingSpinner = document.getElementById('loadingSpinner');
+      const loadingTitle = document.getElementById('loadingTitle');
+      const loadingCopy = document.getElementById('loadingCopy');
+      const loadingActions = document.getElementById('loadingActions');
+
+      if (loadingSpinner) loadingSpinner.style.display = 'block';
+      if (loadingActions) loadingActions.style.display = 'none';
 
       const wasPairedLocally = (function() {
         try { return localStorage.getItem('sb_paired') === '1'; } catch { return false; }
       })();
 
+      if (wasPairedLocally) {
+        if (loadingTitle) loadingTitle.textContent = "Checking protection settings...";
+        if (loadingCopy) loadingCopy.textContent = "Verifying active protection, user session and policy enforcement...";
+      } else {
+        if (loadingTitle) loadingTitle.textContent = "Checking SafeBrowse protection...";
+        if (loadingCopy) loadingCopy.textContent = "Please wait while SafeBrowse verifies this computer's connection, account mappings and protection status.";
+      }
+
       let authoritativeUnpairedResponses = 0;
 
-      for (let attempt = 0; attempt < 8; attempt++) {
+      for (let attempt = 0; attempt < 6; attempt++) {
         try {
-          const res = await fetch('/api/status', { cache: 'no-store' });
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 2500);
+          const res = await fetch('/api/status', { cache: 'no-store', signal: controller.signal });
+          clearTimeout(timeoutId);
+
           if (res.ok) {
             const data = await res.json();
             const isPaired = Boolean(data.isPaired || data.pairingStatus === 'CONNECTED' || data.pairingStatus === 'CONNECTED_LOCAL' || data.pairingStatus === 'SYNCING');
@@ -2052,7 +2075,7 @@ export class GuiServer {
             }
 
             authoritativeUnpairedResponses += 1;
-            if (authoritativeUnpairedResponses >= 3 && !wasPairedLocally) {
+            if (authoritativeUnpairedResponses >= 2 && !wasPairedLocally) {
               try { localStorage.removeItem('sb_paired'); } catch {}
               showScreen('screenWelcome');
               return;
@@ -2068,13 +2091,17 @@ export class GuiServer {
         return;
       }
 
-      // Do not expose pairing after an indeterminate startup failure.
-      const loadingCopy = document.querySelector('#screenLoading .loading-copy');
+      // Indeterminate startup failure: display recovery actions
+      if (loadingSpinner) loadingSpinner.style.display = 'none';
+      if (loadingTitle) loadingTitle.textContent = "Connection Check Indeterminate";
       if (loadingCopy) {
-        loadingCopy.textContent = 'SafeBrowse could not confirm this computer\'s status yet. Check the SafeBrowse service and try again.';
+        loadingCopy.textContent = "SafeBrowse could not confirm this computer's status yet. Check that SafeBrowseChildService is running and click Retry.";
       }
-    });
-      }
+      if (loadingActions) loadingActions.style.display = 'flex';
+    }
+
+    window.addEventListener('DOMContentLoaded', async () => {
+      await initStartupCheck();
     });
 
     // Background watcher for elevated pairing completion

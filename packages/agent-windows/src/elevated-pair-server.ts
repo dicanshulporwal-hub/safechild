@@ -1276,9 +1276,9 @@ export class ElevatedPairServer {
         <div style="width: 64px; height: 64px; border-radius: 50%; background: rgba(34, 197, 94, 0.2); border: 2px solid var(--success); color: var(--success); font-size: 32px; display: flex; align-items: center; justify-content: center; margin: 0 auto 20px;">
           ✓
         </div>
-        <h2 style="font-size: 24px; font-weight: 800; margin: 0 0 10px 0;">This Computer is Protected</h2>
-        <p style="color: var(--text-muted); font-size: 15px; line-height: 1.6; max-width: 500px; margin: 0 auto 24px;">
-          SafeBrowse is active and actively filtering internet content for your family.
+        <h2 id="alreadyConnectedTitle" style="font-size: 24px; font-weight: 800; margin: 0 0 10px 0;">This Computer is Connected</h2>
+        <p id="alreadyConnectedSubtitle" style="color: var(--text-muted); font-size: 15px; line-height: 1.6; max-width: 500px; margin: 0 auto 24px;">
+          SafeBrowse is attached to this computer. Account configuration and active protection are managed through the SafeBrowse application.
         </p>
 
         <div class="button-row" style="max-width: 420px; margin: 0 auto;">

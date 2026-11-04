@@ -126,6 +126,24 @@ jobs:
           }
           Write-Host "Compiled SafeBrowseServiceHost.exe successfully."
 
+          # Compile SafeBrowseUserHelper.exe if present
+          $userHelperRel = "packages/agent-windows/user-helper/SafeBrowseUserHelper.cs"
+          if (Test-Path $userHelperRel) {
+            $userHelperSource = (Resolve-Path $userHelperRel).Path
+            $userHelperOutput = Join-Path $outDir "SafeBrowseUserHelper.exe"
+            & $cscPath /target:winexe /optimize+ "/out:$userHelperOutput" "$userHelperSource"
+            if ($LASTEXITCODE -eq 0) { Write-Host "Compiled SafeBrowseUserHelper.exe successfully." }
+          }
+
+          # Compile SafeBrowseGuiLauncher.exe if present
+          $guiLauncherRel = "packages/agent-windows/gui-launcher/SafeBrowseGuiLauncher.cs"
+          if (Test-Path $guiLauncherRel) {
+            $guiLauncherSource = (Resolve-Path $guiLauncherRel).Path
+            $guiLauncherOutput = Join-Path $outDir "SafeBrowseGuiLauncher.exe"
+            & $cscPath /target:winexe /optimize+ "/out:$guiLauncherOutput" "$guiLauncherSource"
+            if ($LASTEXITCODE -eq 0) { Write-Host "Compiled SafeBrowseGuiLauncher.exe successfully." }
+          }
+
       - name: Prepare Single Executable Application (SafeBrowseChild-Pilot.exe)
         shell: pwsh
         run: |
@@ -137,6 +155,12 @@ jobs:
           $hostDest = "$releaseWinDir/SafeBrowseServiceHost.exe"
           Copy-Item -Path $hostSource -Destination $hostDest -Force
           Write-Host "Copied SafeBrowseServiceHost.exe to $releaseWinDir."
+          if (Test-Path (Join-Path $pkgDir "dist/SafeBrowseUserHelper.exe")) {
+            Copy-Item -Path (Join-Path $pkgDir "dist/SafeBrowseUserHelper.exe") -Destination "$releaseWinDir/SafeBrowseUserHelper.exe" -Force
+          }
+          if (Test-Path (Join-Path $pkgDir "dist/SafeBrowseGuiLauncher.exe")) {
+            Copy-Item -Path (Join-Path $pkgDir "dist/SafeBrowseGuiLauncher.exe") -Destination "$releaseWinDir/SafeBrowseGuiLauncher.exe" -Force
+          }
 
           Write-Host "Generating SEA blob for SafeBrowseChild-Pilot.exe..."
           node --experimental-sea-config packages/agent-windows/sea-config.json
@@ -525,6 +549,24 @@ jobs:
           }
           Write-Host "Compiled SafeBrowseServiceHost.exe successfully."
 
+          # Compile SafeBrowseUserHelper.exe if present
+          $userHelperRel = "packages/agent-windows/user-helper/SafeBrowseUserHelper.cs"
+          if (Test-Path $userHelperRel) {
+            $userHelperSource = (Resolve-Path $userHelperRel).Path
+            $userHelperOutput = Join-Path $outDir "SafeBrowseUserHelper.exe"
+            & $cscPath /target:winexe /optimize+ "/out:$userHelperOutput" "$userHelperSource"
+            if ($LASTEXITCODE -eq 0) { Write-Host "Compiled SafeBrowseUserHelper.exe successfully." }
+          }
+
+          # Compile SafeBrowseGuiLauncher.exe if present
+          $guiLauncherRel = "packages/agent-windows/gui-launcher/SafeBrowseGuiLauncher.cs"
+          if (Test-Path $guiLauncherRel) {
+            $guiLauncherSource = (Resolve-Path $guiLauncherRel).Path
+            $guiLauncherOutput = Join-Path $outDir "SafeBrowseGuiLauncher.exe"
+            & $cscPath /target:winexe /optimize+ "/out:$guiLauncherOutput" "$guiLauncherSource"
+            if ($LASTEXITCODE -eq 0) { Write-Host "Compiled SafeBrowseGuiLauncher.exe successfully." }
+          }
+
       - name: Prepare Single Executable Application (SafeBrowseChild-Pilot.exe)
         shell: pwsh
         run: |
@@ -536,6 +578,12 @@ jobs:
           $hostDest = "$releaseWinDir/SafeBrowseServiceHost.exe"
           Copy-Item -Path $hostSource -Destination $hostDest -Force
           Write-Host "Copied SafeBrowseServiceHost.exe to $releaseWinDir."
+          if (Test-Path (Join-Path $pkgDir "dist/SafeBrowseUserHelper.exe")) {
+            Copy-Item -Path (Join-Path $pkgDir "dist/SafeBrowseUserHelper.exe") -Destination "$releaseWinDir/SafeBrowseUserHelper.exe" -Force
+          }
+          if (Test-Path (Join-Path $pkgDir "dist/SafeBrowseGuiLauncher.exe")) {
+            Copy-Item -Path (Join-Path $pkgDir "dist/SafeBrowseGuiLauncher.exe") -Destination "$releaseWinDir/SafeBrowseGuiLauncher.exe" -Force
+          }
 
           Write-Host "Generating SEA blob for SafeBrowseChild-Pilot.exe..."
           node --experimental-sea-config packages/agent-windows/sea-config.json

@@ -28,8 +28,8 @@ export async function safeExecFileAsync(
 ): Promise<{ stdout: string; stderr: string }> {
   const mergedOptions: ExecFileOptions = {
     encoding: 'utf8',
-    ...HIDDEN_WINDOW_OPTIONS,
     ...(options || {}),
+    ...HIDDEN_WINDOW_OPTIONS,
   };
   return new Promise((resolve, reject) => {
     execFile(file, (args || []) as string[], mergedOptions as any, (err, stdout, stderr) => {
@@ -55,8 +55,8 @@ export async function safeExecAsync(
 ): Promise<{ stdout: string; stderr: string }> {
   const mergedOptions: ExecOptions = {
     encoding: 'utf8',
-    ...HIDDEN_WINDOW_OPTIONS,
     ...(options || {}),
+    ...HIDDEN_WINDOW_OPTIONS,
   };
   return new Promise((resolve, reject) => {
     exec(command, mergedOptions as any, (err, stdout, stderr) => {
@@ -82,8 +82,8 @@ export function safeSpawn(
   options?: SpawnOptions
 ): ChildProcess {
   const mergedOptions: SpawnOptions = {
-    ...HIDDEN_WINDOW_OPTIONS,
     ...(options || {}),
+    ...HIDDEN_WINDOW_OPTIONS,
   };
   return spawn(command, args || [], mergedOptions);
 }
@@ -96,8 +96,8 @@ export function safeExecSync(
   options?: ExecSyncOptions
 ): Buffer | string {
   const mergedOptions: ExecSyncOptions = {
-    ...HIDDEN_WINDOW_OPTIONS,
     ...(options || {}),
+    ...HIDDEN_WINDOW_OPTIONS,
   };
   return execSync(command, mergedOptions);
 }
