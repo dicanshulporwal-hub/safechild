@@ -174,6 +174,8 @@ export class GuiServer {
                     username: activeSession.username,
                     isManaged: activePolicy.isManaged,
                     childName: activePolicy.childName,
+                    accountType: activePolicy.accountType || (activePolicy.isManaged ? 'CHILD' : 'NOT_ASSIGNED'),
+                    isMapped: Boolean(activePolicy.isMapped),
                   },
                   hasMultipleSessions,
                   sessionWarning,
@@ -183,6 +185,7 @@ export class GuiServer {
                     windowsUsername: m.windowsUsername,
                     isManaged: Boolean(m.enabled && m.childId),
                     childName: m.childName,
+                    accountType: m.accountType || (m.childId ? 'CHILD' : 'PARENT'),
                   })),
                   systemStatus: systemStatus ? { dnsEnforced: Boolean(systemStatus.dnsEnforced) } : null,
                   pinConfigured: isPinSet,
@@ -216,6 +219,8 @@ export class GuiServer {
                   childId: activePolicy.childId,
                   childName: activePolicy.childName,
                   sid: activeSession.sid,
+                  accountType: activePolicy.accountType || (activePolicy.isManaged ? 'CHILD' : 'NOT_ASSIGNED'),
+                  isMapped: Boolean(activePolicy.isMapped),
                 },
                 hasMultipleSessions,
                 sessionWarning,
@@ -238,13 +243,31 @@ export class GuiServer {
         if (pathname === '/api/accounts' && req.method === 'GET') {
           try {
             const accounts = await this.accountMgr.discoverAccounts();
+            const mappings = await this.accountMgr.loadProfileMappings();
             const activeSession = await this.accountMgr.getActiveConsoleSession();
-            const marked = accounts.map((acc: WindowsAccount) => ({
-              ...acc,
-              isCurrentConsoleUser:
-                (activeSession.sid && acc.sid === activeSession.sid) ||
-                (activeSession.username && acc.name.toLowerCase() === activeSession.username.toLowerCase()),
-            }));
+            const marked = accounts.map((acc: WindowsAccount) => {
+              const mapping = mappings.find(
+                (m) =>
+                  (acc.sid && m.windowsSid && m.windowsSid.toUpperCase() === acc.sid.toUpperCase()) ||
+                  (acc.name && m.windowsUsername && m.windowsUsername.toLowerCase() === acc.name.toLowerCase())
+              );
+              const accountType = mapping
+                ? (mapping.accountType || (mapping.childId ? 'CHILD' : 'PARENT'))
+                : 'NOT_ASSIGNED';
+              const isMapped = Boolean(mapping);
+              const isProtected = Boolean(mapping && mapping.enabled && mapping.childId);
+              return {
+                ...acc,
+                isCurrentConsoleUser:
+                  (activeSession.sid && acc.sid === activeSession.sid) ||
+                  (activeSession.username && acc.name.toLowerCase() === activeSession.username.toLowerCase()),
+                accountType,
+                isMapped,
+                childId: mapping ? mapping.childId : null,
+                childName: mapping ? mapping.childName : null,
+                isProtected,
+              };
+            });
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ accounts: marked }));
@@ -1051,6 +1074,32 @@ export class GuiServer {
     .tag-bypass { color: var(--warning); }
     .tag-danger { color: var(--danger); }
 
+    .badge-role {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .badge-child {
+      background: rgba(59, 130, 246, 0.2);
+      color: #93c5fd;
+      border: 1px solid rgba(59, 130, 246, 0.4);
+    }
+    .badge-parent {
+      background: rgba(16, 185, 129, 0.2);
+      color: #6ee7b7;
+      border: 1px solid rgba(16, 185, 129, 0.4);
+    }
+    .badge-unassigned {
+      background: rgba(148, 163, 184, 0.2);
+      color: #cbd5e1;
+      border: 1px solid rgba(148, 163, 184, 0.4);
+    }
+
     .alert {
       padding: 14px 18px;
       border-radius: 14px;
@@ -1149,6 +1198,7 @@ export class GuiServer {
         <thead>
           <tr style="color: var(--text-muted); font-size: 12px; font-weight: 700; text-transform: uppercase; text-align: left;">
             <th style="padding: 10px 16px;">Windows Account</th>
+            <th style="padding: 10px 16px;">Account Role</th>
             <th style="padding: 10px 16px;">Protect As (Child Profile)</th>
             <th style="padding: 10px 16px;">Protection</th>
           </tr>
@@ -1203,8 +1253,8 @@ export class GuiServer {
       <div class="status-grid">
         <div class="status-card">
           <div class="status-label">Active Windows User</div>
-          <div class="status-val" id="statUser">Loading...</div>
-          <div class="status-sub" id="statUserSid"></div>
+          <div class="status-val" id="statUser">Checking account...</div>
+          <div class="status-sub" id="statUserSid">Checking account...</div>
         </div>
 
         <div class="status-card">
@@ -1234,6 +1284,7 @@ export class GuiServer {
           <thead>
             <tr style="color: var(--text-muted); font-size: 12px; font-weight: 700; text-transform: uppercase; text-align: left;">
               <th style="padding: 10px 16px;">Windows Account</th>
+              <th style="padding: 10px 16px;">Account Role</th>
               <th style="padding: 10px 16px;">Assigned Profile</th>
               <th style="padding: 10px 16px;">Protection</th>
             </tr>
@@ -1569,40 +1620,74 @@ export class GuiServer {
       }
     }
 
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     function renderAccountsTable() {
       const tbody = document.getElementById('accountsBody');
       tbody.innerHTML = '';
 
       if (appState.accounts.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; padding:20px; color:#64748b;">No interactive accounts detected.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:20px; color:#64748b;">No interactive accounts detected.</td></tr>';
         return;
       }
 
       appState.accounts.forEach((acc, idx) => {
-        const existing = appState.mappings.find(m => m.windowsSid === acc.sid || m.windowsUsername.toLowerCase() === acc.name.toLowerCase());
-        const selectedChildId = existing && existing.enabled ? existing.childId : '';
+        const existing = appState.mappings.find(m =>
+          (acc.sid && m.windowsSid && m.windowsSid.toUpperCase() === acc.sid.toUpperCase()) ||
+          (m.windowsUsername && acc.name && m.windowsUsername.toLowerCase() === acc.name.toLowerCase())
+        );
+        const isMapped = Boolean(existing);
+        const role = isMapped ? (existing.accountType || (existing.childId ? 'CHILD' : 'PARENT')) : (acc.accountType || 'NOT_ASSIGNED');
+        const isChild = role === 'CHILD';
+        const isParent = role === 'PARENT';
+        const selectedChildId = (isChild && existing && existing.enabled) ? (existing.childId || '') : (isChild && acc.childId ? acc.childId : '');
 
         const tr = document.createElement('tr');
         tr.className = 'account-row';
 
-        let optionsHtml = '<option value="">Parent / Unmanaged (Protection OFF)</option>';
+        let optionsHtml = '';
+        if (!isMapped && role === 'NOT_ASSIGNED') {
+          optionsHtml += '<option value="__UNASSIGNED__" selected disabled>Not Assigned (Choose role below)</option>';
+        }
+        optionsHtml += '<option value="" ' + (isParent ? 'selected' : '') + '>Parent Account (Unmanaged / Protection OFF)</option>';
         appState.familyProfiles.forEach(p => {
           const isSelected = selectedChildId === p.id ? 'selected' : '';
-          optionsHtml += '<option value="' + p.id + '" ' + isSelected + '>' + p.name + ' (Child Profile)</option>';
+          optionsHtml += '<option value="' + p.id + '" ' + isSelected + '>Child: ' + escapeHtml(p.name) + ' (Protected)</option>';
         });
 
         const isProtected = Boolean(selectedChildId);
         const isCurrent = Boolean(acc.isCurrentConsoleUser);
 
+        let roleBadgeClass = 'badge-unassigned';
+        let roleBadgeText = 'NOT ASSIGNED';
+        if (isChild) {
+          roleBadgeClass = 'badge-child';
+          roleBadgeText = 'CHILD ACCOUNT';
+        } else if (isParent) {
+          roleBadgeClass = 'badge-parent';
+          roleBadgeText = 'PARENT ACCOUNT';
+        }
+
         tr.innerHTML =
           '<td>' +
             '<div class="user-pill">' +
-              acc.name +
+              escapeHtml(acc.name) +
               (isCurrent ? ' <span class="badge-current">ACTIVE USER</span>' : '') +
             '</div>' +
             '<div class="sid-text" style="color: #64748b; font-size: 11px;">' +
               (isCurrent ? 'Active Console Account' : 'Standard Windows Account') +
             '</div>' +
+          '</td>' +
+          '<td>' +
+            '<span id="roleBadge_' + idx + '" class="badge-role ' + roleBadgeClass + '">' + roleBadgeText + '</span>' +
           '</td>' +
           '<td>' +
             '<select id="sel_' + idx + '" onchange="updateRowProtection(' + idx + ')">' +
@@ -1622,9 +1707,27 @@ export class GuiServer {
     function updateRowProtection(idx) {
       const sel = document.getElementById('sel_' + idx);
       const tag = document.getElementById('tag_' + idx);
-      const isProtected = Boolean(sel.value);
-      tag.className = isProtected ? 'tag-protected' : 'tag-bypass';
-      tag.innerText = isProtected ? '● PROTECTED' : '○ BYPASSED';
+      const roleBadge = document.getElementById('roleBadge_' + idx);
+      const val = sel ? sel.value : '';
+
+      if (roleBadge) {
+        if (val === '__UNASSIGNED__') {
+          roleBadge.className = 'badge-role badge-unassigned';
+          roleBadge.innerText = 'NOT ASSIGNED';
+        } else if (val === '') {
+          roleBadge.className = 'badge-role badge-parent';
+          roleBadge.innerText = 'PARENT ACCOUNT';
+        } else {
+          roleBadge.className = 'badge-role badge-child';
+          roleBadge.innerText = 'CHILD ACCOUNT';
+        }
+      }
+
+      const isProtected = Boolean(val && val !== '__UNASSIGNED__');
+      if (tag) {
+        tag.className = isProtected ? 'tag-protected' : 'tag-bypass';
+        tag.innerText = isProtected ? '● PROTECTED' : '○ BYPASSED';
+      }
     }
 
     async function saveMappings() {
@@ -1640,15 +1743,19 @@ export class GuiServer {
       const mappings = [];
       appState.accounts.forEach((acc, idx) => {
         const sel = document.getElementById('sel_' + idx);
-        const childId = sel ? (sel.value || null) : null;
+        const val = sel ? sel.value : '';
+        if (val === '__UNASSIGNED__') return;
+        const childId = val ? val : null;
         const profile = appState.familyProfiles.find(p => p.id === childId);
+        const accountType = childId ? 'CHILD' : 'PARENT';
 
         mappings.push({
           windowsSid: acc.sid,
           windowsUsername: acc.name,
           childId: childId,
           childName: profile ? profile.name : null,
-          enabled: Boolean(childId)
+          enabled: Boolean(childId),
+          accountType: accountType,
         });
       });
 
@@ -1689,6 +1796,10 @@ export class GuiServer {
         if (statusScreen) {
           statusScreen.querySelectorAll('button').forEach(btn => btn.disabled = true);
         }
+        const su = document.getElementById('statUser');
+        if (su) su.innerText = 'Checking account...';
+        const sus = document.getElementById('statUserSid');
+        if (sus) sus.innerText = 'Checking account...';
       }
 
       try {
@@ -1706,8 +1817,40 @@ export class GuiServer {
         appState.pinConfigured = Boolean(data.pinConfigured);
         appState.managementUnlocked = Boolean(data.managementUnlocked);
 
-        document.getElementById('statUser').innerText = data.activeSession?.username || 'System Console';
-        document.getElementById('statUserSid').innerText = data.activeSession?.isManaged ? 'Child account' : 'Parent / unmanaged account';
+        const user = data.activeSession?.username || 'System Console';
+        const role = data.activeSession?.accountType || (data.activeSession?.isManaged ? 'CHILD' : 'NOT_ASSIGNED');
+        const isChild = role === 'CHILD';
+        const isParent = role === 'PARENT';
+        const isNotAssigned = role === 'NOT_ASSIGNED';
+
+        let roleBadgeClass = 'badge-unassigned';
+        let roleBadgeText = 'NOT ASSIGNED';
+        let roleText = 'Not Assigned';
+        let protectionText = 'Unmanaged';
+
+        if (isChild) {
+          roleBadgeClass = 'badge-child';
+          roleBadgeText = 'CHILD ACCOUNT';
+          roleText = 'Child Account';
+          protectionText = data.activeSession?.isManaged ? 'Protection Active' : 'Protection Bypassed';
+        } else if (isParent) {
+          roleBadgeClass = 'badge-parent';
+          roleBadgeText = 'PARENT ACCOUNT';
+          roleText = 'Parent Account';
+          protectionText = 'Parent / Unmanaged';
+        }
+
+        const statUserEl = document.getElementById('statUser');
+        if (statUserEl) {
+          statUserEl.innerHTML =
+            '<span style="vertical-align: middle;">' + escapeHtml(user) + '</span> ' +
+            '<span class="badge-role ' + roleBadgeClass + '" style="vertical-align: middle; margin-left: 6px;">' + roleBadgeText + '</span>';
+        }
+
+        const statUserSidEl = document.getElementById('statUserSid');
+        if (statUserSidEl) {
+          statUserSidEl.innerText = user + ' — ' + roleText + ' — ' + protectionText;
+        }
 
         const syncBanner = document.getElementById('syncBanner');
         if (syncBanner) {
@@ -1757,12 +1900,36 @@ export class GuiServer {
         if (tbody) {
           tbody.innerHTML = '';
           if (accounts.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; padding:16px; color:#64748b;">No interactive human accounts detected.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:16px; color:#64748b;">No interactive human accounts detected.</td></tr>';
           } else {
             accounts.forEach((acc) => {
-              const mapping = (data.mappings || []).find(m => m.windowsSid === acc.sid || (acc.name && m.windowsUsername && m.windowsUsername.toLowerCase() === acc.name.toLowerCase()));
+              const mapping = (data.mappings || []).find(m =>
+                (acc.sid && m.windowsSid && m.windowsSid.toUpperCase() === acc.sid.toUpperCase()) ||
+                (acc.name && m.windowsUsername && m.windowsUsername.toLowerCase() === acc.name.toLowerCase())
+              );
+              const role = acc.accountType || (mapping ? (mapping.accountType || (mapping.childId ? 'CHILD' : 'PARENT')) : 'NOT_ASSIGNED');
+              const isChild = role === 'CHILD';
+              const isParent = role === 'PARENT';
               const isManaged = Boolean(mapping && mapping.enabled && mapping.childId);
-              const childLabel = isManaged ? (mapping.childName ? mapping.childName + ' (Child Profile)' : 'Child Protected') : 'Parent / Unmanaged (Bypassed)';
+
+              let roleBadgeClass = 'badge-unassigned';
+              let roleBadgeText = 'NOT ASSIGNED';
+              if (isChild) {
+                roleBadgeClass = 'badge-child';
+                roleBadgeText = 'CHILD ACCOUNT';
+              } else if (isParent) {
+                roleBadgeClass = 'badge-parent';
+                roleBadgeText = 'PARENT ACCOUNT';
+              }
+
+              let profileLabel = 'Not Assigned';
+              if (isChild) {
+                profileLabel = (mapping && mapping.childName ? mapping.childName : (acc.childName || 'Child Profile')) + ' (Child Profile)';
+              } else if (isParent) {
+                profileLabel = 'Parent / Unmanaged (Bypassed)';
+              }
+
+              const isProtected = isManaged;
               const isCurrent = Boolean(acc.isCurrentConsoleUser);
 
               const tr = document.createElement('tr');
@@ -1770,19 +1937,22 @@ export class GuiServer {
               tr.innerHTML =
                 '<td>' +
                   '<div class="user-pill">' +
-                    acc.name +
+                    escapeHtml(acc.name) +
                     (isCurrent ? ' <span class="badge-current">ACTIVE USER</span>' : '') +
                   '</div>' +
                   '<div class="sid-text">' +
                     (isCurrent ? 'Active Console Account' : 'Standard Windows Account') +
                   '</div>' +
                 '</td>' +
+                '<td>' +
+                  '<span class="badge-role ' + roleBadgeClass + '">' + roleBadgeText + '</span>' +
+                '</td>' +
                 '<td style="color: #cbd5e1; font-weight: 600; font-size: 13px;">' +
-                  childLabel +
+                  escapeHtml(profileLabel) +
                 '</td>' +
                 '<td>' +
-                  '<span class="' + (isManaged ? 'tag-protected' : 'tag-bypass') + '" style="font-weight:800; font-size:13px;">' +
-                    (isManaged ? '● PROTECTED' : '○ BYPASSED') +
+                  '<span class="' + (isProtected ? 'tag-protected' : 'tag-bypass') + '" style="font-weight:800; font-size:13px;">' +
+                    (isProtected ? '● PROTECTED' : '○ BYPASSED') +
                   '</span>' +
                 '</td>';
               tbody.appendChild(tr);

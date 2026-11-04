@@ -139,6 +139,7 @@ export class WindowsSessionMonitor {
       prev.accountName !== resolved.accountName ||
       prev.isManaged !== resolved.isManaged ||
       prev.childId !== resolved.childId ||
+      prev.accountType !== resolved.accountType ||
       multiCheck.hasMultipleSessions !== hadMultiple;
 
     if (userChanged) {

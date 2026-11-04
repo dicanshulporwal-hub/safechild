@@ -10,6 +10,11 @@ export interface WindowsAccount {
   sid: string;
   disabled: boolean;
   isCurrentConsoleUser?: boolean;
+  accountType?: 'PARENT' | 'CHILD' | 'NOT_ASSIGNED';
+  isMapped?: boolean;
+  childId?: string | null;
+  childName?: string | null;
+  isProtected?: boolean;
 }
 
 export interface WindowsProfileMapping {
@@ -18,6 +23,7 @@ export interface WindowsProfileMapping {
   childId: string | null; // null represents Parent / Unmanaged
   childName?: string | null;
   enabled: boolean;
+  accountType?: 'PARENT' | 'CHILD';
 }
 
 export interface FamilyChildProfile {
@@ -81,6 +87,8 @@ export interface ResolvedUserPolicy {
   accountName: string;
   sid: string;
   sessionId?: number | null;
+  accountType?: 'PARENT' | 'CHILD' | 'NOT_ASSIGNED';
+  isMapped?: boolean;
 }
 
 export interface InteractiveSessionInfo {
@@ -667,6 +675,19 @@ export class WindowsAccountManager {
   }
 
   /**
+   * Derives whether a profile mapping represents a PARENT, CHILD, or unmapped account.
+   */
+  public deriveAccountRole(mapping?: WindowsProfileMapping | null): 'PARENT' | 'CHILD' | 'NOT_ASSIGNED' {
+    if (!mapping) {
+      return 'NOT_ASSIGNED';
+    }
+    if (mapping.accountType) {
+      return mapping.accountType;
+    }
+    return mapping.childId ? 'CHILD' : 'PARENT';
+  }
+
+  /**
    * Loads saved profile mappings from disk.
    * Checks state directory first, with fallback to legacy base directory.
    */
@@ -684,13 +705,15 @@ export class WindowsAccountManager {
     try {
       const raw = fs.readFileSync(filePath, 'utf8');
       const data = JSON.parse(raw);
-      if (Array.isArray(data.mappings)) {
-        return data.mappings;
-      }
-      if (Array.isArray(data)) {
-        return data;
-      }
-      return [];
+      const list = Array.isArray(data.mappings) ? data.mappings : (Array.isArray(data) ? data : []);
+      return list.map((m: any) => ({
+        windowsSid: String(m.windowsSid || '').trim().toUpperCase(),
+        windowsUsername: String(m.windowsUsername || '').trim(),
+        childId: m.childId ? String(m.childId).trim() : null,
+        childName: m.childName ? String(m.childName).trim() : null,
+        enabled: Boolean(m.enabled && m.childId),
+        accountType: m.accountType || (m.childId ? 'CHILD' : 'PARENT'),
+      }));
     } catch (err: any) {
       console.warn(`[AccountManager] Error reading profile mappings: ${err.message}`);
       return [];
@@ -765,6 +788,7 @@ export class WindowsAccountManager {
 
       const childName = item.childName ? String(item.childName).trim() : null;
       const enabled = Boolean(item.enabled && childId);
+      const accountType: 'PARENT' | 'CHILD' = item.accountType || (childId ? 'CHILD' : 'PARENT');
 
       sanitizedMappings.push({
         windowsSid: sid,
@@ -772,6 +796,7 @@ export class WindowsAccountManager {
         childId: childId || null,
         childName: childName || null,
         enabled,
+        accountType,
       });
     }
 
@@ -1275,6 +1300,8 @@ export class WindowsAccountManager {
         accountName: 'Unknown',
         sid: '',
         sessionId,
+        accountType: 'NOT_ASSIGNED',
+        isMapped: false,
       };
     }
 
@@ -1289,8 +1316,8 @@ export class WindowsAccountManager {
     const resolvedName = username || mapping?.windowsUsername || 'WindowsUser';
     const resolvedSid = sid || mapping?.windowsSid || '';
 
-    if (!mapping || !mapping.enabled || !mapping.childId) {
-      // UNMANAGED / PARENT ACCOUNT
+    if (!mapping) {
+      // UNMAPPED ACCOUNT - NOT ASSIGNED
       return {
         isManaged: false,
         childId: null,
@@ -1298,17 +1325,35 @@ export class WindowsAccountManager {
         accountName: resolvedName,
         sid: resolvedSid,
         sessionId,
+        accountType: 'NOT_ASSIGNED',
+        isMapped: false,
+      };
+    }
+
+    if (!mapping.childId || mapping.accountType === 'PARENT') {
+      // MAPPED PARENT ACCOUNT
+      return {
+        isManaged: false,
+        childId: null,
+        childName: null,
+        accountName: resolvedName,
+        sid: resolvedSid,
+        sessionId,
+        accountType: 'PARENT',
+        isMapped: true,
       };
     }
 
     // MANAGED CHILD ACCOUNT
     return {
-      isManaged: true,
+      isManaged: Boolean(mapping.enabled && mapping.childId),
       childId: mapping.childId,
       childName: mapping.childName || mapping.windowsUsername,
       accountName: resolvedName,
       sid: resolvedSid,
       sessionId,
+      accountType: 'CHILD',
+      isMapped: true,
     };
   }
 
@@ -1389,6 +1434,8 @@ export class WindowsAccountManager {
         childName: null,
         accountName: processUser.username || `PID-${pid}`,
         sid: '',
+        accountType: 'NOT_ASSIGNED',
+        isMapped: false,
       };
     }
 

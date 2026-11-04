@@ -67,12 +67,29 @@ export class ElevatedConfigServer {
             const mappings = await this.accountMgr.loadProfileMappings();
             const activeSession = await this.accountMgr.getActiveConsoleSession();
 
-            const markedAccounts = accounts.map((acc: WindowsAccount) => ({
-              ...acc,
-              isCurrentConsoleUser:
-                (activeSession.sid && acc.sid.toUpperCase() === activeSession.sid.toUpperCase()) ||
-                (activeSession.username && acc.name.toLowerCase() === activeSession.username.toLowerCase()),
-            }));
+            const markedAccounts = accounts.map((acc: WindowsAccount) => {
+              const mapping = mappings.find(
+                (m) =>
+                  (acc.sid && m.windowsSid && m.windowsSid.toUpperCase() === acc.sid.toUpperCase()) ||
+                  (acc.name && m.windowsUsername && m.windowsUsername.toLowerCase() === acc.name.toLowerCase())
+              );
+              const accountType = mapping
+                ? (mapping.accountType || (mapping.childId ? 'CHILD' : 'PARENT'))
+                : 'NOT_ASSIGNED';
+              const isMapped = Boolean(mapping);
+              const isProtected = Boolean(mapping && mapping.enabled && mapping.childId);
+              return {
+                ...acc,
+                isCurrentConsoleUser:
+                  (activeSession.sid && acc.sid.toUpperCase() === activeSession.sid.toUpperCase()) ||
+                  (activeSession.username && acc.name.toLowerCase() === activeSession.username.toLowerCase()),
+                accountType,
+                isMapped,
+                childId: mapping ? mapping.childId : null,
+                childName: mapping ? mapping.childName : null,
+                isProtected,
+              };
+            });
 
             // Live fetch family profiles from cloud using secure credentials
             let familyProfiles: FamilyChildProfile[] = [];
@@ -452,6 +469,32 @@ export class ElevatedConfigServer {
 
     .tag-protected { color: var(--success); font-weight: 800; font-size: 13px; }
     .tag-bypass { color: var(--warning); font-weight: 800; font-size: 13px; }
+
+    .badge-role {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .badge-child {
+      background: rgba(59, 130, 246, 0.2);
+      color: #93c5fd;
+      border: 1px solid rgba(59, 130, 246, 0.4);
+    }
+    .badge-parent {
+      background: rgba(16, 185, 129, 0.2);
+      color: #6ee7b7;
+      border: 1px solid rgba(16, 185, 129, 0.4);
+    }
+    .badge-unassigned {
+      background: rgba(148, 163, 184, 0.2);
+      color: #cbd5e1;
+      border: 1px solid rgba(148, 163, 184, 0.4);
+    }
     .busy-panel {
       min-height: 360px;
       display: flex;
@@ -557,8 +600,9 @@ export class ElevatedConfigServer {
         <thead>
           <tr style="color: var(--text-muted); font-size: 12px; font-weight: 700; text-transform: uppercase; text-align: left;">
             <th style="padding: 10px 16px;">Windows Account</th>
+            <th style="padding: 10px 16px;">Account Role</th>
             <th style="padding: 10px 16px;">Assignment</th>
-            <th style="padding: 10px 16px;">Saved / Pending</th>
+            <th style="padding: 10px 16px;">Protection</th>
           </tr>
         </thead>
         <tbody id="accountsBody">
@@ -625,35 +669,66 @@ export class ElevatedConfigServer {
       }
     }
 
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     function renderAccounts() {
       const tbody = document.getElementById('accountsBody');
       tbody.innerHTML = '';
 
       if (!configData.accounts || configData.accounts.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; padding:20px; color:#64748b;">No interactive human accounts detected.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:20px; color:#64748b;">No interactive human accounts detected.</td></tr>';
         return;
       }
 
       configData.accounts.forEach((acc, idx) => {
-        const existing = (configData.mappings || []).find(m => m.windowsSid === acc.sid || m.windowsUsername.toLowerCase() === acc.name.toLowerCase());
-        const selectedChildId = existing && existing.enabled ? existing.childId : '';
+        const existing = (configData.mappings || []).find(m =>
+          (acc.sid && m.windowsSid && m.windowsSid.toUpperCase() === acc.sid.toUpperCase()) ||
+          (acc.name && m.windowsUsername && m.windowsUsername.toLowerCase() === acc.name.toLowerCase())
+        );
+        const isMapped = Boolean(existing);
+        const role = isMapped ? (existing.accountType || (existing.childId ? 'CHILD' : 'PARENT')) : (acc.accountType || 'NOT_ASSIGNED');
+        const isChild = role === 'CHILD';
+        const isParent = role === 'PARENT';
+        const selectedChildId = (isChild && existing && existing.enabled) ? (existing.childId || '') : (isChild && acc.childId ? acc.childId : '');
 
         const tr = document.createElement('tr');
 
-        let optionsHtml = '<option value="">Parent / Unmanaged (No child filtering)</option>';
+        let optionsHtml = '';
+        if (!isMapped && role === 'NOT_ASSIGNED') {
+          optionsHtml += '<option value="__UNASSIGNED__" selected disabled>Not Assigned (Choose role below)</option>';
+        }
+        optionsHtml += '<option value="" ' + (isParent ? 'selected' : '') + '>Parent Account (Unmanaged / No child filtering)</option>';
         (configData.familyProfiles || []).forEach(p => {
           const isSelected = selectedChildId === p.id ? 'selected' : '';
-          optionsHtml += '<option value="' + p.id + '" ' + isSelected + '>Child: ' + p.name + ' (Protected)</option>';
+          optionsHtml += '<option value="' + p.id + '" ' + isSelected + '>Child: ' + escapeHtml(p.name) + ' (Protected)</option>';
         });
 
         const isProtected = Boolean(selectedChildId);
         const isCurrent = Boolean(acc.isCurrentConsoleUser);
-        tr.dataset.savedChildId = selectedChildId || '';
+        tr.dataset.savedChildId = selectedChildId || (isParent ? '' : '__UNASSIGNED__');
+
+        let roleBadgeClass = 'badge-unassigned';
+        let roleBadgeText = 'NOT ASSIGNED';
+        if (isChild) {
+          roleBadgeClass = 'badge-child';
+          roleBadgeText = 'CHILD ACCOUNT';
+        } else if (isParent) {
+          roleBadgeClass = 'badge-parent';
+          roleBadgeText = 'PARENT ACCOUNT';
+        }
 
         tr.innerHTML =
           '<td>' +
             '<div class="user-pill">' +
-              acc.name +
+              escapeHtml(acc.name) +
               (isCurrent ? ' <span class="badge-current">ACTIVE USER</span>' : '') +
             '</div>' +
             '<div class="desc-text">' +
@@ -662,13 +737,16 @@ export class ElevatedConfigServer {
             '</div>' +
           '</td>' +
           '<td>' +
+            '<span id="roleBadge_' + idx + '" class="badge-role ' + roleBadgeClass + '">' + roleBadgeText + '</span>' +
+          '</td>' +
+          '<td>' +
             '<select id="sel_' + idx + '" onchange="updateTag(' + idx + ')">' +
               optionsHtml +
             '</select>' +
           '</td>' +
           '<td>' +
             '<span id="tag_' + idx + '" class="' + (isProtected ? 'tag-protected' : 'tag-bypass') + '">' +
-              (isProtected ? '● CHILD PROTECTED · SAVED' : '○ PARENT / UNMANAGED · SAVED') +
+              (isProtected ? '● PROTECTED' : '○ BYPASSED') +
             '</span>' +
           '</td>';
 
@@ -679,20 +757,26 @@ export class ElevatedConfigServer {
     function updateTag(idx) {
       const sel = document.getElementById('sel_' + idx);
       const tag = document.getElementById('tag_' + idx);
-      const row = sel ? sel.closest('tr') : null;
-      const savedChildId = row ? (row.dataset.savedChildId || '') : '';
-      const selectedChildId = sel ? (sel.value || '') : '';
-      const changed = savedChildId !== selectedChildId;
-      const isProtected = Boolean(selectedChildId);
-      tag.className = isProtected ? 'tag-protected' : 'tag-bypass';
+      const roleBadge = document.getElementById('roleBadge_' + idx);
+      const selectedVal = sel ? (sel.value || '') : '';
 
-      if (changed) {
-        const selectedText = sel.options[sel.selectedIndex]?.text || '';
-        tag.innerText = '● PENDING: ' + selectedText;
-        tag.style.color = '#93c5fd';
-      } else {
-        tag.style.color = '';
-        tag.innerText = isProtected ? '● CHILD PROTECTED · SAVED' : '○ PARENT / UNMANAGED · SAVED';
+      if (roleBadge) {
+        if (selectedVal === '__UNASSIGNED__') {
+          roleBadge.className = 'badge-role badge-unassigned';
+          roleBadge.innerText = 'NOT ASSIGNED';
+        } else if (selectedVal === '') {
+          roleBadge.className = 'badge-role badge-parent';
+          roleBadge.innerText = 'PARENT ACCOUNT';
+        } else {
+          roleBadge.className = 'badge-role badge-child';
+          roleBadge.innerText = 'CHILD ACCOUNT';
+        }
+      }
+
+      const isProtected = Boolean(selectedVal && selectedVal !== '__UNASSIGNED__');
+      if (tag) {
+        tag.className = isProtected ? 'tag-protected' : 'tag-bypass';
+        tag.innerText = isProtected ? '● PROTECTED' : '○ BYPASSED';
       }
     }
 
@@ -708,15 +792,19 @@ export class ElevatedConfigServer {
       const mappings = [];
       configData.accounts.forEach((acc, idx) => {
         const sel = document.getElementById('sel_' + idx);
-        const childId = sel ? (sel.value || null) : null;
+        const val = sel ? sel.value : '';
+        if (val === '__UNASSIGNED__') return;
+        const childId = val ? val : null;
         const profile = (configData.familyProfiles || []).find(p => p.id === childId);
+        const accountType = childId ? 'CHILD' : 'PARENT';
 
         mappings.push({
           windowsSid: acc.sid,
           windowsUsername: acc.name,
           childId: childId,
           childName: profile ? profile.name : null,
-          enabled: Boolean(childId)
+          enabled: Boolean(childId),
+          accountType: accountType,
         });
       });
 
