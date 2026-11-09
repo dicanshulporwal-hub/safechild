@@ -373,11 +373,11 @@ jobs:
             Write-Host "    LegalCopyright : $($vi.LegalCopyright)"
 
             if ($vi.CompanyName -ne "SafeBrowse") {
-              Write-Error "Invalid CompanyName on $bin: $($vi.CompanyName)"
+              Write-Error "Invalid CompanyName on ${bin}: $($vi.CompanyName)"
               exit 1
             }
             if (-not $vi.ProductName -or -not $vi.FileDescription) {
-              Write-Error "Missing ProductName or FileDescription on $bin"
+              Write-Error "Missing ProductName or FileDescription on ${bin}"
               exit 1
             }
           }
