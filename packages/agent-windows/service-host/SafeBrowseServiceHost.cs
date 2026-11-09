@@ -2,10 +2,26 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.ServiceProcess;
 using System.Text;
 using System.Threading;
+
+// Standard Win32 VERSIONINFO metadata embedded into PE binary header
+[assembly: AssemblyTitle("SafeBrowse Child Protection Service Host")]
+[assembly: AssemblyDescription("SafeBrowse Native Windows Service Host Wrapper")]
+[assembly: AssemblyConfiguration("")]
+[assembly: AssemblyCompany("SafeBrowse")]
+[assembly: AssemblyProduct("SafeBrowse Child Pilot")]
+[assembly: AssemblyCopyright("Copyright © 2026 SafeBrowse. All rights reserved.")]
+[assembly: AssemblyTrademark("SafeBrowse")]
+[assembly: AssemblyCulture("")]
+[assembly: ComVisible(false)]
+[assembly: Guid("4D9E71F2-92A3-483B-A70E-9218D6C4B922")]
+[assembly: AssemblyVersion("1.0.4.11")]
+[assembly: AssemblyFileVersion("1.0.4.11")]
+[assembly: AssemblyInformationalVersion("1.0.4.11")]
 
 namespace SafeBrowse
 {

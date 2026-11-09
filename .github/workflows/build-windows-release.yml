@@ -140,7 +140,7 @@ jobs:
           if (Test-Path $guiLauncherRel) {
             $guiLauncherSource = (Resolve-Path $guiLauncherRel).Path
             $guiLauncherOutput = Join-Path $outDir "SafeBrowseGuiLauncher.exe"
-            & $cscPath /target:winexe /optimize+ "/out:$guiLauncherOutput" "$guiLauncherSource"
+            & $cscPath /target:winexe /optimize+ /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.ServiceProcess.dll "/out:$guiLauncherOutput" "$guiLauncherSource"
             if ($LASTEXITCODE -eq 0) { Write-Host "Compiled SafeBrowseGuiLauncher.exe successfully." }
           }
 
@@ -563,7 +563,7 @@ jobs:
           if (Test-Path $guiLauncherRel) {
             $guiLauncherSource = (Resolve-Path $guiLauncherRel).Path
             $guiLauncherOutput = Join-Path $outDir "SafeBrowseGuiLauncher.exe"
-            & $cscPath /target:winexe /optimize+ "/out:$guiLauncherOutput" "$guiLauncherSource"
+            & $cscPath /target:winexe /optimize+ /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.ServiceProcess.dll "/out:$guiLauncherOutput" "$guiLauncherSource"
             if ($LASTEXITCODE -eq 0) { Write-Host "Compiled SafeBrowseGuiLauncher.exe successfully." }
           }
 

@@ -209,14 +209,29 @@ describe('SafeBrowse Windows Pilot — Inline Script Syntax & GUI Launcher Suite
   });
 
   // =========================================================================
-  // 5. C# Windowless GUI Launcher Source Validation
+  // 5. Conventional Windows GUI Host Architecture & Dropper Heuristic Elimination
   // =========================================================================
-  it('9. SafeBrowseGuiLauncher.cs exists, implements mutex, checks responding server, and sets CreateNoWindow = true', () => {
+  it('9. SafeBrowseGuiLauncher.cs implements conventional Windows Forms GUI architecture and eliminates hidden process spawning', () => {
     const csPath = path.resolve(__dirname, '../gui-launcher/SafeBrowseGuiLauncher.cs');
     assert.ok(fs.existsSync(csPath), 'SafeBrowseGuiLauncher.cs must exist');
 
     const csContent = fs.readFileSync(csPath, 'utf8');
 
+    // Conventional Windows Forms GUI architecture
+    assert.ok(
+      csContent.includes('using System.Windows.Forms;'),
+      'Must reference System.Windows.Forms'
+    );
+    assert.ok(
+      csContent.includes('Application.EnableVisualStyles()'),
+      'Must enable visual styles for standard Windows GUI rendering'
+    );
+    assert.ok(
+      csContent.includes('class SafeBrowseConnectingForm : Form'),
+      'Must provide a native Form window'
+    );
+
+    // Mutual exclusion and service presence check
     assert.ok(
       csContent.includes('SafeBrowseGuiLauncherMutex_'),
       'Must implement per-user named mutex check'
@@ -225,17 +240,89 @@ describe('SafeBrowse Windows Pilot — Inline Script Syntax & GUI Launcher Suite
       csContent.includes('http://127.0.0.1:8885/api/status'),
       'Must check if GUI server is already listening on 8885'
     );
+
+    // Standard Windows Shell execution (no dropper heuristics)
     assert.ok(
-      csContent.includes('CreateNoWindow = true'),
-      'ProcessStartInfo must explicitly specify CreateNoWindow = true'
+      csContent.includes('UseShellExecute = true'),
+      'ProcessStartInfo must use native Windows Shell execution (UseShellExecute = true)'
     );
     assert.ok(
-      csContent.includes('UseShellExecute = false'),
-      'ProcessStartInfo must explicitly specify UseShellExecute = false'
+      !csContent.includes('CreateNoWindow = true'),
+      'Must NOT spawn hidden command-line child processes (eliminates dropper heuristic)'
     );
     assert.ok(
-      csContent.includes('ProcessWindowStyle.Hidden'),
-      'ProcessStartInfo must explicitly specify ProcessWindowStyle.Hidden'
+      !csContent.includes('ProcessWindowStyle.Hidden'),
+      'Must NOT specify ProcessWindowStyle.Hidden'
+    );
+  });
+
+  // =========================================================================
+  // 6. Complete Win32 Version Metadata Across Windows Executables
+  // =========================================================================
+  it('10. SafeBrowseGuiLauncher, SafeBrowseServiceHost, and SafeBrowseUserHelper define complete Win32 VERSIONINFO metadata', () => {
+    const files = [
+      {
+        path: path.resolve(__dirname, '../gui-launcher/SafeBrowseGuiLauncher.cs'),
+        product: 'SafeBrowse Family Protection',
+        title: 'SafeBrowse Family Protection',
+      },
+      {
+        path: path.resolve(__dirname, '../service-host/SafeBrowseServiceHost.cs'),
+        product: 'SafeBrowse Child Pilot',
+        title: 'SafeBrowse Child Protection Service Host',
+      },
+      {
+        path: path.resolve(__dirname, '../user-helper/SafeBrowseUserHelper.cs'),
+        product: 'SafeBrowse Child Pilot',
+        title: 'SafeBrowse User Session Helper',
+      },
+    ];
+
+    for (const f of files) {
+      assert.ok(fs.existsSync(f.path), `Source file must exist: ${f.path}`);
+      const content = fs.readFileSync(f.path, 'utf8');
+
+      assert.ok(
+        content.includes('AssemblyCompany("SafeBrowse")'),
+        `${path.basename(f.path)} must declare AssemblyCompany("SafeBrowse")`
+      );
+      assert.ok(
+        content.includes(`AssemblyProduct("${f.product}")`),
+        `${path.basename(f.path)} must declare AssemblyProduct("${f.product}")`
+      );
+      assert.ok(
+        content.includes(`AssemblyTitle("${f.title}")`),
+        `${path.basename(f.path)} must declare AssemblyTitle("${f.title}")`
+      );
+      assert.ok(
+        content.includes('AssemblyCopyright("Copyright © 2026 SafeBrowse. All rights reserved.")'),
+        `${path.basename(f.path)} must declare copyright notice`
+      );
+      assert.ok(
+        content.includes('AssemblyFileVersion("1.0.4.11")'),
+        `${path.basename(f.path)} must declare AssemblyFileVersion("1.0.4.11")`
+      );
+      assert.ok(
+        content.includes('AssemblyVersion("1.0.4.11")'),
+        `${path.basename(f.path)} must declare AssemblyVersion("1.0.4.11")`
+      );
+    }
+  });
+
+  // =========================================================================
+  // 7. Service Integration: SafeBrowseChildService Hosts GUI Server
+  // =========================================================================
+  it('11. agent-cli.ts starts and stops guiServer within runServiceMode()', () => {
+    const cliPath = path.resolve(__dirname, '../src/agent-cli.ts');
+    const content = fs.readFileSync(cliPath, 'utf8');
+
+    assert.ok(
+      content.includes('await guiServer.start(8885)'),
+      'runServiceMode must initialize guiServer on port 8885'
+    );
+    assert.ok(
+      content.includes('await guiServer.stop()'),
+      'gracefulShutdown must stop guiServer cleanly'
     );
   });
 });

@@ -229,6 +229,14 @@ async function runServiceMode(): Promise<void> {
     logServiceMessage('WARN', `[SafeBrowse Service] [WARN] Machine directory ACL hardening note: ${aclErr.message}`);
   }
 
+  // Always initialize GUI Application Server on port 8885 for local device management
+  try {
+    await guiServer.start(8885);
+    logServiceMessage('INFO', '[SafeBrowse Service] Family Protection GUI server listening on http://127.0.0.1:8885');
+  } catch (guiErr: any) {
+    logServiceMessage('WARN', `[SafeBrowse Service] Notice: GUI server port 8885 bind notice: ${guiErr.message}`);
+  }
+
   // Graceful shutdown handling
   let isShuttingDown = false;
   let currentEngineStatus: EngineOperationalStatus = 'DEGRADED_DNS_NOT_ENFORCED';
@@ -353,6 +361,9 @@ async function runServiceMode(): Promise<void> {
       }
       if (blockServer) blockServer.stop();
       if (syncClient) syncClient.stop();
+      try {
+        await guiServer.stop();
+      } catch {}
     } catch (e: any) {
       logServiceMessage('WARN', `[SafeBrowse Service] Warning during component teardown: ${e.message}`);
     }
@@ -1256,7 +1267,12 @@ async function main() {
 
   if (args.includes('gui') || args.includes('--gui')) {
     console.log('[SafeBrowse] Starting SafeBrowse Family Protection GUI...');
-    const port = await guiServer.start(8885);
+    let port = 8885;
+    try {
+      port = await guiServer.start(8885);
+    } catch {
+      // Port may already be hosted by SafeBrowseChildService
+    }
     await guiServer.launchWindow();
     console.log(`[SafeBrowse] GUI application running at http://127.0.0.1:${port}. Press Ctrl+C to exit.`);
     return;
@@ -1353,7 +1369,12 @@ async function main() {
   if (args.length === 0 && (process.stdout.isTTY || process.platform === 'win32')) {
     // Normal parent launched the executable directly (e.g. double click)
     console.log('[SafeBrowse] Opening SafeBrowse Family Protection GUI...');
-    const port = await guiServer.start(8885);
+    let port = 8885;
+    try {
+      port = await guiServer.start(8885);
+    } catch {
+      // Port may already be hosted by SafeBrowseChildService
+    }
     await guiServer.launchWindow();
     console.log(`[SafeBrowse] GUI application running at http://127.0.0.1:${port}. Press Ctrl+C to exit.`);
     return;

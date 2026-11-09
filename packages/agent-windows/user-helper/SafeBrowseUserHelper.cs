@@ -2,9 +2,26 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+
+// Standard Win32 VERSIONINFO metadata embedded into PE binary header
+[assembly: AssemblyTitle("SafeBrowse User Session Helper")]
+[assembly: AssemblyDescription("SafeBrowse Non-Elevated Interactive User Session Helper")]
+[assembly: AssemblyConfiguration("")]
+[assembly: AssemblyCompany("SafeBrowse")]
+[assembly: AssemblyProduct("SafeBrowse Child Pilot")]
+[assembly: AssemblyCopyright("Copyright © 2026 SafeBrowse. All rights reserved.")]
+[assembly: AssemblyTrademark("SafeBrowse")]
+[assembly: AssemblyCulture("")]
+[assembly: ComVisible(false)]
+[assembly: Guid("5E1F82A3-B4C5-6D7E-8F90-123456789ABC")]
+[assembly: AssemblyVersion("1.0.4.11")]
+[assembly: AssemblyFileVersion("1.0.4.11")]
+[assembly: AssemblyInformationalVersion("1.0.4.11")]
 
 namespace SafeBrowse.UserHelper
 {
