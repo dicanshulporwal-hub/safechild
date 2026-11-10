@@ -26,6 +26,30 @@ export class GuiServer {
   private accountMgr: WindowsAccountManager;
   private networkMgr: WindowsNetworkManager;
   private pinMgr: ParentPinManager;
+  private cachedSystemStatus: any = null;
+  private lastSystemStatusTime: number = 0;
+  private isEvaluatingSystemStatus: boolean = false;
+
+  public async getOrRefreshSystemStatus(): Promise<any> {
+    const now = Date.now();
+    if (this.cachedSystemStatus && now - this.lastSystemStatusTime < 30000) {
+      return this.cachedSystemStatus;
+    }
+    if (this.isEvaluatingSystemStatus) {
+      return this.cachedSystemStatus;
+    }
+    this.isEvaluatingSystemStatus = true;
+    evaluateSystemStatus()
+      .then((st) => {
+        this.cachedSystemStatus = st;
+        this.lastSystemStatusTime = Date.now();
+      })
+      .catch(() => {})
+      .finally(() => {
+        this.isEvaluatingSystemStatus = false;
+      });
+    return this.cachedSystemStatus;
+  }
 
   constructor(
     customConfigMgr?: ConfigManager,
@@ -62,6 +86,27 @@ export class GuiServer {
           return;
         }
 
+        if (req.method === 'OPTIONS') {
+          res.writeHead(200);
+          res.end();
+          return;
+        }
+
+        // Dedicated lightweight health endpoint (P0-8)
+        // Must return HTTP 200 immediately with ZERO PowerShell/CIM calls, ZERO DNS inspection,
+        // ZERO policy evaluation, ZERO active-session lookup, ZERO cloud sync.
+        if (pathname === '/api/health' && req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              status: 'ok',
+              service: 'SafeBrowse',
+              version: '1.0.4.13',
+            })
+          );
+          return;
+        }
+
         const isPinSet = await this.pinMgr.isPinSet();
         const sessionToken = req.headers['x-management-session'] as string;
         let activeConsole: { sid: string | null; username: string | null; sessionId?: number | null } | null = null;
@@ -90,12 +135,6 @@ export class GuiServer {
           }
           return { authorized: true };
         };
-
-        if (req.method === 'OPTIONS') {
-          res.writeHead(200);
-          res.end();
-          return;
-        }
 
         // Endpoint: POST /api/verify-pin (Parent lock unlock)
         if (pathname === '/api/verify-pin' && req.method === 'POST') {
@@ -142,7 +181,7 @@ export class GuiServer {
             const activePolicy = await this.accountMgr.resolveUserPolicy(activeSession.sid, activeSession.username);
             let systemStatus: any = null;
             try {
-              systemStatus = await evaluateSystemStatus();
+              systemStatus = await this.getOrRefreshSystemStatus();
             } catch {}
 
             const hasMultipleSessions = sessionMonitor.hasMultipleSessions();
@@ -715,6 +754,8 @@ export class GuiServer {
             let status: any = null;
             try {
               status = await evaluateSystemStatus();
+              this.cachedSystemStatus = status;
+              this.lastSystemStatusTime = Date.now();
             } catch {}
             const activeSession = await this.accountMgr.getActiveConsoleSession();
             const activePolicy = await this.accountMgr.resolveUserPolicy(activeSession.sid, activeSession.username);
@@ -1275,7 +1316,7 @@ export class GuiServer {
 
         <div class="status-card">
           <div class="status-label">Service & DNS Resolver</div>
-          <div class="status-val" id="statDns">127.0.0.1:53</div>
+          <div class="status-val" id="statDns">Checking protection...</div>
           <div class="status-sub" id="statService">SafeBrowseChildService</div>
         </div>
       </div>
@@ -1894,9 +1935,13 @@ export class GuiServer {
         document.getElementById('statDeviceId').innerText = data.isPaired ? 'Registered with family' : 'Run pairing setup';
 
         const sys = data.systemStatus;
-        if (sys) {
+        if (sys && sys.dnsEnforced !== undefined) {
           document.getElementById('statDns').innerText = sys.dnsEnforced ? '127.0.0.1 (Enforced)' : 'Inactive';
           document.getElementById('statService').innerText = sys.serviceState || 'SafeBrowseChildService';
+        } else {
+          document.getElementById('statDns').innerText = 'Checking protection...';
+          document.getElementById('statService').innerText = 'SafeBrowseChildService';
+          fetchAsyncDiagnostics();
         }
 
         // Render view-only status accounts table
@@ -1983,6 +2028,20 @@ export class GuiServer {
       }
     }
 
+    async function fetchAsyncDiagnostics() {
+      try {
+        const res = await fetch('/api/check-protection');
+        if (res.ok) {
+          const data = await res.json();
+          const sys = data.status;
+          if (sys && sys.dnsEnforced !== undefined) {
+            const el = document.getElementById('statDns');
+            if (el) el.innerText = sys.dnsEnforced ? '127.0.0.1 (Enforced)' : 'Inactive';
+          }
+        }
+      } catch {}
+    }
+
     async function checkProtectionDiagnostics() {
       showAlert('Running SafeBrowse protection diagnostics...', false);
       try {
@@ -2053,12 +2112,39 @@ export class GuiServer {
         if (loadingCopy) loadingCopy.textContent = "Please wait while SafeBrowse verifies this computer's connection, account mappings and protection status.";
       }
 
+      // 1. Instant service availability check via dedicated lightweight /api/health endpoint (P0-8)
+      let serviceAlive = false;
+      for (let h = 0; h < 3; h++) {
+        try {
+          const hCtrl = new AbortController();
+          const hTimeout = setTimeout(() => hCtrl.abort(), 2000);
+          const hRes = await fetch('/api/health', { cache: 'no-store', signal: hCtrl.signal });
+          clearTimeout(hTimeout);
+          if (hRes.ok) {
+            serviceAlive = true;
+            break;
+          }
+        } catch {}
+        if (!serviceAlive && h < 2) {
+          await new Promise(r => setTimeout(r, 300));
+        }
+      }
+
+      // 2. Fast Path: If service is alive and device was known to be paired, immediately show status screen!
+      // Diagnostics run asynchronously and will not block opening the UI or flash Connect Computer.
+      if (serviceAlive && wasPairedLocally) {
+        appState.isPaired = true;
+        showScreen('screenStatus');
+        loadStatusScreen(true);
+        return;
+      }
+
       let authoritativeUnpairedResponses = 0;
 
       for (let attempt = 0; attempt < 6; attempt++) {
         try {
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 2500);
+          const timeoutId = setTimeout(() => controller.abort(), 4000);
           const res = await fetch('/api/status', { cache: 'no-store', signal: controller.signal });
           clearTimeout(timeoutId);
 
@@ -2085,7 +2171,7 @@ export class GuiServer {
         await new Promise(resolve => setTimeout(resolve, 500));
       }
 
-      if (wasPairedLocally) {
+      if (wasPairedLocally || serviceAlive) {
         appState.isPaired = true;
         showScreen('screenStatus');
         return;

@@ -129,19 +129,29 @@ if ($workerProcs) {
 }
 
 # 5. Verify Localhost GUI Server (http://127.0.0.1:8885)
-Write-Host "`n[5/5] Verifying http://127.0.0.1:8885 HTTP Endpoint..." -ForegroundColor Yellow
+Write-Host "`n[5/5] Verifying http://127.0.0.1:8885 HTTP Endpoints..." -ForegroundColor Yellow
 try {
+    # Check dedicated lightweight health endpoint
+    $healthRes = Invoke-WebRequest -Uri "http://127.0.0.1:8885/api/health" -UseBasicParsing -TimeoutSec 5
+    if ($healthRes.StatusCode -eq 200) {
+        Write-Host "  [OK] 127.0.0.1:8885/api/health responded with HTTP 200 OK" -ForegroundColor Green
+        Write-Host "  Health Payload: $($healthRes.Content.Trim())"
+    } else {
+        Write-Host "  [FAIL] 127.0.0.1:8885/api/health responded with HTTP $($healthRes.StatusCode)" -ForegroundColor Red
+        $passed = $false
+    }
+
     $res = Invoke-WebRequest -Uri "http://127.0.0.1:8885/api/status" -UseBasicParsing -TimeoutSec 15
     if ($res.StatusCode -eq 200) {
-        Write-Host "  [OK] 127.0.0.1:8885 responded with HTTP 200 OK" -ForegroundColor Green
+        Write-Host "  [OK] 127.0.0.1:8885/api/status responded with HTTP 200 OK" -ForegroundColor Green
         $preview = if ($res.Content.Length -gt 120) { $res.Content.Substring(0, 120) + "..." } else { $res.Content }
-        Write-Host "  Payload: $preview"
+        Write-Host "  Status Payload: $preview"
     } else {
-        Write-Host "  [FAIL] 127.0.0.1:8885 responded with HTTP $($res.StatusCode)" -ForegroundColor Red
+        Write-Host "  [FAIL] 127.0.0.1:8885/api/status responded with HTTP $($res.StatusCode)" -ForegroundColor Red
         $passed = $false
     }
 } catch {
-    Write-Host "  [FAIL] Failed to connect to http://127.0.0.1:8885/api/status : $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "  [FAIL] Failed to connect to http://127.0.0.1:8885 : $($_.Exception.Message)" -ForegroundColor Red
     $passed = $false
 }
 

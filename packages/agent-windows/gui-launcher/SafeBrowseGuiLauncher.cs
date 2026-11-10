@@ -20,22 +20,30 @@ using System.Windows.Forms;
 [assembly: AssemblyCulture("")]
 [assembly: ComVisible(false)]
 [assembly: Guid("6F2A93B4-C5D6-7E8F-9012-3456789ABCDE")]
-[assembly: AssemblyVersion("1.0.4.12")]
-[assembly: AssemblyFileVersion("1.0.4.12")]
-[assembly: AssemblyInformationalVersion("1.0.4.12")]
+[assembly: AssemblyVersion("1.0.4.13")]
+[assembly: AssemblyFileVersion("1.0.4.13")]
+[assembly: AssemblyInformationalVersion("1.0.4.13")]
 
 namespace SafeBrowse.GuiLauncher
 {
+    public enum ServiceState
+    {
+        GuiServerReady,
+        ServiceStarting,
+        ServiceUnavailable
+    }
+
     /// <summary>
     /// Conventional Windows GUI Host Application for SafeBrowse Family Protection.
     /// Standard Windows Forms architecture (/target:winexe) with complete PE metadata.
-    /// Connects to SafeBrowseChildService on localhost:8885 and launches the application
-    /// window using standard Windows Shell execution. Zero hidden process spawning.
+    /// Uses lightweight /api/health probe on localhost:8885 to verify GUI readiness
+    /// without blocking on full system/network diagnostics. Zero hidden process spawning.
     /// </summary>
     public static class Program
     {
         public const string GuiUrl = "http://127.0.0.1:8885";
-        public const string StatusEndpoint = "http://127.0.0.1:8885/api/status";
+        public const string HealthEndpoint = "http://127.0.0.1:8885/api/health";
+        public const string StatusEndpoint = "http://127.0.0.1:8885/api/health"; // Dedicated lightweight health check
         public const string ServiceName = "SafeBrowseChildService";
 
         [STAThread]
@@ -51,13 +59,19 @@ namespace SafeBrowse.GuiLauncher
             {
                 if (!createdNew)
                 {
-                    // Existing instance active or launching; trigger browser window and exit
-                    LaunchBrowserWindow(GuiUrl);
+                    // Existing instance active or launching. First verify /api/health.
+                    // If healthy: open/focus GUI. If starting: show connecting UI.
+                    if (IsServerResponding(HealthEndpoint, 2000))
+                    {
+                        LaunchBrowserWindow(GuiUrl);
+                        return;
+                    }
+                    Application.Run(new SafeBrowseConnectingForm());
                     return;
                 }
 
-                // 2. Fast Path: If SafeBrowseChildService is already serving localhost:8885, open browser immediately
-                if (IsServerResponding(StatusEndpoint))
+                // 2. Fast Path: If SafeBrowseChildService is already serving localhost:8885 /api/health, open browser immediately
+                if (IsServerResponding(HealthEndpoint, 2000))
                 {
                     LaunchBrowserWindow(GuiUrl);
                     return;
@@ -66,12 +80,12 @@ namespace SafeBrowse.GuiLauncher
                 // 3. Service Verification: Ensure SafeBrowseChildService is running
                 EnsureServiceRunning();
 
-                // Poll up to 3 seconds for service endpoint readiness
+                // Poll boundedly (up to 3 seconds) for lightweight /api/health readiness
                 bool serverReady = false;
                 for (int i = 0; i < 15; i++)
                 {
                     Thread.Sleep(200);
-                    if (IsServerResponding(StatusEndpoint))
+                    if (IsServerResponding(HealthEndpoint, 1500))
                     {
                         serverReady = true;
                         break;
@@ -89,14 +103,14 @@ namespace SafeBrowse.GuiLauncher
             }
         }
 
-        public static bool IsServerResponding(string endpoint)
+        public static bool IsServerResponding(string endpoint, int timeoutMs = 2000)
         {
             try
             {
                 HttpWebRequest request = (HttpWebRequest)WebRequest.Create(endpoint);
                 request.Method = "GET";
-                request.Timeout = 800;
-                request.ReadWriteTimeout = 800;
+                request.Timeout = timeoutMs;
+                request.ReadWriteTimeout = timeoutMs;
                 using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
                 {
                     return response.StatusCode == HttpStatusCode.OK;
@@ -106,6 +120,38 @@ namespace SafeBrowse.GuiLauncher
             {
                 return false;
             }
+        }
+
+        public static ServiceState QueryServiceState()
+        {
+            if (IsServerResponding(HealthEndpoint, 2000))
+            {
+                return ServiceState.GuiServerReady;
+            }
+
+            try
+            {
+                using (ServiceController sc = new ServiceController(ServiceName))
+                {
+                    if (sc.Status == ServiceControllerStatus.Running || sc.Status == ServiceControllerStatus.StartPending)
+                    {
+                        return ServiceState.ServiceStarting;
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                if (Process.GetProcessesByName("SafeBrowseChild-Pilot").Length > 0 ||
+                    Process.GetProcessesByName("SafeBrowseServiceHost").Length > 0)
+                {
+                    return ServiceState.ServiceStarting;
+                }
+            }
+            catch { }
+
+            return ServiceState.ServiceUnavailable;
         }
 
         public static void EnsureServiceRunning()
@@ -174,6 +220,7 @@ namespace SafeBrowse.GuiLauncher
     /// <summary>
     /// Native Windows Forms status window displayed when SafeBrowseChildService
     /// is initializing or requires user attention.
+    /// Distinguishes SERVICE_STARTING, GUI_SERVER_READY, and SERVICE_UNAVAILABLE.
     /// </summary>
     public class SafeBrowseConnectingForm : Form
     {
@@ -269,7 +316,9 @@ namespace SafeBrowse.GuiLauncher
         private void PollTick()
         {
             _elapsedSeconds++;
-            if (Program.IsServerResponding(Program.StatusEndpoint))
+            ServiceState state = Program.QueryServiceState();
+
+            if (state == ServiceState.GuiServerReady)
             {
                 _pollTimer.Stop();
                 Program.LaunchBrowserWindow(Program.GuiUrl);
@@ -277,7 +326,13 @@ namespace SafeBrowse.GuiLauncher
                 return;
             }
 
-            if (_elapsedSeconds >= 8)
+            if (state == ServiceState.ServiceStarting)
+            {
+                _statusLabel.Text = "SafeBrowse Child Protection Service is starting up. Please wait...";
+                _statusLabel.ForeColor = Color.FromArgb(148, 163, 184);
+                _progressBar.Style = ProgressBarStyle.Marquee;
+            }
+            else if (_elapsedSeconds >= 10 && state == ServiceState.ServiceUnavailable)
             {
                 _progressBar.Style = ProgressBarStyle.Blocks;
                 _progressBar.Value = 0;
@@ -293,7 +348,7 @@ namespace SafeBrowse.GuiLauncher
             _statusLabel.Text = "Connecting to SafeBrowse Child Protection Service...";
             _statusLabel.ForeColor = Color.FromArgb(148, 163, 184);
             Program.EnsureServiceRunning();
-            if (Program.IsServerResponding(Program.StatusEndpoint))
+            if (Program.IsServerResponding(Program.HealthEndpoint, 2000))
             {
                 _pollTimer.Stop();
                 Program.LaunchBrowserWindow(Program.GuiUrl);
