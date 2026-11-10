@@ -1,7 +1,7 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <?ifndef ProductVersion?>
-  <?define ProductVersion = "1.0.4.11" ?>
+  <?define ProductVersion = "1.0.4.12" ?>
   <?endif?>
   <Package
       Name="SafeBrowse Child Pilot"
@@ -10,7 +10,7 @@
       UpgradeCode="B7C5E643-81D2-4A7F-991A-7110C99AA511"
       Scope="perMachine">
 
-    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MajorUpgrade Schedule="afterInstallInitialize" AllowSameVersionUpgrades="no" DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <!-- 1. Program Files (64-bit) Structure -->
@@ -80,6 +80,7 @@
           <Component Id="DnsScripts" Guid="7E3E1AC6-F493-482C-A154-A5C678E39A55" Bitness="always64">
             <File Id="ConfigureDnsPs1" Source="$(var.SourceDir)\scripts\configure-dns.ps1" KeyPath="yes" />
             <File Id="RestoreDnsPs1" Source="$(var.SourceDir)\scripts\restore-dns.ps1" />
+            <File Id="VerifyIntegrityPs1" Source="$(var.SourceDir)\scripts\verify-install-integrity.ps1" />
           </Component>
         </Directory>
       </Directory>

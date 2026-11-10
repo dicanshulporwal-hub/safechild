@@ -299,12 +299,12 @@ describe('SafeBrowse Windows Pilot — Inline Script Syntax & GUI Launcher Suite
         `${path.basename(f.path)} must declare copyright notice`
       );
       assert.ok(
-        content.includes('AssemblyFileVersion("1.0.4.11")'),
-        `${path.basename(f.path)} must declare AssemblyFileVersion("1.0.4.11")`
+        content.includes('AssemblyFileVersion("1.0.4.12")'),
+        `${path.basename(f.path)} must declare AssemblyFileVersion("1.0.4.12")`
       );
       assert.ok(
-        content.includes('AssemblyVersion("1.0.4.11")'),
-        `${path.basename(f.path)} must declare AssemblyVersion("1.0.4.11")`
+        content.includes('AssemblyVersion("1.0.4.12")'),
+        `${path.basename(f.path)} must declare AssemblyVersion("1.0.4.12")`
       );
     }
   });
@@ -324,5 +324,38 @@ describe('SafeBrowse Windows Pilot — Inline Script Syntax & GUI Launcher Suite
       content.includes('await guiServer.stop()'),
       'gracefulShutdown must stop guiServer cleanly'
     );
+  });
+
+  // =========================================================================
+  // 8. MSI Upgrade Lifecycle & Post-Install Integrity Verification (P0-7)
+  // =========================================================================
+  it('12. SafeBrowseChild-Pilot.wxs enforces monotonic upgrade and integrity script exists', () => {
+    const wxsPath = path.resolve(__dirname, '../wix/SafeBrowseChild-Pilot.wxs');
+    assert.ok(fs.existsSync(wxsPath), 'SafeBrowseChild-Pilot.wxs must exist');
+    const wxsContent = fs.readFileSync(wxsPath, 'utf8');
+
+    assert.ok(
+      wxsContent.includes('<?define ProductVersion = "1.0.4.12" ?>'),
+      'SafeBrowseChild-Pilot.wxs must declare ProductVersion 1.0.4.12'
+    );
+    assert.ok(
+      wxsContent.includes('Schedule="afterInstallInitialize"'),
+      'MajorUpgrade must schedule afterInstallInitialize to eliminate file removal race on upgrade'
+    );
+    assert.ok(
+      wxsContent.includes('AllowSameVersionUpgrades="no"'),
+      'MajorUpgrade must reject same-version upgrades (AllowSameVersionUpgrades="no") to enforce monotonic versioning'
+    );
+    assert.ok(
+      wxsContent.includes('verify-install-integrity.ps1'),
+      'WiX file must package verify-install-integrity.ps1 into scripts directory'
+    );
+
+    const scriptPath = path.resolve(__dirname, '../scripts/verify-install-integrity.ps1');
+    assert.ok(fs.existsSync(scriptPath), 'verify-install-integrity.ps1 must exist');
+    const scriptContent = fs.readFileSync(scriptPath, 'utf8');
+    assert.ok(scriptContent.includes('SafeBrowseChild-Pilot.exe'), 'Integrity script must check SafeBrowseChild-Pilot.exe');
+    assert.ok(scriptContent.includes('http://127.0.0.1:8885/api/status'), 'Integrity script must probe localhost:8885');
+    assert.ok(scriptContent.includes('SafeBrowseChildService'), 'Integrity script must verify SafeBrowseChildService');
   });
 });

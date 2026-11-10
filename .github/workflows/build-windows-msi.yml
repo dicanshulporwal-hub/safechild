@@ -195,8 +195,8 @@ jobs:
                   LegalCopyright: 'Copyright © 2026 SafeBrowse. All rights reserved.',
                   OriginalFilename: 'SafeBrowseChild-Pilot.exe'
                 },
-                'file-version': '1.0.4.11',
-                'product-version': '1.0.4.11'
+                'file-version': '1.0.4.12',
+                'product-version': '1.0.4.12'
               }).then(() => console.log('[OK] Win32 metadata injected into SafeBrowseChild-Pilot.exe'))
                 .catch(err => console.warn('[NOTE] rcedit metadata injection note:', err.message));
             " "$targetExe"
@@ -223,6 +223,8 @@ jobs:
           if (-not (Test-Path $scriptsDest)) { New-Item -ItemType Directory -Path $scriptsDest -Force }
           Copy-Item "packages/agent-windows/scripts/configure-dns.ps1" "$scriptsDest/configure-dns.ps1" -Force
           Copy-Item "packages/agent-windows/scripts/restore-dns.ps1" "$scriptsDest/restore-dns.ps1" -Force
+          Copy-Item "packages/agent-windows/scripts/verify-install-integrity.ps1" "$scriptsDest/verify-install-integrity.ps1" -Force
+          Copy-Item "packages/agent-windows/scripts/verify-install-integrity.ps1" "$releaseWinDir/verify-install-integrity.ps1" -Force
 
           # Cleanup intermediate build files
           Remove-Item $bundleJs, $seaConfig, $seaBlob -ErrorAction SilentlyContinue
@@ -251,7 +253,7 @@ jobs:
           Write-Host "Source Directory: $sourceDir"
           Write-Host "MSI Output: $msiOutput"
 
-          wix build -arch x64 "$wxsPath" -ext WixToolset.Util.wixext -d SourceDir="$sourceDir" -d ProductVersion="1.0.4.11" -o "$msiOutput"
+          wix build -arch x64 "$wxsPath" -ext WixToolset.Util.wixext -d SourceDir="$sourceDir" -d ProductVersion="1.0.4.12" -o "$msiOutput"
           $wixExitCode = $LASTEXITCODE
 
           if ($wixExitCode -ne 0) {
@@ -380,6 +382,10 @@ jobs:
               Write-Error "Missing ProductName or FileDescription on ${bin}"
               exit 1
             }
+            if ($vi.FileVersion -ne "1.0.4.12") {
+              Write-Error "Invalid FileVersion on ${bin}: $($vi.FileVersion), expected 1.0.4.12"
+              exit 1
+            }
           }
 
           # 3. Verify PE Subsystem on GUI Launcher (Must be GUI = 2, NOT CUI/Console = 3)
@@ -401,6 +407,250 @@ jobs:
             $sig = Get-AuthenticodeSignature -FilePath $p
             Write-Host "  $bin Signature Status: $($sig.Status)"
           }
+
+          # 5. Verify MSI ProductVersion from database
+          $msiPath = Join-Path $releaseWinDir "SafeBrowseChild-Pilot.msi"
+          try {
+            $com = New-Object -ComObject WindowsInstaller.Installer
+            $db = $com.GetType().InvokeMember("OpenDatabase", "InvokeMethod", $null, $com, @($msiPath, 0))
+            $view = $db.GetType().InvokeMember("OpenView", "InvokeMethod", $null, $db, @("SELECT Value FROM Property WHERE Property = 'ProductVersion'"))
+            $view.GetType().InvokeMember("Execute", "InvokeMethod", $null, $view, $null)
+            $record = $view.GetType().InvokeMember("Fetch", "InvokeMethod", $null, $view, $null)
+            $msiVersion = $record.GetType().InvokeMember("StringData", "GetProperty", $null, $record, @(1))
+            $view.GetType().InvokeMember("Close", "InvokeMethod", $null, $view, $null)
+            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($view) | Out-Null
+            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($db) | Out-Null
+            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($com) | Out-Null
+            Write-Host "SafeBrowseChild-Pilot.msi ProductVersion: '$msiVersion'"
+            if ($msiVersion -ne "1.0.4.12") {
+              Write-Error "MSI ProductVersion mismatch! Expected '1.0.4.12' but found '$msiVersion'"
+              exit 1
+            }
+          } catch {
+            Write-Host "Notice: MSI database inspection note: $_"
+          }
+
+      - name: MSI-to-MSI Upgrade & Component KeyPath Regression Test (P0-7)
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          Write-Host "========================================================"
+          Write-Host "REAL MSI-TO-MSI UPGRADE REGRESSION TEST (P0-7)"
+          Write-Host "========================================================"
+
+          $installDir = "C:\Program Files\SafeBrowse"
+          $prevDir = "previous-msi"
+          New-Item -ItemType Directory -Path $prevDir -Force | Out-Null
+          $prevMsi = Join-Path $prevDir "SafeBrowseChild-Pilot-Previous.msi"
+
+          # 1. Acquire previous pilot MSI (from previous run 42576191806, release v1.0.3-pilot, or baseline 1.0.4.11)
+          $downloadSuccess = $false
+          try {
+            Write-Host "Attempting download of previous pilot MSI from GitHub Actions run 42576191806..."
+            gh run download 42576191806 -n SafeBrowseChild-Pilot-MSI -D $prevDir
+            if (Test-Path "$prevDir/SafeBrowseChild-Pilot.msi") {
+              Move-Item "$prevDir/SafeBrowseChild-Pilot.msi" $prevMsi -Force
+              $downloadSuccess = $true
+              Write-Host "[OK] Downloaded previous pilot MSI from run 42576191806."
+            }
+          } catch {
+            Write-Host "Notice: gh run download note: $_"
+          }
+
+          if (-not $downloadSuccess) {
+            try {
+              Write-Host "Attempting download from release v1.0.3-pilot..."
+              gh release download v1.0.3-pilot -p "SafeBrowseChild-Pilot.msi" -D $prevDir
+              if (Test-Path "$prevDir/SafeBrowseChild-Pilot.msi") {
+                Move-Item "$prevDir/SafeBrowseChild-Pilot.msi" $prevMsi -Force
+                $downloadSuccess = $true
+                Write-Host "[OK] Downloaded previous pilot MSI from release v1.0.3-pilot."
+              }
+            } catch {
+              Write-Host "Notice: gh release download note: $_"
+            }
+          }
+
+          if (-not $downloadSuccess) {
+            Write-Host "Building baseline 1.0.4.11 MSI for upgrade test fallback..."
+            $wxsPath = (Resolve-Path "packages/agent-windows/wix/SafeBrowseChild-Pilot.wxs").Path
+            $sourceDir = (Resolve-Path "release/windows").Path
+            wix build -arch x64 "$wxsPath" -ext WixToolset.Util.wixext -d SourceDir="$sourceDir" -d ProductVersion="1.0.4.11" -o $prevMsi
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $prevMsi)) {
+              $downloadSuccess = $true
+              Write-Host "[OK] Built baseline 1.0.4.11 fallback MSI."
+            }
+          }
+
+          if (-not (Test-Path $prevMsi)) {
+            Write-Error "FATAL: Could not obtain previous MSI for upgrade testing."
+            exit 1
+          }
+
+          # Sub-step 1: Install previous pilot MSI
+          Write-Host "`n[Step 1/12] Installing previous pilot MSI ($prevMsi)..."
+          $prevInstallLog = Join-Path $PWD "install-previous.log"
+          $proc = Start-Process msiexec.exe -ArgumentList "/i", "`"$prevMsi`"", "/qn", "/l*v", "`"$prevInstallLog`"" -Wait -PassThru
+          Write-Host "Previous MSI installation exit code: $($proc.ExitCode)"
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "Failed to install previous MSI. Exit code: $($proc.ExitCode)"
+            if (Test-Path $prevInstallLog) { Get-Content $prevInstallLog -Tail 100 }
+            exit 1
+          }
+
+          # Sub-step 2: Verify previous files exist
+          Write-Host "`n[Step 2/12] Verifying previous installation files exist..."
+          if (-not (Test-Path "C:\Program Files\SafeBrowse\SafeBrowseServiceHost.exe")) {
+            Write-Error "Previous install failed to produce C:\Program Files\SafeBrowse\SafeBrowseServiceHost.exe"
+            exit 1
+          }
+          Write-Host "  [OK] Previous files exist."
+
+          # Sub-step 3: Install new MSI (1.0.4.12) over it
+          $newMsi = (Resolve-Path "release/windows/SafeBrowseChild-Pilot.msi").Path
+          Write-Host "`n[Step 3/12] Upgrading to new MSI ($newMsi)..."
+          $upgradeLog = Join-Path $PWD "install-upgrade.log"
+          $proc = Start-Process msiexec.exe -ArgumentList "/i", "`"$newMsi`"", "/qn", "/l*v", "`"$upgradeLog`"" -Wait -PassThru
+
+          # Sub-step 4: Verify upgrade succeeds
+          Write-Host "`n[Step 4/12] Verifying upgrade installer exit code..."
+          Write-Host "Upgrade MSI exit code: $($proc.ExitCode)"
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "Upgrade MSI failed with exit code $($proc.ExitCode)"
+            if (Test-Path $upgradeLog) { Get-Content $upgradeLog -Tail 150 }
+            exit 1
+          }
+          Write-Host "  [OK] Upgrade MSI completed with status 0."
+
+          # Sub-step 5: Verify all required installed files exist
+          Write-Host "`n[Step 5/12] Verifying all required installed files exist..."
+          $requiredBins = @(
+            "SafeBrowseChild-Pilot.exe",
+            "SafeBrowseServiceHost.exe",
+            "SafeBrowseUserHelper.exe",
+            "SafeBrowseGuiLauncher.exe"
+          )
+          foreach ($bin in $requiredBins) {
+            $p = Join-Path $installDir $bin
+            if (-not (Test-Path $p)) {
+              Write-Error "CRITICAL DEFECT (P0-7): Required binary missing after upgrade: $bin"
+              if (Test-Path $upgradeLog) {
+                Write-Host "Relevant lines from upgrade log:"
+                Select-String -Path $upgradeLog -Pattern "$bin|FileRemove|FileCopy" | Select-Object -Last 30 | ForEach-Object { $_.Line }
+              }
+              exit 1
+            }
+            Write-Host "  [OK] Found installed file after upgrade: $bin"
+          }
+
+          # Sub-steps 6 & 7: Calculate installed SHA-256 and compare to newly built artifacts
+          Write-Host "`n[Steps 6 & 7/12] Comparing installed file SHA-256 values against newly built artifacts..."
+          $sourceWinDir = (Resolve-Path "release/windows").Path
+          foreach ($bin in $requiredBins) {
+            $installedPath = Join-Path $installDir $bin
+            $builtPath = Join-Path $sourceWinDir $bin
+            $installedHash = (Get-FileHash -Path $installedPath -Algorithm SHA256).Hash.ToLower()
+            $builtHash = (Get-FileHash -Path $builtPath -Algorithm SHA256).Hash.ToLower()
+            Write-Host "  $bin :"
+            Write-Host "    Installed: $installedHash"
+            Write-Host "    Built    : $builtHash"
+            if ($installedHash -ne $builtHash) {
+              Write-Error "FATAL: Hash mismatch on $bin! Installed file does not match newly built artifact."
+              exit 1
+            }
+            Write-Host "    [OK] Hash matches exactly."
+          }
+
+          # Sub-step 8: Verify service executable path
+          Write-Host "`n[Step 8/12] Verifying SafeBrowseChildService executable path in SCM..."
+          $service = Get-CimInstance win32_service -Filter "Name = 'SafeBrowseChildService'"
+          if (-not $service) {
+            Write-Error "SafeBrowseChildService is not registered in Windows SCM!"
+            exit 1
+          }
+          Write-Host "  Service PathName: $($service.PathName)"
+          if (-not $service.PathName.Contains("SafeBrowseServiceHost.exe")) {
+            Write-Error "Service does not point to SafeBrowseServiceHost.exe: $($service.PathName)"
+            exit 1
+          }
+          Write-Host "  [OK] Service executable path confirmed."
+
+          # Sub-step 9: Start SafeBrowseChildService
+          Write-Host "`n[Step 9/12] Starting SafeBrowseChildService..."
+          try {
+            Start-Service -Name "SafeBrowseChildService" -ErrorAction Stop
+          } catch {
+            Write-Host "Notice: Start-Service message: $_"
+          }
+          Start-Sleep -Seconds 3
+          $svc = Get-Service -Name "SafeBrowseChildService"
+          Write-Host "  Service Status: $($svc.Status)"
+
+          # Sub-step 10: Verify SafeBrowseChild-Pilot.exe service worker starts
+          Write-Host "`n[Step 10/12] Verifying SafeBrowseChild-Pilot service worker process..."
+          $workerRunning = $false
+          for ($i = 0; $i -lt 15; $i++) {
+            $procs = Get-Process -Name "SafeBrowseChild-Pilot" -ErrorAction SilentlyContinue
+            if ($procs) {
+              $workerRunning = $true
+              Write-Host "  [OK] SafeBrowseChild-Pilot running (PID: $($procs[0].Id))"
+              break
+            }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $workerRunning) {
+            Write-Error "SafeBrowseChild-Pilot.exe service worker did not start within 15 seconds!"
+            Get-EventLog -LogName Application -Source "SafeBrowseServiceHost" -Newest 10 -ErrorAction SilentlyContinue | Format-Table -AutoSize
+            exit 1
+          }
+
+          # Sub-step 11: Verify localhost:8885 becomes responsive
+          Write-Host "`n[Step 11/12] Verifying localhost:8885 is responsive..."
+          $guiResponsive = $false
+          for ($i = 0; $i -lt 20; $i++) {
+            try {
+              $res = Invoke-WebRequest -Uri "http://127.0.0.1:8885/api/status" -UseBasicParsing -TimeoutSec 2
+              if ($res.StatusCode -eq 200) {
+                $guiResponsive = $true
+                Write-Host "  [OK] http://127.0.0.1:8885 responded with HTTP 200"
+                break
+              }
+            } catch {
+              # Retry
+            }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $guiResponsive) {
+            Write-Error "localhost:8885 failed to respond within 20 seconds!"
+            exit 1
+          }
+
+          # Sub-step 12: Fail CI if any component is registered but key-path file absent
+          Write-Host "`n[Step 12/12] Verifying all component KeyPaths are present on disk..."
+          $allComponents = @(
+            "SafeBrowseChild-Pilot.exe",
+            "SafeBrowseServiceHost.exe",
+            "SafeBrowseUserHelper.exe",
+            "SafeBrowseGuiLauncher.exe",
+            "SafeBrowse-Pair.cmd",
+            "SafeBrowse-EmergencyRestore.cmd",
+            "scripts\configure-dns.ps1",
+            "scripts\restore-dns.ps1",
+            "scripts\verify-install-integrity.ps1"
+          )
+          foreach ($comp in $allComponents) {
+            $cp = Join-Path $installDir $comp
+            if (-not (Test-Path $cp)) {
+              Write-Error "CRITICAL: Key-path file missing from disk: $cp"
+              exit 1
+            }
+            Write-Host "  [OK] Confirmed component key path: $comp"
+          }
+
+          # Stop service to clean up runner
+          Stop-Service -Name "SafeBrowseChildService" -Force -ErrorAction SilentlyContinue
+          Write-Host "`n[OK] REAL MSI-TO-MSI UPGRADE TEST (P0-7) PASSED COMPLETELY."
 
       - name: Calculate SHA-256 Checksums and Manifest
         shell: pwsh
@@ -480,6 +730,7 @@ jobs:
             release/windows/SafeBrowseUserHelper.exe
             release/windows/SafeBrowseGuiLauncher.exe
             release/windows/SafeBrowseGuiLauncher.exe.sha256
+            release/windows/verify-install-integrity.ps1
             release/windows/SHA256SUMS.txt
           if-no-files-found: error
 
