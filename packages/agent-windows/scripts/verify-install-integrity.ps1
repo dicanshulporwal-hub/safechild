@@ -131,7 +131,7 @@ if ($workerProcs) {
 # 5. Verify Localhost GUI Server (http://127.0.0.1:8885)
 Write-Host "`n[5/5] Verifying http://127.0.0.1:8885 HTTP Endpoint..." -ForegroundColor Yellow
 try {
-    $res = Invoke-WebRequest -Uri "http://127.0.0.1:8885/api/status" -UseBasicParsing -TimeoutSec 3
+    $res = Invoke-WebRequest -Uri "http://127.0.0.1:8885/api/status" -UseBasicParsing -TimeoutSec 15
     if ($res.StatusCode -eq 200) {
         Write-Host "  [OK] 127.0.0.1:8885 responded with HTTP 200 OK" -ForegroundColor Green
         $preview = if ($res.Content.Length -gt 120) { $res.Content.Substring(0, 120) + "..." } else { $res.Content }

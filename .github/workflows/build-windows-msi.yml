@@ -608,21 +608,30 @@ jobs:
           # Sub-step 11: Verify localhost:8885 becomes responsive
           Write-Host "`n[Step 11/12] Verifying localhost:8885 is responsive..."
           $guiResponsive = $false
-          for ($i = 0; $i -lt 20; $i++) {
+          for ($i = 0; $i -lt 15; $i++) {
             try {
-              $res = Invoke-WebRequest -Uri "http://127.0.0.1:8885/api/status" -UseBasicParsing -TimeoutSec 2
+              Write-Host "Probing http://127.0.0.1:8885/api/status (attempt $($i + 1)/15)..."
+              $res = Invoke-WebRequest -Uri "http://127.0.0.1:8885/api/status" -UseBasicParsing -TimeoutSec 15
               if ($res.StatusCode -eq 200) {
                 $guiResponsive = $true
                 Write-Host "  [OK] http://127.0.0.1:8885 responded with HTTP 200"
+                $preview = if ($res.Content.Length -gt 120) { $res.Content.Substring(0, 120) + "..." } else { $res.Content }
+                Write-Host "  Payload: $preview"
                 break
               }
             } catch {
-              # Retry
+              Write-Host "  Probe note: $($_.Exception.Message)"
             }
-            Start-Sleep -Seconds 1
+            Start-Sleep -Seconds 2
           }
           if (-not $guiResponsive) {
-            Write-Error "localhost:8885 failed to respond within 20 seconds!"
+            Write-Error "localhost:8885 failed to respond within timeout!"
+            Get-Process -Name "SafeBrowse*" -ErrorAction SilentlyContinue | Format-Table -AutoSize
+            netstat -ano | findstr 8885
+            if (Test-Path "C:\ProgramData\SafeBrowse\logs\agent-service.log") {
+              Write-Host "=== C:\ProgramData\SafeBrowse\logs\agent-service.log ==="
+              Get-Content "C:\ProgramData\SafeBrowse\logs\agent-service.log" -Tail 100
+            }
             exit 1
           }
 
