@@ -347,6 +347,14 @@ describe('SafeBrowse Windows Pilot — Inline Script Syntax & GUI Launcher Suite
       'MajorUpgrade must reject same-version upgrades (AllowSameVersionUpgrades="no") to enforce monotonic versioning'
     );
     assert.ok(
+      wxsContent.includes('<Property Id="REINSTALLMODE" Value="amus" />'),
+      'SafeBrowseChild-Pilot.wxs must set REINSTALLMODE to "amus"'
+    );
+    assert.ok(
+      wxsContent.includes('DefaultVersion="$(var.ProductVersion)"'),
+      'Executable files in WiX must include DefaultVersion="$(var.ProductVersion)"'
+    );
+    assert.ok(
       wxsContent.includes('verify-install-integrity.ps1'),
       'WiX file must package verify-install-integrity.ps1 into scripts directory'
     );

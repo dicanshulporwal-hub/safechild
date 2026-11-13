@@ -11,6 +11,7 @@
       Scope="perMachine">
 
     <MajorUpgrade Schedule="afterInstallInitialize" AllowSameVersionUpgrades="no" DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <Property Id="REINSTALLMODE" Value="amus" />
     <MediaTemplate EmbedCab="yes" />
 
     <!-- 1. Program Files (64-bit) Structure -->
@@ -25,12 +26,12 @@
             This makes a normal major upgrade deterministic without requiring /fa.
           -->
           <RemoveFile Id="RemoveLegacySafeBrowseChildExeOnInstall" Name="SafeBrowseChild-Pilot.exe" On="install" />
-          <File Id="SafeBrowseChildExe" Source="$(var.SourceDir)\SafeBrowseChild-Pilot.exe" KeyPath="yes" />
+          <File Id="SafeBrowseChildExe" Source="$(var.SourceDir)\SafeBrowseChild-Pilot.exe" KeyPath="yes" DefaultVersion="$(var.ProductVersion)" />
         </Component>
 
         <!-- Windows Service Host (Native SCM wrapper) -->
         <Component Id="ServiceHostExecutable" Guid="4D9E71F2-92A3-483B-A70E-9218D6C4B922" Bitness="always64">
-          <File Id="ServiceHostExe" Source="$(var.SourceDir)\SafeBrowseServiceHost.exe" KeyPath="yes" />
+          <File Id="ServiceHostExe" Source="$(var.SourceDir)\SafeBrowseServiceHost.exe" KeyPath="yes" DefaultVersion="$(var.ProductVersion)" />
           <ServiceInstall
               Id="InstallSafeBrowseService"
               Name="SafeBrowseChildService"
@@ -58,12 +59,12 @@
 
         <!-- Windowless GUI Launcher (Native WinExe wrapper preventing CMD flash) -->
         <Component Id="GuiLauncherExecutable" Guid="6F2A93B4-C5D6-7E8F-9012-3456789ABCDE" Bitness="always64">
-          <File Id="SafeBrowseGuiLauncherExe" Source="$(var.SourceDir)\SafeBrowseGuiLauncher.exe" KeyPath="yes" />
+          <File Id="SafeBrowseGuiLauncherExe" Source="$(var.SourceDir)\SafeBrowseGuiLauncher.exe" KeyPath="yes" DefaultVersion="$(var.ProductVersion)" />
         </Component>
 
         <!-- User Session Helper (Non-elevated background helper running in interactive user desktop sessions) -->
         <Component Id="UserHelperExecutable" Guid="5E1F82A3-B4C5-6D7E-8F90-123456789ABC" Bitness="always64">
-          <File Id="UserHelperExe" Source="$(var.SourceDir)\SafeBrowseUserHelper.exe" KeyPath="yes" />
+          <File Id="UserHelperExe" Source="$(var.SourceDir)\SafeBrowseUserHelper.exe" KeyPath="yes" DefaultVersion="$(var.ProductVersion)" />
           <RegistryValue
               Root="HKLM"
               Key="Software\Microsoft\Windows\CurrentVersion\Run"

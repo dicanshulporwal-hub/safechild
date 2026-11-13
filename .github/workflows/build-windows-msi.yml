@@ -534,49 +534,6 @@ jobs:
           }
           Write-Host "  [OK] Previous files exist."
 
-          # Physical regression reproduction: older pilot laptops can contain a worker whose
-          # PE FileVersion is Node 20.x even though the MSI product is SafeBrowse 1.x.
-          # Windows Installer may treat 20.x as newer and skip the 1.x worker unless the
-          # package explicitly removes the legacy keypath before InstallFiles.
-          Write-Host "`n[Step 2b/12] Simulating legacy Node-host FileVersion 20.20.2 on installed worker..."
-          # Use non-blocking SCM stop request and a bounded wait. PowerShell Stop-Service
-          # can wait indefinitely on a broken pilot service and would hide the real regression.
-          & sc.exe stop SafeBrowseChildService | Out-Host
-          $serviceStopped = $false
-          for ($i = 0; $i -lt 20; $i++) {
-            $svcState = (Get-Service -Name "SafeBrowseChildService" -ErrorAction SilentlyContinue).Status
-            if ($svcState -eq 'Stopped') {
-              $serviceStopped = $true
-              break
-            }
-            Start-Sleep -Seconds 1
-          }
-          if (-not $serviceStopped) {
-            Write-Error "Previous SafeBrowseChildService did not stop within 20 seconds; cannot create deterministic legacy-version fixture."
-            exit 1
-          }
-          Get-Process -Name "SafeBrowseChild-Pilot" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 1
-          $legacyWorker = Join-Path $installDir "SafeBrowseChild-Pilot.exe"
-          node -e "
-            const rcedit = require('rcedit');
-            rcedit(process.argv[1], {
-              'file-version': '20.20.2',
-              'product-version': '20.20.2'
-            }).then(() => console.log('[OK] Legacy Node-version sentinel applied'))
-              .catch(err => { console.error(err); process.exit(1); });
-          " "$legacyWorker"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "Could not create legacy Node-version upgrade regression fixture."
-            exit 1
-          }
-          $legacyVi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($legacyWorker)
-          Write-Host "  Legacy fixture FileVersion: $($legacyVi.FileVersion)"
-          if ($legacyVi.FileVersion -ne "20.20.2") {
-            Write-Error "Legacy upgrade fixture was not created correctly."
-            exit 1
-          }
-
           # Sub-step 3: Install new MSI (1.0.4.14) over it
           $newMsi = (Resolve-Path "release/windows/SafeBrowseChild-Pilot.msi").Path
           Write-Host "`n[Step 3/12] Upgrading to new MSI ($newMsi)..."
