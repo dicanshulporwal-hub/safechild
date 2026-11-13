@@ -19,6 +19,67 @@ import { parentPinManager, ParentPinManager } from './parent-pin-manager';
 import { normalizePairingCode, CURRENT_WINDOWS_PROTOCOL_VERSION } from '@safebrowse/shared';
 import { blockIpcServer, InteractiveDesktopAction } from './block-ipc';
 
+/**
+ * Sanitizes raw technical error strings (PowerShell, CLIXML, CIM, WMI, stack traces, file paths)
+ * to ensure parents only see clear, friendly, and non-technical error messages. (P0-10)
+ */
+export function sanitizeParentErrorMessage(raw: any): string {
+  if (!raw) return 'An unexpected error occurred. Please try again.';
+  const str = typeof raw === 'string' ? raw : (raw.message || String(raw));
+
+  const isTechnical =
+    str.includes('CLIXML') ||
+    str.includes('Set-DnsClientServerAddress') ||
+    str.includes('Get-DnsClientServerAddress') ||
+    str.includes('Get-NetAdapter') ||
+    str.includes('Get-NetRoute') ||
+    str.includes('MSFT_') ||
+    str.includes('InterfaceIndex') ||
+    str.includes('PowerShell') ||
+    str.includes('powershell') ||
+    str.includes('pwsh') ||
+    str.includes('At line:') ||
+    str.includes('CategoryInfo') ||
+    str.includes('FullyQualifiedErrorId') ||
+    str.includes('EncodedCommand') ||
+    str.includes('trapped at 127.0.0.1') ||
+    str.includes('DNS read-back verification failed') ||
+    str.includes('EACCES') ||
+    str.includes('ECONNREFUSED') ||
+    str.includes('ETIMEDOUT') ||
+    str.includes('WMI') ||
+    str.includes('CIM') ||
+    str.includes('C:\\Program Files') ||
+    str.includes('packages/agent-windows') ||
+    str.includes('Traceback') ||
+    str.includes('Stack trace:');
+
+  if (!isTechnical) {
+    return str;
+  }
+
+  const lower = str.toLowerCase();
+  if (
+    lower.includes('dns') ||
+    lower.includes('interfaceindex') ||
+    lower.includes('network') ||
+    lower.includes('trapped') ||
+    lower.includes('msft_') ||
+    lower.includes('restore')
+  ) {
+    return "SafeBrowse could not safely restore this computer's network settings. No device settings were removed. Please try again.";
+  }
+
+  if (lower.includes('profile') || lower.includes('mapping') || lower.includes('account')) {
+    return "SafeBrowse could not update account protection settings. Please try again.";
+  }
+
+  if (lower.includes('pair') || lower.includes('connect')) {
+    return "SafeBrowse could not connect this computer to your family account. Please check your network connection and try again.";
+  }
+
+  return "An unexpected error occurred while communicating with SafeBrowse. Please try again.";
+}
 
 export class GuiServer {
   private server: http.Server | null = null;
@@ -102,7 +163,7 @@ export class GuiServer {
             JSON.stringify({
               status: 'ok',
               service: 'SafeBrowse',
-              version: '1.0.4.14',
+              version: '1.0.4.15',
             })
           );
           return;
@@ -200,7 +261,7 @@ export class GuiServer {
               res.end(JSON.stringify({ success: true, sessionToken: result.sessionToken }));
             } catch (e: any) {
               res.writeHead(500, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: e.message }));
+              res.end(JSON.stringify({ error: sanitizeParentErrorMessage(e.message) }));
             }
           });
           return;
@@ -229,14 +290,26 @@ export class GuiServer {
               ? 'PROTECTED'
               : 'PARENT_BYPASS';
 
+            const onboardingState = this.configMgr.getOnboardingState();
+            const onboardingReason = this.configMgr.getOnboardingReason();
+            let cloudConnectionStatus: 'HEALTHY_CONNECTED' | 'CLOUD_TEMPORARILY_UNAVAILABLE' | 'DEVICE_TOKEN_REVOKED' | 'LOCAL_ONLY_STALE_STATE' = 'HEALTHY_CONNECTED';
+            if (onboardingState === 'ATTENTION_REQUIRED' && (onboardingReason === 'DEVICE_REVOKED' || onboardingReason === 'DEVICE_NOT_FOUND')) {
+              cloudConnectionStatus = 'DEVICE_TOKEN_REVOKED';
+            } else if (onboardingState === 'ATTENTION_REQUIRED') {
+              cloudConnectionStatus = 'LOCAL_ONLY_STALE_STATE';
+            } else if (pairingStatus === 'CONNECTED_LOCAL') {
+              cloudConnectionStatus = 'CLOUD_TEMPORARILY_UNAVAILABLE';
+            }
+
             if (!isManagementActive) {
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(
                 JSON.stringify({
                   isPaired: isLocallyConfigured,
                   pairingStatus,
-                  onboardingState: this.configMgr.getOnboardingState(),
-                  onboardingReason: this.configMgr.getOnboardingReason(),
+                  cloudConnectionStatus,
+                  onboardingState,
+                  onboardingReason,
                   agentVersion: WINDOWS_AGENT_VERSION,
                   buildCommit: BUILD_COMMIT,
                   config: config
@@ -276,8 +349,9 @@ export class GuiServer {
               JSON.stringify({
                 isPaired: isLocallyConfigured,
                 pairingStatus,
-                onboardingState: this.configMgr.getOnboardingState(),
-                onboardingReason: this.configMgr.getOnboardingReason(),
+                cloudConnectionStatus,
+                onboardingState,
+                onboardingReason,
                 agentVersion: WINDOWS_AGENT_VERSION,
                 buildCommit: BUILD_COMMIT,
                 config: config
@@ -310,7 +384,7 @@ export class GuiServer {
             );
           } catch (e: any) {
             res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: e.message }));
+            res.end(JSON.stringify({ error: sanitizeParentErrorMessage(e.message) }));
           }
           return;
         }
@@ -348,7 +422,7 @@ export class GuiServer {
             res.end(JSON.stringify({ accounts: marked }));
           } catch (e: any) {
             res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: e.message }));
+            res.end(JSON.stringify({ error: sanitizeParentErrorMessage(e.message) }));
           }
           return;
         }
@@ -534,7 +608,7 @@ export class GuiServer {
               );
             } catch (e: any) {
               res.writeHead(500, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: e.message }));
+              res.end(JSON.stringify({ error: sanitizeParentErrorMessage(e.message) }));
             }
           });
           return;
@@ -745,7 +819,7 @@ export class GuiServer {
             res.end(JSON.stringify({ success: true, url: dashUrl }));
           } catch (e: any) {
             res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: e.message }));
+            res.end(JSON.stringify({ error: sanitizeParentErrorMessage(e.message) }));
           }
           return;
         }
@@ -772,13 +846,14 @@ export class GuiServer {
             );
           } catch (e: any) {
             res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: e.message }));
+            res.end(JSON.stringify({ error: sanitizeParentErrorMessage(e.message) }));
           }
           return;
         }
 
-        // Endpoint: POST /api/disconnect (Atomic complete teardown)
-        if (pathname === '/api/disconnect' && req.method === 'POST') {
+        // Endpoint: POST /api/disconnect and POST /api/finish-disconnect (Transaction-safe complete teardown - P0-10)
+        if ((pathname === '/api/disconnect' || pathname === '/api/finish-disconnect') && req.method === 'POST') {
+          // Phase A: Preflight
           const auth = await checkManagementAuth();
           if (!auth.authorized) {
             res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -793,58 +868,98 @@ export class GuiServer {
             return;
           }
 
+          let secureConfig: any = null;
           try {
-            const secureConfig = await this.configMgr.loadDeviceConfig();
-            if (secureConfig) {
-              // 1. Request backend unpair/revoke when online (best-effort)
-              try {
-                await fetch(`${secureConfig.backendUrl}/api/devices/${secureConfig.deviceId}/unpair`, {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'x-device-id': secureConfig.deviceId,
-                    'x-device-token': secureConfig.deviceToken,
-                  },
-                  body: JSON.stringify({
-                    deviceId: secureConfig.deviceId,
-                    deviceToken: secureConfig.deviceToken,
-                  }),
-                });
-              } catch (cloudErr: any) {
-                logServiceMessage('WARN', `[GuiServer] Cloud unpair notification note: ${cloudErr.message}`);
-              }
-            }
+            secureConfig = await this.configMgr.loadDeviceConfig();
+          } catch {}
 
-            // 2. Stop enforcement and restore original/DHCP DNS
-            await this.networkMgr.restoreOriginalDns();
+          // Phase B: Local Safety Restoration
+          try {
+            // 1. Stop reconciliation loop and restore original / DHCP DNS
+            await this.networkMgr.restoreOriginalDns({ stopReconciliation: true });
 
-            // 3. Clear DNS client cache
+            // 2. Clear Windows DNS client cache
             await this.networkMgr.flushDnsCache();
 
-            // 4. Delete device credentials (DPAPI)
-            await this.configMgr.deleteDeviceConfig();
-
-            // 5. Clear profile mappings & session caches
-            await this.accountMgr.clearProfileMappings();
-
-            // 6. Clear Parent PIN verifier & invalidate session
-            await this.pinMgr.clearPin();
-
-            // 7. Verify adapter no longer uses 127.0.0.1
+            // 3. Verify no active physical adapter remains trapped at 127.0.0.1
             const inspection = await this.networkMgr.inspectCurrentEnforcement();
-
-            res.writeHead(200, { 'Content-Type': 'application/json' });
+            if (inspection && inspection.isProtected) {
+              throw new Error('Local network restoration did not complete safely: active adapter(s) remain enforced at 127.0.0.1. Disconnect aborted.');
+            }
+          } catch (restoreErr: any) {
+            logServiceMessage('ERROR', `[GuiServer] Failed local DNS restoration during disconnect: ${restoreErr.stack || restoreErr.message}`);
+            // Phase B failed: ABORT destructive cleanup, keep PIN and credentials intact, do NOT unpair cloud!
+            res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(
               JSON.stringify({
-                success: true,
-                disconnected: true,
-                dnsRestored: !inspection.isProtected,
+                success: false,
+                error: sanitizeParentErrorMessage(restoreErr.message) || "SafeBrowse could not safely restore this computer's network settings. No device settings were removed. Please try again.",
               })
             );
-          } catch (e: any) {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: e.message }));
+            return;
           }
+
+          // Phase C: Local Disconnect (only after Phase B succeeded)
+          try {
+            // 1. Delete device credentials (DPAPI)
+            await this.configMgr.deleteDeviceConfig();
+
+            // 2. Clear profile mappings & session caches
+            await this.accountMgr.clearProfileMappings();
+
+            // 3. Clear Parent PIN verifier & invalidate session
+            await this.pinMgr.clearPin();
+          } catch (localCleanupErr: any) {
+            logServiceMessage('ERROR', `[GuiServer] Warning during local credential cleanup: ${localCleanupErr.message}`);
+          }
+
+          // Phase D: Cloud Unpair (after local computer is safe)
+          if (secureConfig && secureConfig.deviceId && secureConfig.backendUrl) {
+            try {
+              const unpairUrl = `${secureConfig.backendUrl}/api/devices/${secureConfig.deviceId}/unpair`;
+              const ctrl = new AbortController();
+              const timer = setTimeout(() => ctrl.abort(), 4000);
+              const unpairResp = await fetch(unpairUrl, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'x-device-id': secureConfig.deviceId,
+                  'x-device-token': secureConfig.deviceToken,
+                },
+                body: JSON.stringify({
+                  deviceId: secureConfig.deviceId,
+                  deviceToken: secureConfig.deviceToken,
+                }),
+                signal: ctrl.signal,
+              });
+              clearTimeout(timer);
+              if (!unpairResp.ok) {
+                throw new Error(`Cloud unpair request returned HTTP ${unpairResp.status}`);
+              }
+              logServiceMessage('INFO', `[GuiServer] Successfully notified cloud of device unpair (${secureConfig.deviceId}).`);
+            } catch (cloudErr: any) {
+              logServiceMessage('WARN', `[GuiServer] Cloud unpair notification note: ${cloudErr.message}`);
+              // Cloud offline: persist pending revoke record for later retry, but do NOT revert local disconnect!
+              try {
+                const pendingFile = path.join(this.configMgr.getSecureDir(), 'pending-cloud-revoke.json');
+                fs.writeFileSync(pendingFile, JSON.stringify({
+                  deviceId: secureConfig.deviceId,
+                  deviceToken: secureConfig.deviceToken,
+                  backendUrl: secureConfig.backendUrl,
+                  timestamp: new Date().toISOString(),
+                }), 'utf8');
+              } catch {}
+            }
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              success: true,
+              disconnected: true,
+              dnsRestored: true,
+            })
+          );
           return;
         }
 
@@ -1344,6 +1459,24 @@ export class GuiServer {
         </div>
       </div>
 
+      <div id="attentionRecoveryCard" style="display:none; background: rgba(180, 83, 9, 0.2); border: 1px solid rgba(245, 158, 11, 0.5); border-radius: 12px; padding: 16px; margin-bottom: 16px; text-align: left;">
+        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+          <div style="display: flex; align-items: flex-start; gap: 12px; max-width: 600px;">
+            <span style="font-size: 22px;">⚠️</span>
+            <div>
+              <div style="font-weight: 800; color: #fde68a; font-size: 14px; margin-bottom: 4px;">This computer needs attention</div>
+              <div id="attentionRecoveryMsg" style="color: #fed7aa; font-size: 13px; line-height: 1.4;">
+                This computer was disconnected or its device registration was removed in the SafeBrowse cloud. Protection is currently inactive.
+              </div>
+            </div>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn btn-primary" onclick="reconnectComputer()" style="padding: 8px 14px; font-size: 13px;">Reconnect Computer</button>
+            <button class="btn btn-secondary" onclick="openDisconnectModal(true)" style="padding: 8px 14px; font-size: 13px; border-color: rgba(239, 68, 68, 0.4); color: #fca5a5;">Finish Disconnect</button>
+          </div>
+        </div>
+      </div>
+
       <div class="status-grid">
         <div class="status-card">
           <div class="status-label">Active Windows User</div>
@@ -1352,27 +1485,33 @@ export class GuiServer {
         </div>
 
         <div class="status-card">
-          <div class="status-label">Current Mode</div>
-          <div class="status-val" id="statMode">Checking...</div>
-          <div class="status-sub" id="statModeSub"></div>
+          <div class="status-label">Protection Service</div>
+          <div class="status-val" id="statService">Running</div>
+          <div class="status-sub" id="statServiceSub">SafeBrowseChildService</div>
         </div>
 
         <div class="status-card">
-          <div class="status-label">Device Registration</div>
-          <div class="status-val" id="statDevice">Family Laptop</div>
-          <div class="status-sub" id="statDeviceId"></div>
+          <div class="status-label">Web Protection</div>
+          <div class="status-val" id="statDns">Checking...</div>
+          <div class="status-sub" id="statDnsSub">DNS Filtering</div>
         </div>
 
         <div class="status-card">
-          <div class="status-label">Service & DNS Resolver</div>
-          <div class="status-val" id="statDns">Checking protection...</div>
-          <div class="status-sub" id="statService">SafeBrowseChildService</div>
+          <div class="status-label">Cloud Connection</div>
+          <div class="status-val" id="statCloud">Connected</div>
+          <div class="status-sub" id="statCloudSub">Family cloud sync</div>
         </div>
 
         <div class="status-card">
           <div class="status-label">Parent Lock</div>
           <div class="status-val" id="statPin">Checking...</div>
           <div class="status-sub" id="statPinSub">Management protection</div>
+        </div>
+
+        <div class="status-card">
+          <div class="status-label">Device Registration</div>
+          <div class="status-val" id="statDevice">Family Laptop</div>
+          <div class="status-sub" id="statDeviceId">Registered with family</div>
         </div>
       </div>
 
@@ -1418,6 +1557,29 @@ export class GuiServer {
         <div style="display: flex; gap: 10px;">
           <button class="btn btn-primary" id="btnPinUnlock" style="flex: 1;" onclick="submitPinModal()">Unlock</button>
           <button class="btn btn-secondary" style="flex: 1;" onclick="closePinModal()">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- DISCONNECT CONFIRMATION MODAL (P0-10) -->
+    <div id="disconnectModal" style="display:none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 9999; align-items: center; justify-content: center; backdrop-filter: blur(8px);">
+      <div style="background: #111827; border: 1px solid #374151; border-radius: 20px; padding: 28px; max-width: 440px; width: 90%; text-align: left; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5);">
+        <div style="font-size: 28px; margin-bottom: 12px;">⚠️</div>
+        <h3 style="margin: 0 0 8px 0; font-size: 18px; font-weight: 800; color: #fff;">Disconnect this computer?</h3>
+        <p style="font-size: 13px; color: #94a3b8; line-height: 1.5; margin-bottom: 20px;">
+          SafeBrowse protection will be removed from this computer. Your family account and child profiles will remain available on other devices.
+        </p>
+
+        <div id="disconnectProgressBox" style="display:none; margin: 16px 0; text-align: center;">
+          <div class="sync-spinner" style="margin: 0 auto 10px auto; width: 28px; height: 28px; border: 3px solid rgba(147, 197, 253, 0.3); border-top-color: #3b82f6; border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
+          <div id="disconnectProgressText" style="font-size: 13px; font-weight: 700; color: #93c5fd;">Restoring network settings…</div>
+        </div>
+
+        <div id="disconnectErrorBox" style="display:none; background: rgba(220, 38, 38, 0.15); border: 1px solid rgba(220, 38, 38, 0.4); border-radius: 12px; padding: 12px; margin-bottom: 16px; color: #fca5a5; font-size: 12px; line-height: 1.4;"></div>
+
+        <div id="disconnectModalButtons" style="display: flex; gap: 10px; margin-top: 20px;">
+          <button class="btn btn-secondary" id="btnCancelDisconnect" style="flex: 1;" onclick="closeDisconnectModal()">Cancel</button>
+          <button class="btn btn-danger" id="btnConfirmDisconnect" style="flex: 1.2; background: #dc2626; color: white;" onclick="executeDisconnect()">Disconnect Computer</button>
         </div>
       </div>
     </div>
@@ -1529,10 +1691,33 @@ export class GuiServer {
       if (window._pinResolver) window._pinResolver(false);
     }
 
+    function sanitizeParentErrorMessageClient(raw) {
+      if (!raw) return 'An unexpected error occurred. Please try again.';
+      const str = String(raw);
+      if (
+        str.includes('CLIXML') ||
+        str.includes('Set-DnsClientServerAddress') ||
+        str.includes('Get-DnsClientServerAddress') ||
+        str.includes('MSFT_') ||
+        str.includes('InterfaceIndex') ||
+        str.includes('PowerShell') ||
+        str.includes('powershell') ||
+        str.includes('pwsh') ||
+        str.includes('At line:') ||
+        str.includes('DNS read-back') ||
+        str.includes('trapped at 127') ||
+        str.includes('Program Files') ||
+        str.includes('packages/agent-windows')
+      ) {
+        return "SafeBrowse could not safely restore this computer's network settings. No device settings were removed. Please try again.";
+      }
+      return str;
+    }
+
     function showAlert(msg, isError = false) {
       const b = document.getElementById('alertBox');
       b.className = 'alert ' + (isError ? 'alert-error' : 'alert-success');
-      b.innerText = msg;
+      b.innerText = isError ? sanitizeParentErrorMessageClient(msg) : msg;
       b.style.display = 'block';
       setTimeout(() => { b.style.display = 'none'; }, 6000);
     }
@@ -1969,18 +2154,6 @@ export class GuiServer {
         const pinBanner = document.getElementById('pinSetupBanner');
         const pinRequired = Boolean(data.parentPinSetupRequired || (data.isPaired && !data.pinConfigured));
         if (pinBanner) pinBanner.style.display = pinRequired ? 'flex' : 'none';
-        const statPin = document.getElementById('statPin');
-        const statPinSub = document.getElementById('statPinSub');
-        if (statPin) {
-          statPin.innerHTML = data.pinConfigured
-            ? '<span class="tag-protected">● Configured</span>'
-            : '<span class="tag-warning" style="color:#f59e0b;">● Setup Required</span>';
-        }
-        if (statPinSub) {
-          statPinSub.innerText = data.pinConfigured
-            ? (data.managementUnlocked ? 'Parent settings temporarily unlocked' : 'Protected management locked')
-            : 'Set a 6–8 digit Parent PIN';
-        }
 
         const user = data.activeSession?.username || 'System Console';
         const role = data.activeSession?.accountType || (data.activeSession?.isManaged ? 'CHILD' : 'NOT_ASSIGNED');
@@ -2005,21 +2178,133 @@ export class GuiServer {
           protectionText = 'Parent / Unmanaged';
         }
 
+        function formatFriendlyAccount(raw) {
+          if (!raw) return 'Windows User';
+          const s = String(raw);
+          const slashIdx = Math.max(s.lastIndexOf(String.fromCharCode(92)), s.lastIndexOf('/'));
+          return slashIdx === -1 ? s : s.substring(slashIdx + 1);
+        }
+        const friendlyUser = formatFriendlyAccount(user);
+
+        // 1. Active Windows User Card
         const statUserEl = document.getElementById('statUser');
         if (statUserEl) {
           statUserEl.innerHTML =
-            '<span style="vertical-align: middle;">' + escapeHtml(user) + '</span> ' +
+            '<span style="vertical-align: middle;">' + escapeHtml(friendlyUser) + '</span> ' +
             '<span class="badge-role ' + roleBadgeClass + '" style="vertical-align: middle; margin-left: 6px;">' + roleBadgeText + '</span>';
         }
 
         const statUserSidEl = document.getElementById('statUserSid');
         if (statUserSidEl) {
-          statUserSidEl.innerText = user + ' — ' + roleText + ' — ' + protectionText;
+          if (isParent) {
+            statUserSidEl.innerText = friendlyUser + ' — Parent account — filtering bypassed';
+          } else if (isChild) {
+            statUserSidEl.innerText = friendlyUser + ' — Child account — ' + (data.activeSession?.isManaged ? 'Protection active' : 'Filtering bypassed');
+          } else {
+            statUserSidEl.innerText = friendlyUser + ' — Unassigned account';
+          }
+        }
+
+        // 2. Protection Service Card
+        const sys = data.systemStatus;
+        const statServiceEl = document.getElementById('statService');
+        const statServiceSubEl = document.getElementById('statServiceSub');
+        if (statServiceEl) {
+          statServiceEl.innerHTML = '<span style="color: #10b981; font-weight: 800;">● Running</span>';
+        }
+        if (statServiceSubEl) {
+          statServiceSubEl.innerText = (sys && sys.serviceState) ? sys.serviceState : 'SafeBrowseChildService';
+        }
+
+        // 3. Web Protection Card
+        const statDnsEl = document.getElementById('statDns');
+        const statDnsSubEl = document.getElementById('statDnsSub');
+        if (statDnsEl) {
+          if (data.hasMultipleSessions) {
+            statDnsEl.innerHTML = '<span style="color: #f59e0b; font-weight: 800;">⚠️ Attention Required</span>';
+            if (statDnsSubEl) statDnsSubEl.innerText = 'Multiple Windows users signed in';
+          } else if (isParent) {
+            statDnsEl.innerHTML = '<span style="color: #94a3b8; font-weight: 700;">○ Filtering Bypassed</span>';
+            if (statDnsSubEl) statDnsSubEl.innerText = 'Parent account (filtering bypassed)';
+          } else if (sys && sys.dnsEnforced) {
+            statDnsEl.innerHTML = '<span style="color: #10b981; font-weight: 800;">● Active</span>';
+            if (statDnsSubEl) statDnsSubEl.innerText = 'SafeBrowse local DNS proxy active';
+          } else if (sys && sys.dnsEnforced === false) {
+            statDnsEl.innerHTML = '<span style="color: #ef4444; font-weight: 800;">⚠️ Inactive</span>';
+            if (statDnsSubEl) statDnsSubEl.innerText = 'DNS protection not enforcing';
+          } else {
+            statDnsEl.innerText = 'Checking protection...';
+            if (statDnsSubEl) statDnsSubEl.innerText = 'DNS Filtering';
+          }
+        }
+
+        // 4. Cloud Connection Card
+        const statCloudEl = document.getElementById('statCloud');
+        const statCloudSubEl = document.getElementById('statCloudSub');
+        if (statCloudEl) {
+          if (data.cloudConnectionStatus === 'DEVICE_TOKEN_REVOKED') {
+            statCloudEl.innerHTML = '<span style="color: #ef4444; font-weight: 800;">⚠️ Token Revoked</span>';
+            if (statCloudSubEl) statCloudSubEl.innerText = 'Device unlinked in family cloud';
+          } else if (data.cloudConnectionStatus === 'LOCAL_ONLY_STALE_STATE') {
+            statCloudEl.innerHTML = '<span style="color: #f59e0b; font-weight: 800;">⚠️ Attention Required</span>';
+            if (statCloudSubEl) statCloudSubEl.innerText = 'Registration needs reconnect';
+          } else if (data.cloudConnectionStatus === 'CLOUD_TEMPORARILY_UNAVAILABLE') {
+            statCloudEl.innerHTML = '<span style="color: #f59e0b; font-weight: 700;">Connection unavailable</span>';
+            if (statCloudSubEl) statCloudSubEl.innerText = 'Cloud sync offline (local protection active)';
+          } else if (data.pairingStatus === 'SYNCING') {
+            statCloudEl.innerHTML = '<span style="color: #3b82f6; font-weight: 700;">Syncing</span>';
+            if (statCloudSubEl) statCloudSubEl.innerText = 'Updating family settings...';
+          } else {
+            statCloudEl.innerHTML = '<span style="color: #10b981; font-weight: 800;">● Connected</span>';
+            if (statCloudSubEl) statCloudSubEl.innerText = 'Family cloud sync active';
+          }
+        }
+
+        // 5. Parent Lock Card
+        const statPin = document.getElementById('statPin');
+        const statPinSub = document.getElementById('statPinSub');
+        if (statPin) {
+          if (data.pinConfigured) {
+            if (data.managementUnlocked) {
+              statPin.innerHTML = '<span style="color: #10b981; font-weight: 700;">Configured • Unlocked</span>';
+              if (statPinSub) statPinSub.innerText = 'Temporarily unlocked for management';
+            } else {
+              statPin.innerHTML = '<span>Configured • Locked</span>';
+              if (statPinSub) statPinSub.innerText = 'Protected by Parent PIN';
+            }
+          } else {
+            statPin.innerHTML = '<span style="color: #f59e0b; font-weight: 700;">Setup Required</span>';
+            if (statPinSub) statPinSub.innerText = 'Set a 6–8 digit Parent PIN';
+          }
+        }
+
+        // 6. Device Registration Card
+        const statDeviceEl = document.getElementById('statDevice');
+        const statDeviceIdEl = document.getElementById('statDeviceId');
+        if (statDeviceEl) statDeviceEl.innerText = data.config ? data.config.deviceName : 'Family Laptop';
+        if (statDeviceIdEl) statDeviceIdEl.innerText = data.isPaired ? 'Registered with family' : 'Run pairing setup';
+
+        // Split State Recovery Card
+        const recoveryCard = document.getElementById('attentionRecoveryCard');
+        if (data.cloudConnectionStatus === 'DEVICE_TOKEN_REVOKED' || data.onboardingReason === 'DEVICE_REVOKED' || data.onboardingReason === 'DEVICE_NOT_FOUND') {
+          if (recoveryCard) {
+            recoveryCard.style.display = 'block';
+            const msg = document.getElementById('attentionRecoveryMsg');
+            if (msg) msg.innerText = "This computer's device registration was removed in the SafeBrowse cloud. Protection is currently inactive. Reconnect this computer or finish disconnecting.";
+          }
+        } else if (data.cloudConnectionStatus === 'LOCAL_ONLY_STALE_STATE') {
+          if (recoveryCard) {
+            recoveryCard.style.display = 'block';
+            const msg = document.getElementById('attentionRecoveryMsg');
+            if (msg) msg.innerText = "This computer has incomplete or unlinked protection settings. Reconnect this computer or finish disconnecting.";
+          }
+        } else {
+          if (recoveryCard) recoveryCard.style.display = 'none';
         }
 
         const syncBanner = document.getElementById('syncBanner');
         if (syncBanner) {
-          if (data.pairingStatus === 'SYNCING' || data.pairingStatus === 'CONNECTED_LOCAL') {
+          if (data.cloudConnectionStatus === 'CLOUD_TEMPORARILY_UNAVAILABLE' || data.pairingStatus === 'SYNCING') {
             syncBanner.style.display = 'block';
             const bannerText = document.getElementById('syncBannerText');
             if (bannerText) {
@@ -2038,29 +2323,11 @@ export class GuiServer {
           if (data.sessionWarning) {
             document.getElementById('multiSessionText').innerText = data.sessionWarning;
           }
-          document.getElementById('statMode').innerHTML = '<span class="tag-warning" style="color: #f59e0b; font-weight: 800;">⚠️ Attention Required</span>';
-          document.getElementById('statModeSub').innerText = 'Multiple Windows users signed in';
         } else {
           document.getElementById('multiSessionBanner').style.display = 'none';
-          if (data.activeSession?.isManaged) {
-            document.getElementById('statMode').innerHTML = '<span class="tag-protected">● Child Protected</span>';
-            document.getElementById('statModeSub').innerText = 'Profile: ' + (data.activeSession.childName || 'Active Child');
-          } else {
-            document.getElementById('statMode').innerHTML = '<span class="tag-bypass">○ Parent Bypass</span>';
-            document.getElementById('statModeSub').innerText = 'Unmanaged (Child rules bypassed)';
-          }
         }
 
-        document.getElementById('statDevice').innerText = data.config ? data.config.deviceName : 'Family Laptop';
-        document.getElementById('statDeviceId').innerText = data.isPaired ? 'Registered with family' : 'Run pairing setup';
-
-        const sys = data.systemStatus;
-        if (sys && sys.dnsEnforced !== undefined) {
-          document.getElementById('statDns').innerText = sys.dnsEnforced ? '127.0.0.1 (Enforced)' : 'Inactive';
-          document.getElementById('statService').innerText = sys.serviceState || 'SafeBrowseChildService';
-        } else {
-          document.getElementById('statDns').innerText = 'Checking protection...';
-          document.getElementById('statService').innerText = 'SafeBrowseChildService';
+        if (!sys || sys.dnsEnforced === undefined) {
           fetchAsyncDiagnostics();
         }
 
@@ -2100,15 +2367,18 @@ export class GuiServer {
 
               const isProtected = isManaged;
               const isCurrent = Boolean(acc.isCurrentConsoleUser);
+              const friendlyAccName = formatFriendlyAccount(acc.name);
+              const hasDomain = String(acc.name).indexOf(String.fromCharCode(92)) !== -1;
 
               const tr = document.createElement('tr');
               tr.className = 'account-row';
               tr.innerHTML =
                 '<td>' +
                   '<div class="user-pill">' +
-                    escapeHtml(acc.name) +
+                    escapeHtml(friendlyAccName) +
                     (isCurrent ? ' <span class="badge-current">ACTIVE USER</span>' : '') +
                   '</div>' +
+                  (hasDomain ? '<div class="sid-text" style="color: #64748b; font-size: 11px;">' + escapeHtml(acc.name) + '</div>' : '') +
                   '<div class="sid-text">' +
                     (isCurrent ? 'Active Console Account' : 'Standard Windows Account') +
                   '</div>' +
@@ -2158,7 +2428,16 @@ export class GuiServer {
           const sys = data.status;
           if (sys && sys.dnsEnforced !== undefined) {
             const el = document.getElementById('statDns');
-            if (el) el.innerText = sys.dnsEnforced ? '127.0.0.1 (Enforced)' : 'Inactive';
+            const sub = document.getElementById('statDnsSub');
+            if (el) {
+              if (sys.dnsEnforced) {
+                el.innerHTML = '<span style="color: #10b981; font-weight: 800;">● Active</span>';
+                if (sub) sub.innerText = 'SafeBrowse local DNS proxy active';
+              } else {
+                el.innerHTML = '<span style="color: #ef4444; font-weight: 800;">⚠️ Inactive</span>';
+                if (sub) sub.innerText = 'DNS protection not enforcing';
+              }
+            }
           }
         }
       } catch {}
@@ -2184,30 +2463,92 @@ export class GuiServer {
       }
     }
 
-    async function confirmDisconnect() {
-      const unlocked = await ensureManagementUnlocked();
-      if (!unlocked) return;
+    function openDisconnectModal(isFinishDisconnect = false) {
+      window._isFinishDisconnect = isFinishDisconnect;
+      const modal = document.getElementById('disconnectModal');
+      const progressBox = document.getElementById('disconnectProgressBox');
+      const errorBox = document.getElementById('disconnectErrorBox');
+      const buttons = document.getElementById('disconnectModalButtons');
+      const btnCancel = document.getElementById('btnCancelDisconnect');
+      const btnConfirm = document.getElementById('btnConfirmDisconnect');
 
-      if (!confirm('Are you sure you want to disconnect this computer from SafeBrowse? Protection will be disabled until reconnected.')) {
-        return;
-      }
+      if (progressBox) progressBox.style.display = 'none';
+      if (errorBox) { errorBox.style.display = 'none'; errorBox.innerText = ''; }
+      if (buttons) buttons.style.display = 'flex';
+      if (btnCancel) btnCancel.disabled = false;
+      if (btnConfirm) btnConfirm.disabled = false;
+      if (modal) modal.style.display = 'flex';
+    }
+
+    function closeDisconnectModal() {
+      const modal = document.getElementById('disconnectModal');
+      if (modal) modal.style.display = 'none';
+    }
+
+    async function executeDisconnect() {
+      const btnCancel = document.getElementById('btnCancelDisconnect');
+      const btnConfirm = document.getElementById('btnConfirmDisconnect');
+      const progressBox = document.getElementById('disconnectProgressBox');
+      const progressText = document.getElementById('disconnectProgressText');
+      const errorBox = document.getElementById('disconnectErrorBox');
+
+      if (btnCancel) btnCancel.disabled = true;
+      if (btnConfirm) btnConfirm.disabled = true;
+      if (errorBox) errorBox.style.display = 'none';
+      if (progressBox) progressBox.style.display = 'block';
+      if (progressText) progressText.innerText = 'Restoring network settings…';
+
       try {
-        const res = await fetch('/api/disconnect', {
+        const endpoint = window._isFinishDisconnect ? '/api/finish-disconnect' : '/api/disconnect';
+        const res = await fetch(endpoint, {
           method: 'POST',
           headers: { ...(managementSessionToken ? { 'x-management-session': managementSessionToken } : {}) }
         });
         const data = await res.json().catch(() => ({}));
         if (res.ok && data.success) {
+          if (progressText) progressText.innerText = 'Removing protection…';
+          await new Promise(r => setTimeout(r, 300));
+          if (progressText) progressText.innerText = 'Disconnecting from family…';
+          await new Promise(r => setTimeout(r, 300));
+          if (progressText) {
+            progressText.innerHTML = '<span style="color:#10b981; font-weight:800;">✓ Computer disconnected successfully</span>';
+          }
           managementSessionToken = null;
           try { localStorage.removeItem('sb_paired'); } catch {}
-          showAlert('Device disconnected successfully.');
-          setTimeout(() => location.reload(), 1000);
+          setTimeout(() => {
+            closeDisconnectModal();
+            showScreen('screenConnect');
+          }, 1000);
         } else {
-          showAlert(data.error || 'Failed to disconnect device.', true);
+          const rawErr = (data && data.error) ? data.error : "SafeBrowse could not safely restore this computer's network settings. No device settings were removed. Please try again.";
+          const friendlyErr = sanitizeParentErrorMessageClient(rawErr);
+          if (errorBox) {
+            errorBox.innerText = friendlyErr;
+            errorBox.style.display = 'block';
+          }
+          if (progressBox) progressBox.style.display = 'none';
+          if (btnCancel) btnCancel.disabled = false;
+          if (btnConfirm) btnConfirm.disabled = false;
         }
       } catch (e) {
-        showAlert('Error disconnecting device: ' + e.message, true);
+        if (errorBox) {
+          errorBox.innerText = "SafeBrowse could not safely restore this computer's network settings. No device settings were removed. Please try again.";
+          errorBox.style.display = 'block';
+        }
+        if (progressBox) progressBox.style.display = 'none';
+        if (btnCancel) btnCancel.disabled = false;
+        if (btnConfirm) btnConfirm.disabled = false;
       }
+    }
+
+    async function confirmDisconnect() {
+      const unlocked = await ensureManagementUnlocked();
+      if (!unlocked) return;
+      openDisconnectModal(false);
+    }
+
+    function reconnectComputer() {
+      launchPairing();
     }
 
     // Resolve authoritative device state before exposing any pairing action.

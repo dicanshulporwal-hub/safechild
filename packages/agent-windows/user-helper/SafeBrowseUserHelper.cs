@@ -19,9 +19,9 @@ using System.Threading;
 [assembly: AssemblyCulture("")]
 [assembly: ComVisible(false)]
 [assembly: Guid("5E1F82A3-B4C5-6D7E-8F90-123456789ABC")]
-[assembly: AssemblyVersion("1.0.4.14")]
-[assembly: AssemblyFileVersion("1.0.4.14")]
-[assembly: AssemblyInformationalVersion("1.0.4.14")]
+[assembly: AssemblyVersion("1.0.4.15")]
+[assembly: AssemblyFileVersion("1.0.4.15")]
+[assembly: AssemblyInformationalVersion("1.0.4.15")]
 
 namespace SafeBrowse.UserHelper
 {

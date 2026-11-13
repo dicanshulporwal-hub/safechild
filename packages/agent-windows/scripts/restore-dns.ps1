@@ -45,24 +45,48 @@ if (-not (Test-Path $backupPath)) {
     $backupPath = Join-Path $programData "SafeBrowse\network-backup.json"
 }
 
-$restoredFromBackup = $false
+$currentAdapters = @(Get-NetAdapter -ErrorAction SilentlyContinue)
+$currentDns = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+
 if (Test-Path $backupPath) {
     try {
         $raw = Get-Content $backupPath -Raw -ErrorAction Stop
         $records = ConvertFrom-Json $raw -ErrorAction Stop
         $items = @($records)
         foreach ($rec in $items) {
-            if ($rec.InterfaceIndex) {
-                $idx = [int]$rec.InterfaceIndex
-                $cleanAddrs = @($rec.ServerAddresses) | Where-Object { $_ -and $_ -notlike '*127.0.0.1*' -and $_ -notlike '*::1*' }
-                if ($rec.DhcpEnabled -eq $true -or $cleanAddrs.Count -eq 0) {
-                    Set-DnsClientServerAddress -InterfaceIndex $idx -ResetServerAddresses -ErrorAction SilentlyContinue
-                    Write-Host " [OK] Reset adapter $idx to DHCP." -ForegroundColor Green
-                } else {
-                    Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses $cleanAddrs -ErrorAction SilentlyContinue
-                    Write-Host " [OK] Restored static DNS for adapter $idx: $($cleanAddrs -join ', ')" -ForegroundColor Green
+            $idx = [int]$rec.InterfaceIndex
+            $alias = [string]$rec.InterfaceAlias
+            $guid = [string]$rec.InterfaceGuid
+            $cleanAddrs = @($rec.ServerAddresses) | Where-Object { $_ -and $_ -notlike '*127.0.0.1*' -and $_ -notlike '*::1*' }
+            $isDhcp = ($rec.DhcpEnabled -ne $false) -or ($cleanAddrs.Count -eq 0)
+
+            $matched = $null
+            if ($currentAdapters.Count -gt 0) {
+                $matched = $currentAdapters | Where-Object { [int]$_.InterfaceIndex -eq $idx }
+                if (-not $matched -and $guid) {
+                    $matched = $currentAdapters | Where-Object { $_.InterfaceGuid -eq $guid }
                 }
-                $restoredFromBackup = $true
+                if (-not $matched -and $alias) {
+                    $matched = $currentAdapters | Where-Object { $_.InterfaceAlias -eq $alias -or $_.Name -eq $alias }
+                }
+            } else {
+                $matched = $currentDns | Where-Object { [int]$_.InterfaceIndex -eq $idx }
+                if (-not $matched -and $alias) {
+                    $matched = $currentDns | Where-Object { $_.InterfaceAlias -eq $alias }
+                }
+            }
+
+            if ($matched) {
+                $targetIdx = [int]$matched.InterfaceIndex
+                if ($isDhcp) {
+                    Set-DnsClientServerAddress -InterfaceIndex $targetIdx -ResetServerAddresses -ErrorAction SilentlyContinue
+                    Write-Host " [OK] Reset adapter $targetIdx ($($matched.InterfaceAlias)) to DHCP." -ForegroundColor Green
+                } else {
+                    Set-DnsClientServerAddress -InterfaceIndex $targetIdx -ServerAddresses $cleanAddrs -ErrorAction SilentlyContinue
+                    Write-Host " [OK] Restored static DNS for adapter $targetIdx ($($matched.InterfaceAlias)): $($cleanAddrs -join ', ')" -ForegroundColor Green
+                }
+            } else {
+                Write-Warning "Original adapter no longer present (historical index $idx, alias $alias) - skipping stale backup record."
             }
         }
     } catch {
@@ -70,17 +94,19 @@ if (Test-Path $backupPath) {
     }
 }
 
-if (-not $restoredFromBackup) {
-    Write-Host " No valid backup found. Resetting trapped adapters on 127.0.0.1 to DHCP..." -ForegroundColor Yellow
-    $trapped = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.ServerAddresses -contains '127.0.0.1' })
-    $routes = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -ne '0.0.0.0' })
-    $routeIndexes = @($routes | ForEach-Object { [int]$_.InterfaceIndex })
-    foreach ($t in $trapped) {
-        $idx = [int]$t.InterfaceIndex
-        if ($routeIndexes -contains $idx) {
-            Set-DnsClientServerAddress -InterfaceIndex $idx -ResetServerAddresses -ErrorAction SilentlyContinue
-            Write-Host " [OK] Reset trapped adapter $idx ($($t.InterfaceAlias)) to DHCP." -ForegroundColor Green
-        }
+# Unconditional safety sweep on trapped adapters
+Write-Host " Performing post-restore safety sweep on trapped adapters..." -ForegroundColor Yellow
+$trapped = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.ServerAddresses -contains '127.0.0.1' -or $_.ServerAddresses -contains '::1' })
+$routes = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -ne '0.0.0.0' })
+$routeIndexes = @($routes | ForEach-Object { [int]$_.InterfaceIndex })
+foreach ($t in $trapped) {
+    $idx = [int]$t.InterfaceIndex
+    $alias = [string]$t.InterfaceAlias
+    $aliasLower = $alias.ToLower()
+    $isExcluded = $aliasLower.Contains('tailscale') -or $aliasLower.Contains('loopback') -or $aliasLower.Contains('wireguard') -or $aliasLower.Contains('wsl') -or $aliasLower.Contains('virtual') -or $aliasLower.Contains('tap')
+    if ($routeIndexes -contains $idx -and -not $isExcluded) {
+        Set-DnsClientServerAddress -InterfaceIndex $idx -ResetServerAddresses -ErrorAction SilentlyContinue
+        Write-Host " [OK] Reset trapped adapter $idx ($alias) to DHCP." -ForegroundColor Green
     }
 }
 
