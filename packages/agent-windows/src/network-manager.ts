@@ -234,6 +234,13 @@ export class WindowsNetworkManager {
     return this.platformOverride || process.platform;
   }
 
+  public isSimulationMode(): boolean {
+    if (this.commandExecutor !== null) {
+      return false;
+    }
+    return this.mockAdapters !== null || this.getPlatform() !== 'win32';
+  }
+
   public getBackupFilePath(): string {
     return this.backupFile;
   }
@@ -563,7 +570,7 @@ export class WindowsNetworkManager {
   }
 
   private async doDiscoverTargetAdapters(suppressLogs: boolean = false): Promise<AdapterDiscoveryResult> {
-    if (this.getPlatform() !== 'win32') {
+    if (this.isSimulationMode()) {
       if (this.mockAdapters !== null) {
         const evaluations: CandidateEvaluation[] = [];
         const eligibleAdapters: TargetAdapterInfo[] = [];
@@ -1060,7 +1067,7 @@ export class WindowsNetworkManager {
    * Never records 127.0.0.1 or ::1 as original DNS.
    */
   public async backupCurrentDnsConfig(targetAdapters?: TargetAdapterInfo[]): Promise<AdapterDnsBackup[]> {
-    if (this.getPlatform() !== 'win32') {
+    if (this.isSimulationMode()) {
       configManager.ensureDirectories();
       let existingList: AdapterDnsBackup[] = [];
       if (fs.existsSync(this.backupFile)) {
@@ -1598,7 +1605,7 @@ export class WindowsNetworkManager {
     logServiceMessage('INFO', `[NetworkManager] [OK] Verified: 127.0.0.1:${dnsPort} and upstream resolution responded to DNS probe.`);
 
     // 4. Apply 127.0.0.1 and read-back verify each adapter on Windows
-    if (this.getPlatform() === 'win32') {
+    if (!this.isSimulationMode() && this.getPlatform() === 'win32') {
       try {
         for (const adapter of targetAdapters) {
           logServiceMessage(
@@ -1874,7 +1881,7 @@ export class WindowsNetworkManager {
   private async doQueryDnsStateForAdapters(
     targetAdapters: TargetAdapterInfo[]
   ): Promise<AdapterDnsQueryResult[]> {
-    if (this.getPlatform() !== 'win32') {
+    if (this.isSimulationMode()) {
       // Non-Windows / test simulation: derive state from mockAdapters
       return targetAdapters.map((target) => {
         const ma = this.mockAdapters
@@ -2212,7 +2219,7 @@ export class WindowsNetworkManager {
       }
 
       // 5. Step C: Apply 127.0.0.1 to unenforced adapters
-      if (this.getPlatform() === 'win32') {
+      if (!this.isSimulationMode() && this.getPlatform() === 'win32') {
         for (const u of unenforced) {
           logServiceMessage(
             'INFO',
@@ -2492,7 +2499,7 @@ export class WindowsNetworkManager {
 
     // 1. Terminate all SafeBrowse UserHelper instances
     logServiceMessage('INFO', '[NetworkManager] Stopping all SafeBrowse UserHelper instances...');
-    if (this.getPlatform() === 'win32') {
+    if (!this.isSimulationMode() && this.getPlatform() === 'win32') {
       try {
         await this.executePowerShell(
           '$ErrorActionPreference = \'SilentlyContinue\'; Stop-Process -Name SafeBrowseUserHelper -Force -ErrorAction SilentlyContinue'
@@ -2503,7 +2510,7 @@ export class WindowsNetworkManager {
       }
     } else {
       this.mockUserHelpersStopped = true;
-      logServiceMessage('INFO', '[NetworkManager] Non-Windows: Simulated termination of SafeBrowse UserHelper.');
+      logServiceMessage('INFO', '[NetworkManager] Non-Windows or simulation: Simulated termination of SafeBrowse UserHelper.');
     }
 
     // 2. Remove SafeBrowse firewall rules
@@ -2516,8 +2523,8 @@ export class WindowsNetworkManager {
 
     // 3. Restore DNS
     try {
-      if (this.getPlatform() !== 'win32') {
-        logServiceMessage('INFO', '[NetworkManager] Non-Windows platform: simulation complete.');
+      if (this.isSimulationMode()) {
+        logServiceMessage('INFO', '[NetworkManager] Non-Windows platform or simulation: simulation complete.');
         if (this.mockAdapters) {
           let backupList: AdapterDnsBackup[] = [];
           if (fs.existsSync(this.backupFile)) {
@@ -2694,7 +2701,7 @@ export class WindowsNetworkManager {
 
             await this.executePowerShell(script);
             if (this.mockAdapters) {
-              const ma = this.mockAdapters.find((a) => a.InterfaceIndex === item.InterfaceIndex);
+              const ma = (this.mockAdapters as MockAdapterState[]).find((a) => a.InterfaceIndex === item.InterfaceIndex);
               if (ma) ma.ServerAddresses = isDhcp ? [] : cleanAddrs;
             }
             logServiceMessage(
@@ -2887,13 +2894,7 @@ export class WindowsNetworkManager {
     }
 
     // In unit tests running on non-Windows host (Linux/macOS) or with mock adapters:
-    if (process.platform !== 'win32' || this.mockAdapters !== null) {
-      if (this.commandExecutor) {
-        const res = await this.executePowerShell('Resolve-DnsName');
-        if (res.stdout.includes('RESOLVE_FAILED') || res.stdout.trim() === 'FAILED') {
-          return false;
-        }
-      }
+    if (this.isSimulationMode()) {
       return true;
     }
 
@@ -2917,7 +2918,7 @@ export class WindowsNetworkManager {
   }
 
   public async flushDnsCache(): Promise<void> {
-    if (this.getPlatform() === 'win32') {
+    if (!this.isSimulationMode() && this.getPlatform() === 'win32') {
       try {
         await this.executePowerShell('$ErrorActionPreference = \'SilentlyContinue\'; Clear-DnsClientCache');
       } catch {}
