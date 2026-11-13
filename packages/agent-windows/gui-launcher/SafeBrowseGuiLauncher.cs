@@ -20,9 +20,9 @@ using System.Windows.Forms;
 [assembly: AssemblyCulture("")]
 [assembly: ComVisible(false)]
 [assembly: Guid("6F2A93B4-C5D6-7E8F-9012-3456789ABCDE")]
-[assembly: AssemblyVersion("1.0.4.15")]
-[assembly: AssemblyFileVersion("1.0.4.15")]
-[assembly: AssemblyInformationalVersion("1.0.4.15")]
+[assembly: AssemblyVersion("1.0.4.16")]
+[assembly: AssemblyFileVersion("1.0.4.16")]
+[assembly: AssemblyInformationalVersion("1.0.4.16")]
 
 namespace SafeBrowse.GuiLauncher
 {

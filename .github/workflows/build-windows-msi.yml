@@ -195,8 +195,8 @@ jobs:
                   LegalCopyright: 'Copyright © 2026 SafeBrowse. All rights reserved.',
                   OriginalFilename: 'SafeBrowseChild-Pilot.exe'
                 },
-                'file-version': '1.0.4.15',
-                'product-version': '1.0.4.15'
+                'file-version': '1.0.4.16',
+                'product-version': '1.0.4.16'
               }).then(() => console.log('[OK] Win32 metadata injected into SafeBrowseChild-Pilot.exe'))
                 .catch(err => console.warn('[NOTE] rcedit metadata injection note:', err.message));
             " "$targetExe"
@@ -253,7 +253,7 @@ jobs:
           Write-Host "Source Directory: $sourceDir"
           Write-Host "MSI Output: $msiOutput"
 
-          wix build -arch x64 "$wxsPath" -ext WixToolset.Util.wixext -d SourceDir="$sourceDir" -d ProductVersion="1.0.4.15" -o "$msiOutput"
+          wix build -arch x64 "$wxsPath" -ext WixToolset.Util.wixext -d SourceDir="$sourceDir" -d ProductVersion="1.0.4.16" -o "$msiOutput"
           $wixExitCode = $LASTEXITCODE
 
           if ($wixExitCode -ne 0) {
@@ -382,8 +382,8 @@ jobs:
               Write-Error "Missing ProductName or FileDescription on ${bin}"
               exit 1
             }
-            if ($vi.FileVersion -ne "1.0.4.15") {
-              Write-Error "Invalid FileVersion on ${bin}: $($vi.FileVersion), expected 1.0.4.15"
+            if ($vi.FileVersion -ne "1.0.4.16") {
+              Write-Error "Invalid FileVersion on ${bin}: $($vi.FileVersion), expected 1.0.4.16"
               exit 1
             }
           }
@@ -395,8 +395,8 @@ jobs:
           $workerVi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($workerPath)
           Write-Host "SafeBrowseChild-Pilot.exe FileVersion: $($workerVi.FileVersion)"
           Write-Host "SafeBrowseChild-Pilot.exe ProductVersion: $($workerVi.ProductVersion)"
-          if ($workerVi.FileVersion -ne "1.0.4.15") {
-            Write-Error "Invalid SafeBrowseChild-Pilot.exe FileVersion: $($workerVi.FileVersion), expected 1.0.4.15"
+          if ($workerVi.FileVersion -ne "1.0.4.16") {
+            Write-Error "Invalid SafeBrowseChild-Pilot.exe FileVersion: $($workerVi.FileVersion), expected 1.0.4.16"
             exit 1
           }
 
@@ -434,8 +434,8 @@ jobs:
             [System.Runtime.InteropServices.Marshal]::ReleaseComObject($db) | Out-Null
             [System.Runtime.InteropServices.Marshal]::ReleaseComObject($com) | Out-Null
             Write-Host "SafeBrowseChild-Pilot.msi ProductVersion: '$msiVersion'"
-            if ($msiVersion -ne "1.0.4.15") {
-              Write-Error "MSI ProductVersion mismatch! Expected '1.0.4.15' but found '$msiVersion'"
+            if ($msiVersion -ne "1.0.4.16") {
+              Write-Error "MSI ProductVersion mismatch! Expected '1.0.4.16' but found '$msiVersion'"
               exit 1
             }
           } catch {
@@ -534,7 +534,7 @@ jobs:
           }
           Write-Host "  [OK] Previous files exist."
 
-          # Sub-step 3: Install new MSI (1.0.4.15) over it
+          # Sub-step 3: Install new MSI (1.0.4.16) over it
           $newMsi = (Resolve-Path "release/windows/SafeBrowseChild-Pilot.msi").Path
           Write-Host "`n[Step 3/12] Upgrading to new MSI ($newMsi)..."
           $upgradeLog = Join-Path $PWD "install-upgrade.log"

@@ -19,9 +19,9 @@ using System.Threading;
 [assembly: AssemblyCulture("")]
 [assembly: ComVisible(false)]
 [assembly: Guid("5E1F82A3-B4C5-6D7E-8F90-123456789ABC")]
-[assembly: AssemblyVersion("1.0.4.15")]
-[assembly: AssemblyFileVersion("1.0.4.15")]
-[assembly: AssemblyInformationalVersion("1.0.4.15")]
+[assembly: AssemblyVersion("1.0.4.16")]
+[assembly: AssemblyFileVersion("1.0.4.16")]
+[assembly: AssemblyInformationalVersion("1.0.4.16")]
 
 namespace SafeBrowse.UserHelper
 {
@@ -140,6 +140,20 @@ namespace SafeBrowse.UserHelper
                     return;
                 }
 
+                if (msgType == "PING")
+                {
+                    if (writer != null)
+                    {
+                        try
+                        {
+                            long nowMs = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+                            writer.Write(string.Format("{{\"type\":\"PONG\",\"timestamp\":{0}}}\n", nowMs));
+                        }
+                        catch { }
+                    }
+                    return;
+                }
+
                 if (msgType == "INTERACTIVE_DESKTOP_ACTION")
                 {
                     Match actionMatch = Regex.Match(rawMessage, "\"action\"\\s*:\\s*\"([^\"]+)\"");
@@ -148,16 +162,18 @@ namespace SafeBrowse.UserHelper
                     string requestId = requestIdMatch.Success ? UnescapeJson(requestIdMatch.Groups[1].Value) : "";
 
                     string error;
-                    bool success = LaunchElevatedSafeBrowseAction(action, rawMessage, out error);
+                    string status;
+                    bool success = LaunchElevatedSafeBrowseAction(action, rawMessage, out status, out error);
                     if (writer != null)
                     {
                         try
                         {
                             string resultMsg = string.Format(
-                                "{{\"type\":\"INTERACTIVE_DESKTOP_ACTION_RESULT\",\"requestId\":\"{0}\",\"action\":\"{1}\",\"success\":{2},\"error\":\"{3}\"}}\n",
+                                "{{\"type\":\"INTERACTIVE_DESKTOP_ACTION_RESULT\",\"requestId\":\"{0}\",\"action\":\"{1}\",\"success\":{2},\"status\":\"{3}\",\"error\":\"{4}\"}}\n",
                                 EscapeJson(requestId),
                                 EscapeJson(action),
                                 success ? "true" : "false",
+                                EscapeJson(status ?? (success ? "ELEVATED_PROCESS_STARTED" : "ACTION_FAILED")),
                                 EscapeJson(error ?? "")
                             );
                             writer.Write(resultMsg);
@@ -221,9 +237,10 @@ namespace SafeBrowse.UserHelper
             }
         }
 
-        private static bool LaunchElevatedSafeBrowseAction(string action, string rawMessage, out string error)
+        private static bool LaunchElevatedSafeBrowseAction(string action, string rawMessage, out string status, out string error)
         {
             error = "";
+            status = "ACTION_RECEIVED";
             try
             {
                 string baseDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -231,6 +248,7 @@ namespace SafeBrowse.UserHelper
                 if (!File.Exists(targetExe))
                 {
                     error = "SafeBrowseChild-Pilot.exe is missing from the installation directory.";
+                    status = "ACTION_FAILED";
                     LogMessage("WARN", error);
                     return false;
                 }
@@ -254,6 +272,7 @@ namespace SafeBrowse.UserHelper
                     if (!Regex.IsMatch(code, "^[A-Za-z0-9_-]{4,32}$"))
                     {
                         error = "Pairing code format is invalid.";
+                        status = "ACTION_FAILED";
                         return false;
                     }
                     if (!Regex.IsMatch(deviceName, "^[A-Za-z0-9 _-]{1,50}$"))
@@ -266,6 +285,7 @@ namespace SafeBrowse.UserHelper
                 else
                 {
                     error = "Interactive action is not allow-listed.";
+                    status = "ACTION_FAILED";
                     LogMessage("WARN", "Rejected non-allow-listed interactive action: " + action);
                     return false;
                 }
@@ -278,20 +298,30 @@ namespace SafeBrowse.UserHelper
                     WindowStyle = ProcessWindowStyle.Normal
                 };
 
+                LogMessage("INFO", string.Format("Invoking runas for action '{0}'...", action));
                 Process.Start(psi);
+                status = "ELEVATED_PROCESS_STARTED";
                 LogMessage("INFO", string.Format("Interactive action '{0}' dispatched through Windows UAC.", action));
                 return true;
             }
             catch (System.ComponentModel.Win32Exception ex)
             {
-                error = ex.NativeErrorCode == 1223
-                    ? "Windows administrator approval was cancelled."
-                    : ex.Message;
-                LogMessage("WARN", string.Format("Interactive action '{0}' failed: {1}", action, error));
+                if (ex.NativeErrorCode == 1223)
+                {
+                    status = "UAC_CANCELLED";
+                    error = "Administrator approval was cancelled. No changes were made.";
+                }
+                else
+                {
+                    status = "ACTION_FAILED";
+                    error = ex.Message;
+                }
+                LogMessage("WARN", string.Format("Interactive action '{0}' failed: {1} (NativeErrorCode: {2})", action, error, ex.NativeErrorCode));
                 return false;
             }
             catch (Exception ex)
             {
+                status = "ACTION_FAILED";
                 error = ex.Message;
                 LogMessage("WARN", string.Format("Interactive action '{0}' failed: {1}", action, error));
                 return false;
@@ -363,25 +393,25 @@ namespace SafeBrowse.UserHelper
             }
             catch (Exception ex)
             {
-                LogMessage("WARN", string.Format("Primary ShellExecuteEx launch failed: {0}. Attempting cmd fallback.", ex.Message));
+                LogMessage("WARN", string.Format("Primary ShellExecuteEx launch failed: {0}. Attempting shell protocol fallback.", ex.Message));
                 try
                 {
-                    // Fallback to cmd.exe start
-                    ProcessStartInfo fallback = new ProcessStartInfo("cmd.exe", "/c start \"\" /max \"" + url + "\"")
+                    // Fallback using shell protocol handler without console window flash
+                    ProcessStartInfo fallback = new ProcessStartInfo("rundll32.exe", "url.dll,FileProtocolHandler \"" + url + "\"")
                     {
                         CreateNoWindow = true,
                         WindowStyle = ProcessWindowStyle.Hidden,
                         UseShellExecute = false
                     };
                     Process.Start(fallback);
-                    method = "cmd_fallback";
-                    LogMessage("INFO", "Launched default browser via cmd.exe start fallback.");
+                    method = "shell_protocol_fallback";
+                    LogMessage("INFO", "Launched default browser via shell protocol handler fallback.");
                     return true;
                 }
                 catch (Exception fallbackEx)
                 {
                     method = "failed";
-                    LogMessage("WARN", string.Format("cmd fallback launch failed: {0}", fallbackEx.Message));
+                    LogMessage("WARN", string.Format("Shell protocol fallback launch failed: {0}", fallbackEx.Message));
                     return false;
                 }
             }

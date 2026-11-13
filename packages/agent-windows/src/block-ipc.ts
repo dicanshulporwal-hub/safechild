@@ -44,11 +44,23 @@ export interface InteractiveDesktopActionMessage {
   deviceName?: string;
 }
 
+export type HelperHealthState = 'NOT_RUNNING' | 'STARTING' | 'CONNECTED' | 'REGISTERED' | 'UNHEALTHY' | 'RECOVERING';
+
+export type InteractiveActionResultStatus =
+  | 'ACTION_RECEIVED'
+  | 'UAC_REQUESTED'
+  | 'UAC_CANCELLED'
+  | 'ELEVATED_PROCESS_STARTED'
+  | 'ACTION_FAILED'
+  | 'TIMEOUT'
+  | 'HELPER_DISCONNECTED';
+
 export interface InteractiveDesktopActionResult {
   type: 'INTERACTIVE_DESKTOP_ACTION_RESULT';
   action: InteractiveDesktopAction;
   requestId: string;
   success: boolean;
+  status?: InteractiveActionResultStatus;
   error?: string;
 }
 
@@ -58,6 +70,26 @@ export interface ConnectedHelper {
   pid?: number;
   sessionId?: number;
   registeredAt: number;
+  state: HelperHealthState;
+  lastHeartbeatAt?: number;
+}
+
+export type PipeSecurityStatus = 'PIPE_SECURITY_NOT_INITIALIZED' | 'PIPE_SECURITY_READY' | 'PIPE_SECURITY_FAILED';
+
+export interface RegistrationWaiter {
+  sessionId?: number;
+  accountName?: string;
+  resolve: (helper: ConnectedHelper) => void;
+  reject: (err: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
+export interface PendingActionWaiter {
+  requestId: string;
+  action: InteractiveDesktopAction;
+  socket: net.Socket;
+  resolve: (result: InteractiveDesktopActionResult) => void;
+  timer: NodeJS.Timeout;
 }
 
 export interface BlockPresentationResult {
@@ -145,6 +177,9 @@ export class BlockIpcServer {
   private domainDebounceMs: number = 12000;
   private globalThrottleMs: number = 2500;
   private isListening: boolean = false;
+  private pipeSecurityStatus: PipeSecurityStatus = 'PIPE_SECURITY_NOT_INITIALIZED';
+  private registrationWaiters: Set<RegistrationWaiter> = new Set();
+  private pendingActionWaiters: Map<string, PendingActionWaiter> = new Map();
 
   private activePolicyProvider?: () => ResolvedUserPolicy | null;
   private multiSessionChecker?: () => MultiSessionCheckResult;
@@ -167,6 +202,14 @@ export class BlockIpcServer {
 
   public isRunning(): boolean {
     return this.isListening;
+  }
+
+  public getPipeSecurityStatus(): PipeSecurityStatus {
+    return this.pipeSecurityStatus;
+  }
+
+  public setPipeSecurityStatusForTesting(status: PipeSecurityStatus): void {
+    this.pipeSecurityStatus = status;
   }
 
   public setActivePolicyProvider(provider: () => ResolvedUserPolicy | null): void {
@@ -193,6 +236,91 @@ export class BlockIpcServer {
     return Array.from(this.helpers.values());
   }
 
+  public getRegisteredHelpers(): ConnectedHelper[] {
+    return Array.from(this.helpers.values()).filter(
+      (h) => !h.socket.destroyed && h.state === 'REGISTERED'
+    );
+  }
+
+  public getRegisteredHelper(sessionId?: number | null, accountName?: string | null): ConnectedHelper | null {
+    const normAccount = accountName ? accountName.split('\\').pop()?.toLowerCase() : undefined;
+
+    // Session match first
+    if (typeof sessionId === 'number') {
+      for (const helper of this.helpers.values()) {
+        if (!helper.socket.destroyed && helper.state === 'REGISTERED' && helper.sessionId === sessionId) {
+          if (!normAccount) return helper;
+          const hName = helper.accountName ? helper.accountName.split('\\').pop()?.toLowerCase() : undefined;
+          if (hName === normAccount) return helper;
+        }
+      }
+    }
+
+    // Account match
+    if (normAccount) {
+      for (const helper of this.helpers.values()) {
+        if (!helper.socket.destroyed && helper.state === 'REGISTERED') {
+          const hName = helper.accountName ? helper.accountName.split('\\').pop()?.toLowerCase() : undefined;
+          if (hName === normAccount) {
+            if (sessionId === undefined || sessionId === null || helper.sessionId === undefined || helper.sessionId === sessionId) {
+              return helper;
+            }
+          }
+        }
+      }
+    }
+
+    // Single registered helper fallback if sessionId is not specified or matches
+    const registered = Array.from(this.helpers.values()).filter(
+      (h) => !h.socket.destroyed && h.state === 'REGISTERED'
+    );
+    if (registered.length === 1) {
+      const single = registered[0];
+      if (typeof sessionId === 'number' && single.sessionId !== undefined && single.sessionId !== sessionId) {
+        return null;
+      }
+      return single;
+    }
+
+    return null;
+  }
+
+  public waitForRegisteredHelper(
+    sessionId?: number | null,
+    accountName?: string | null,
+    timeoutMs: number = 7000
+  ): Promise<ConnectedHelper> {
+    const existing = this.getRegisteredHelper(sessionId, accountName);
+    if (existing) {
+      return Promise.resolve(existing);
+    }
+
+    return new Promise<ConnectedHelper>((resolve, reject) => {
+      let timer: NodeJS.Timeout;
+      const waiter: RegistrationWaiter = {
+        sessionId: sessionId ?? undefined,
+        accountName: accountName ?? undefined,
+        resolve: (helper: ConnectedHelper) => {
+          clearTimeout(timer);
+          this.registrationWaiters.delete(waiter);
+          resolve(helper);
+        },
+        reject: (err: Error) => {
+          clearTimeout(timer);
+          this.registrationWaiters.delete(waiter);
+          reject(err);
+        },
+        timer: (null as any),
+      };
+      timer = setTimeout(() => {
+        this.registrationWaiters.delete(waiter);
+        reject(new Error(`Timed out waiting for registered helper after ${timeoutMs}ms`));
+      }, timeoutMs);
+      waiter.timer = timer;
+      this.registrationWaiters.add(waiter);
+    });
+  }
+
   public start(): Promise<void> {
     if (this.isListening) {
       return Promise.resolve();
@@ -208,6 +336,14 @@ export class BlockIpcServer {
 
       this.server = net.createServer((socket) => {
         let buffer = '';
+        const initialHelper: ConnectedHelper = {
+          socket,
+          accountName: '',
+          registeredAt: 0,
+          state: 'CONNECTED',
+          lastHeartbeatAt: Date.now(),
+        };
+        this.helpers.set(socket, initialHelper);
 
         socket.on('data', (chunk) => {
           buffer += chunk.toString('utf8');
@@ -229,23 +365,27 @@ export class BlockIpcServer {
         socket.on('close', () => {
           const helper = this.helpers.get(socket);
           if (helper) {
+            helper.state = 'NOT_RUNNING';
             logServiceMessage(
               'INFO',
               `[BlockIpcServer] Helper disconnected: account='${helper.accountName}', PID=${helper.pid || 'N/A'}`
             );
           }
           this.helpers.delete(socket);
+          this.abortPendingWaitersForSocket(socket, 'HELPER_DISCONNECTED', 'SafeBrowse helper disconnected before action completed.');
         });
 
         socket.on('error', (err) => {
           const helper = this.helpers.get(socket);
           if (helper) {
+            helper.state = 'UNHEALTHY';
             logServiceMessage(
               'WARN',
               `[BlockIpcServer] Helper connection error: account='${helper.accountName}', PID=${helper.pid || 'N/A'}: ${err.message}`
             );
           }
           this.helpers.delete(socket);
+          this.abortPendingWaitersForSocket(socket, 'HELPER_DISCONNECTED', `Helper connection error: ${err.message}`);
         });
       });
 
@@ -259,8 +399,17 @@ export class BlockIpcServer {
         logServiceMessage('INFO', `[BlockIpcServer] Listening on ${this.pipePath}`);
         if (process.platform === 'win32') {
           try {
-            await configureWindowsPipeSecurity(this.pipePath);
-          } catch {}
+            const applied = await configureWindowsPipeSecurity(this.pipePath);
+            this.pipeSecurityStatus = applied ? 'PIPE_SECURITY_READY' : 'PIPE_SECURITY_FAILED';
+            if (!applied) {
+              logServiceMessage('WARN', `[BlockIpcServer] Named pipe security DACL could not be applied; status: PIPE_SECURITY_FAILED`);
+            }
+          } catch (e: any) {
+            this.pipeSecurityStatus = 'PIPE_SECURITY_FAILED';
+            logServiceMessage('WARN', `[BlockIpcServer] Named pipe security DACL error: ${e?.message || e}`);
+          }
+        } else {
+          this.pipeSecurityStatus = 'PIPE_SECURITY_READY';
         }
         resolve();
       });
@@ -268,49 +417,99 @@ export class BlockIpcServer {
   }
 
   public isHelperHealthyForSession(sessionId?: number, accountName?: string): boolean {
-    const normAccount = accountName ? accountName.split('\\').pop()?.toLowerCase() : undefined;
-    for (const helper of this.helpers.values()) {
-      if (helper.socket.destroyed) continue;
-      if (sessionId !== undefined && helper.sessionId !== undefined && helper.sessionId !== sessionId) {
-        continue;
+    return this.getRegisteredHelper(sessionId, accountName) !== null;
+  }
+
+  private abortPendingWaitersForSocket(socket: net.Socket, status: InteractiveActionResultStatus, error: string): void {
+    for (const [requestId, waiter] of Array.from(this.pendingActionWaiters.entries())) {
+      if (waiter.socket === socket) {
+        clearTimeout(waiter.timer);
+        this.pendingActionWaiters.delete(requestId);
+        waiter.resolve({
+          type: 'INTERACTIVE_DESKTOP_ACTION_RESULT',
+          action: waiter.action,
+          requestId,
+          success: false,
+          status,
+          error,
+        });
       }
-      if (normAccount && helper.accountName) {
-        const hName = helper.accountName.split('\\').pop()?.toLowerCase();
-        if (hName !== normAccount) continue;
-      }
-      return true;
     }
-    return false;
   }
 
   private handleHelperMessage(socket: net.Socket, rawMessage: string): void {
     try {
       const data = JSON.parse(rawMessage);
       if (data.type === 'REGISTER_HELPER') {
-        const helper: ConnectedHelper = {
-          socket,
-          accountName: (data.accountName || '').trim(),
-          pid: typeof data.pid === 'number' ? data.pid : undefined,
-          sessionId: typeof data.sessionId === 'number' ? data.sessionId : undefined,
-          registeredAt: Date.now(),
-        };
-        this.helpers.set(socket, helper);
+        let helper = this.helpers.get(socket);
+        if (!helper) {
+          helper = {
+            socket,
+            accountName: '',
+            registeredAt: 0,
+            state: 'CONNECTED',
+            lastHeartbeatAt: Date.now(),
+          };
+          this.helpers.set(socket, helper);
+        }
+
+        helper.accountName = (data.accountName || '').trim();
+        helper.pid = typeof data.pid === 'number' ? data.pid : undefined;
+        helper.sessionId = typeof data.sessionId === 'number' ? data.sessionId : undefined;
+        helper.registeredAt = Date.now();
+        helper.state = 'REGISTERED';
+        helper.lastHeartbeatAt = Date.now();
+
         logServiceMessage(
           'INFO',
           `[BlockIpcServer] Helper registered: account='${helper.accountName}', PID=${helper.pid || 'N/A'}, SessionId=${helper.sessionId ?? 'N/A'}`
         );
 
         const ack: HelperRegisterAck = { type: 'REGISTER_ACK', status: 'OK' };
-        socket.write(JSON.stringify(ack) + '\n');
+        try {
+          socket.write(JSON.stringify(ack) + '\n');
+        } catch {}
+
+        // Resolve any matching registration waiters
+        for (const waiter of Array.from(this.registrationWaiters)) {
+          const sessionMatch = waiter.sessionId === undefined || helper.sessionId === undefined || waiter.sessionId === helper.sessionId;
+          const targetName = waiter.accountName ? waiter.accountName.split('\\').pop()?.toLowerCase() : undefined;
+          const helperName = helper.accountName ? helper.accountName.split('\\').pop()?.toLowerCase() : undefined;
+          const accountMatch = !targetName || !helperName || targetName === helperName;
+          if (sessionMatch && accountMatch) {
+            waiter.resolve(helper);
+          }
+        }
 
         // Bounded retry of any pending presentation for this helper session/account
         this.flushPendingPresentationsForHelper(helper);
+      } else if (data.type === 'PONG') {
+        const helper = this.helpers.get(socket);
+        if (helper) {
+          helper.lastHeartbeatAt = Date.now();
+        }
       } else if (data.type === 'INTERACTIVE_DESKTOP_ACTION_RESULT') {
         const helper = this.helpers.get(socket);
+        const status: InteractiveActionResultStatus = data.status || (data.success ? 'ELEVATED_PROCESS_STARTED' : 'ACTION_FAILED');
         logServiceMessage(
           data.success ? 'INFO' : 'WARN',
-          `[BlockIpcServer] Interactive desktop action result from helper (PID=${helper?.pid || 'N/A'}, SessionId=${helper?.sessionId ?? 'N/A'}): action='${data.action || 'unknown'}', requestId='${data.requestId || 'unknown'}', success=${Boolean(data.success)}${data.error ? `, error='${data.error}'` : ''}`
+          `[BlockIpcServer] Interactive desktop action result from helper (PID=${helper?.pid || 'N/A'}, SessionId=${helper?.sessionId ?? 'N/A'}): action='${data.action || 'unknown'}', requestId='${data.requestId || 'unknown'}', success=${Boolean(data.success)}, status='${status}'${data.error ? `, error='${data.error}'` : ''}`
         );
+
+        const requestId = data.requestId;
+        if (requestId && this.pendingActionWaiters.has(requestId)) {
+          const waiter = this.pendingActionWaiters.get(requestId)!;
+          this.pendingActionWaiters.delete(requestId);
+          clearTimeout(waiter.timer);
+          waiter.resolve({
+            type: 'INTERACTIVE_DESKTOP_ACTION_RESULT',
+            action: (data.action || waiter.action) as InteractiveDesktopAction,
+            requestId,
+            success: Boolean(data.success),
+            status,
+            error: data.error,
+          });
+        }
       } else if (data.type === 'PRESENTATION_RESULT') {
         const helper = this.helpers.get(socket);
         logServiceMessage(
@@ -379,7 +578,7 @@ export class BlockIpcServer {
 
     if (typeof sessionId === 'number') {
       for (const [socket, helper] of this.helpers.entries()) {
-        if (!socket.destroyed && helper.sessionId === sessionId) {
+        if (!socket.destroyed && helper.state === 'REGISTERED' && helper.sessionId === sessionId) {
           sessionMatches.push(socket);
         }
       }
@@ -391,7 +590,7 @@ export class BlockIpcServer {
     if (targetName) {
       const accountMatches: net.Socket[] = [];
       for (const [socket, helper] of this.helpers.entries()) {
-        if (socket.destroyed) continue;
+        if (socket.destroyed || helper.state !== 'REGISTERED') continue;
         const helperName = helper.accountName ? helper.accountName.split('\\').pop()?.toLowerCase() : undefined;
         if (helperName === targetName) {
           accountMatches.push(socket);
@@ -402,13 +601,132 @@ export class BlockIpcServer {
       }
     }
 
-    // Safe fallback only when exactly one interactive helper is connected.
-    if (this.helpers.size === 1) {
-      const [socket] = Array.from(this.helpers.keys());
-      if (!socket.destroyed) return [socket];
+    // Safe fallback only when exactly one interactive registered helper is connected.
+    const registered = Array.from(this.helpers.entries()).filter(
+      ([s, h]) => !s.destroyed && h.state === 'REGISTERED'
+    );
+    if (registered.length === 1) {
+      const [singleSocket, singleHelper] = registered[0];
+      if (typeof sessionId === 'number' && singleHelper.sessionId !== undefined && singleHelper.sessionId !== sessionId) {
+        return [];
+      }
+      return [singleSocket];
     }
 
     return [];
+  }
+
+  /**
+   * Dispatches an interactive desktop-management action to SafeBrowseUserHelper
+   * in the active Windows session and awaits correlated result reporting UAC approval
+   * or cancellation.
+   */
+  public dispatchInteractiveDesktopActionWithCorrelation(
+    action: InteractiveDesktopAction,
+    sessionId?: number | null,
+    accountName?: string | null,
+    options?: { code?: string; deviceName?: string },
+    timeoutMs: number = 30000
+  ): Promise<InteractiveDesktopActionResult> {
+    if (!['SETUP_PIN', 'CONFIGURE_ACCOUNTS', 'ATTACH_DEVICE'].includes(action)) {
+      return Promise.resolve({
+        type: 'INTERACTIVE_DESKTOP_ACTION_RESULT',
+        action,
+        requestId: '',
+        success: false,
+        status: 'ACTION_FAILED',
+        error: 'Interactive action is not allow-listed.',
+      });
+    }
+
+    const helper = this.getRegisteredHelper(sessionId, accountName);
+    if (!helper || helper.socket.destroyed || helper.state !== 'REGISTERED') {
+      return Promise.resolve({
+        type: 'INTERACTIVE_DESKTOP_ACTION_RESULT',
+        action,
+        requestId: '',
+        success: false,
+        status: 'ACTION_FAILED',
+        error: 'NO_CONNECTED_HELPER',
+      });
+    }
+
+    const requestId = `mgmt-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+    const payload: InteractiveDesktopActionMessage = {
+      type: 'INTERACTIVE_DESKTOP_ACTION',
+      action,
+      requestId,
+      timestamp: Date.now(),
+    };
+
+    if (action === 'ATTACH_DEVICE') {
+      const code = String(options?.code || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32);
+      const deviceName = String(options?.deviceName || 'Family Laptop')
+        .replace(/[^A-Za-z0-9 _-]/g, '')
+        .slice(0, 50);
+      if (code) payload.code = code;
+      payload.deviceName = deviceName || 'Family Laptop';
+    }
+
+    const socket = helper.socket;
+    const message = JSON.stringify(payload) + '\n';
+
+    return new Promise<InteractiveDesktopActionResult>((resolve) => {
+      let timer: NodeJS.Timeout;
+      const waiter: PendingActionWaiter = {
+        requestId,
+        action,
+        socket,
+        resolve,
+        timer: (null as any),
+      };
+
+      timer = setTimeout(() => {
+        this.pendingActionWaiters.delete(requestId);
+        logServiceMessage('WARN', `[BlockIpcServer] Action '${action}' (requestId: '${requestId}') timed out waiting for helper result after ${timeoutMs}ms.`);
+        resolve({
+          type: 'INTERACTIVE_DESKTOP_ACTION_RESULT',
+          action,
+          requestId,
+          success: false,
+          status: 'TIMEOUT',
+          error: 'Administrator approval timed out. Please try again.',
+        });
+      }, timeoutMs);
+      waiter.timer = timer;
+
+      this.pendingActionWaiters.set(requestId, waiter);
+
+      try {
+        socket.write(message, (err) => {
+          if (err) {
+            clearTimeout(timer);
+            this.pendingActionWaiters.delete(requestId);
+            this.helpers.delete(socket);
+            resolve({
+              type: 'INTERACTIVE_DESKTOP_ACTION_RESULT',
+              action,
+              requestId,
+              success: false,
+              status: 'ACTION_FAILED',
+              error: `Failed to write action to helper socket: ${err.message}`,
+            });
+          }
+        });
+      } catch (writeErr: any) {
+        clearTimeout(timer);
+        this.pendingActionWaiters.delete(requestId);
+        this.helpers.delete(socket);
+        resolve({
+          type: 'INTERACTIVE_DESKTOP_ACTION_RESULT',
+          action,
+          requestId,
+          success: false,
+          status: 'ACTION_FAILED',
+          error: `Exception writing action to helper: ${writeErr?.message || writeErr}`,
+        });
+      }
+    });
   }
 
   /**
@@ -661,6 +979,28 @@ export class BlockIpcServer {
 
   public stop(): Promise<void> {
     this.isListening = false;
+    this.pipeSecurityStatus = 'PIPE_SECURITY_NOT_INITIALIZED';
+
+    for (const waiter of this.registrationWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new Error('BlockIpcServer stopped'));
+    }
+    this.registrationWaiters.clear();
+
+    for (const [requestId, waiter] of Array.from(this.pendingActionWaiters.entries())) {
+      clearTimeout(waiter.timer);
+      this.pendingActionWaiters.delete(requestId);
+      waiter.resolve({
+        type: 'INTERACTIVE_DESKTOP_ACTION_RESULT',
+        action: waiter.action,
+        requestId,
+        success: false,
+        status: 'ACTION_FAILED',
+        error: 'BlockIpcServer stopped',
+      });
+    }
+    this.pendingActionWaiters.clear();
+
     for (const [socket, helper] of this.helpers.entries()) {
       try {
         socket.destroy();

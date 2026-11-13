@@ -19,9 +19,9 @@ using System.Threading;
 [assembly: AssemblyCulture("")]
 [assembly: ComVisible(false)]
 [assembly: Guid("4D9E71F2-92A3-483B-A70E-9218D6C4B922")]
-[assembly: AssemblyVersion("1.0.4.15")]
-[assembly: AssemblyFileVersion("1.0.4.15")]
-[assembly: AssemblyInformationalVersion("1.0.4.15")]
+[assembly: AssemblyVersion("1.0.4.16")]
+[assembly: AssemblyFileVersion("1.0.4.16")]
+[assembly: AssemblyInformationalVersion("1.0.4.16")]
 
 namespace SafeBrowse
 {
@@ -343,10 +343,10 @@ namespace SafeBrowse
             Log("SafeBrowse Service Host started successfully; OnStart returned promptly to SCM.");
             try
             {
-                uint activeConsoleSession = WTSGetActiveConsoleSessionId();
-                if (activeConsoleSession != 0 && activeConsoleSession != 0xFFFFFFFF)
+                uint activeSession = GetInteractiveUserSessionId();
+                if (activeSession != 0 && activeSession != 0xFFFFFFFF)
                 {
-                    EnsureUserHelperRunning(activeConsoleSession);
+                    EnsureUserHelperRunning(activeSession);
                 }
             }
             catch { }
@@ -689,7 +689,7 @@ namespace SafeBrowse
                 Log(string.Format("[SESSION] Windows session change detected: {0} (Session ID {1})", changeDescription.Reason, changeDescription.SessionId));
                 base.OnSessionChange(changeDescription);
                 UpdateActiveConsoleSession(changeDescription.Reason.ToString(), changeDescription.SessionId);
-                uint activeSession = WTSGetActiveConsoleSessionId();
+                uint activeSession = GetInteractiveUserSessionId();
                 if (activeSession != 0 && activeSession != 0xFFFFFFFF)
                 {
                     EnsureUserHelperRunning(activeSession);
@@ -706,11 +706,15 @@ namespace SafeBrowse
             try
             {
                 uint activeConsoleSession = WTSGetActiveConsoleSessionId();
-                uint targetSession = activeConsoleSession;
+                uint targetSession = GetInteractiveUserSessionId();
+                if (targetSession == 0 || targetSession == 0xFFFFFFFF)
+                {
+                    targetSession = activeConsoleSession;
+                }
                 string lowerReason = (reason ?? "").ToLowerInvariant();
 
-                // If activeConsoleSession is unset and this is not a disconnect/logoff event, fallback to reported sessionId
-                if (targetSession == 0xFFFFFFFF && !lowerReason.Contains("disconnect") && !lowerReason.Contains("logoff") && sessionId > 0)
+                // If targetSession is unset and this is not a disconnect/logoff event, fallback to reported sessionId
+                if ((targetSession == 0 || targetSession == 0xFFFFFFFF) && !lowerReason.Contains("disconnect") && !lowerReason.Contains("logoff") && sessionId > 0)
                 {
                     targetSession = (uint)sessionId;
                 }
@@ -893,15 +897,86 @@ namespace SafeBrowse
                     username ?? "Unknown", sidStr ?? "N/A", targetSession != 0xFFFFFFFF ? targetSession.ToString() : "N/A", reason, activeSessions.Count, disconnectedSessions.Count));
 
                 // Self-healing: Ensure SafeBrowseUserHelper is running in the active desktop session
-                if (activeConsoleSession != 0 && activeConsoleSession != 0xFFFFFFFF)
+                uint helperTargetSession = targetSession != 0xFFFFFFFF && targetSession != 0 ? targetSession : GetInteractiveUserSessionId();
+                if (helperTargetSession != 0 && helperTargetSession != 0xFFFFFFFF)
                 {
-                    EnsureUserHelperRunning(activeConsoleSession);
+                    EnsureUserHelperRunning(helperTargetSession);
                 }
             }
             catch (Exception ex)
             {
                 Log(string.Format("[WARN] Exception updating active console session state: {0}", ex.Message));
             }
+        }
+
+        public uint GetInteractiveUserSessionId()
+        {
+            uint consoleSession = WTSGetActiveConsoleSessionId();
+            uint selectedSession = 0;
+
+            IntPtr pSessionInfo = IntPtr.Zero;
+            uint sessionCount = 0;
+            if (WTSEnumerateSessions(IntPtr.Zero, 0, 1, out pSessionInfo, out sessionCount))
+            {
+                try
+                {
+                    int dataSize = Marshal.SizeOf(typeof(WTS_SESSION_INFO));
+                    long current = pSessionInfo.ToInt64();
+                    List<WTS_SESSION_INFO> activeUserSessions = new List<WTS_SESSION_INFO>();
+
+                    for (int i = 0; i < sessionCount; i++)
+                    {
+                        WTS_SESSION_INFO si = (WTS_SESSION_INFO)Marshal.PtrToStructure(new IntPtr(current), typeof(WTS_SESSION_INFO));
+                        current += dataSize;
+
+                        if (si.SessionId == 0) continue; // Rule 3: Never target Session 0
+                        if (si.State != WTS_CONNECTSTATE_CLASS.WTSActive) continue; // Rule 4: Never target disconnected/non-active
+
+                        // Check if session has a valid logged in user
+                        string user = null;
+                        IntPtr pBuf = IntPtr.Zero;
+                        uint bytesRet = 0;
+                        if (WTSQuerySessionInformation(IntPtr.Zero, si.SessionId, WTS_INFO_CLASS.WTSUserName, out pBuf, out bytesRet))
+                        {
+                            try { user = Marshal.PtrToStringAnsi(pBuf); }
+                            finally { WTSFreeMemory(pBuf); }
+                        }
+
+                        if (!string.IsNullOrEmpty(user))
+                        {
+                            activeUserSessions.Add(si);
+                            if (si.SessionId == consoleSession)
+                            {
+                                // Rule 1: Prefer active console session when it is a valid signed-in user
+                                selectedSession = si.SessionId;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Rule 2: Otherwise use the unique WTSActive interactive session
+                    if (selectedSession == 0 && activeUserSessions.Count > 0)
+                    {
+                        selectedSession = activeUserSessions[0].SessionId;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log("[WARN] Exception enumerating interactive user sessions: " + ex.Message);
+                }
+                finally
+                {
+                    if (pSessionInfo != IntPtr.Zero) WTSFreeMemory(pSessionInfo);
+                }
+            }
+
+            if (selectedSession == 0 && consoleSession != 0 && consoleSession != 0xFFFFFFFF)
+            {
+                selectedSession = consoleSession;
+            }
+
+            Log(string.Format("[SESSION] Selected interactive desktop session: {0} (consoleSession: {1})", selectedSession != 0 ? selectedSession.ToString() : "NONE", consoleSession != 0xFFFFFFFF ? consoleSession.ToString() : "N/A"));
+            return selectedSession;
         }
 
         public bool EnsureUserHelperRunning(uint sessionId, bool forceRestart = false)
@@ -920,6 +995,7 @@ namespace SafeBrowse
 
                 // Check if SafeBrowseUserHelper is already running in this session
                 Process[] procs = Process.GetProcessesByName("SafeBrowseUserHelper");
+                bool existingRunningInSession = false;
                 foreach (Process p in procs)
                 {
                     try
@@ -934,15 +1010,28 @@ namespace SafeBrowse
                             }
                             else
                             {
-                                return true; // Already running and healthy
+                                existingRunningInSession = true;
                             }
                         }
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        Log(string.Format("[WARN] Error managing helper process PID {0}: {1}", p.Id, ex.Message));
+                    }
                     finally
                     {
                         p.Dispose();
                     }
+                }
+
+                if (!forceRestart && existingRunningInSession)
+                {
+                    return true; // Already running and healthy
+                }
+
+                if (forceRestart)
+                {
+                    Thread.Sleep(150);
                 }
 
                 Log(string.Format("[HELPER] Launch requested for Session {0} (forceRestart={1})...", sessionId, forceRestart));
@@ -1297,7 +1386,7 @@ namespace SafeBrowse
                 {
                     try
                     {
-                        uint loopConsoleSession = WTSGetActiveConsoleSessionId();
+                        uint loopConsoleSession = GetInteractiveUserSessionId();
                         if (loopConsoleSession != 0 && loopConsoleSession != 0xFFFFFFFF)
                         {
                             EnsureUserHelperRunning(loopConsoleSession);
@@ -1434,8 +1523,12 @@ namespace SafeBrowse
             {
                 bool forceRecovery = args[0] == "--recover-helper";
                 uint targetSession = 0;
-                if (args.Length > 1 && uint.TryParse(args[1], out targetSession)) { }
-                else { targetSession = WTSGetActiveConsoleSessionId(); }
+                if (args.Length > 1 && uint.TryParse(args[1], out targetSession) && targetSession != 0 && targetSession != 0xFFFFFFFF) { }
+                else
+                {
+                    SafeBrowseServiceHost tempHost = new SafeBrowseServiceHost();
+                    targetSession = tempHost.GetInteractiveUserSessionId();
+                }
 
                 if (targetSession != 0 && targetSession != 0xFFFFFFFF)
                 {

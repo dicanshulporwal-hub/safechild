@@ -17,11 +17,17 @@ import { evaluateSystemStatus } from './agent-cli';
 import { networkManager, WindowsNetworkManager, logServiceMessage } from './network-manager';
 import { parentPinManager, ParentPinManager } from './parent-pin-manager';
 import { normalizePairingCode, CURRENT_WINDOWS_PROTOCOL_VERSION } from '@safebrowse/shared';
-import { blockIpcServer, InteractiveDesktopAction } from './block-ipc';
+import {
+  blockIpcServer,
+  BlockIpcServer,
+  InteractiveDesktopAction,
+  InteractiveActionResultStatus,
+  InteractiveDesktopActionResult,
+} from './block-ipc';
 
 /**
  * Sanitizes raw technical error strings (PowerShell, CLIXML, CIM, WMI, stack traces, file paths)
- * to ensure parents only see clear, friendly, and non-technical error messages. (P0-10)
+ * to ensure parents only see clear, friendly, and non-technical error messages. (P0-10, P0-11)
  */
 export function sanitizeParentErrorMessage(raw: any): string {
   if (!raw) return 'An unexpected error occurred. Please try again.';
@@ -49,6 +55,18 @@ export function sanitizeParentErrorMessage(raw: any): string {
     str.includes('ETIMEDOUT') ||
     str.includes('WMI') ||
     str.includes('CIM') ||
+    str.includes('Session 0') ||
+    str.includes('session 0') ||
+    str.includes('WTS') ||
+    str.includes('SafeBrowseUserHelper') ||
+    str.includes('UserHelper') ||
+    str.includes('Win32Exception') ||
+    str.includes('NativeErrorCode') ||
+    str.includes('1223') ||
+    str.includes('NO_CONNECTED_HELPER') ||
+    str.includes('HELPER_DISCONNECTED') ||
+    str.includes('PIPE_SECURITY') ||
+    str.includes('pipe') ||
     str.includes('C:\\Program Files') ||
     str.includes('packages/agent-windows') ||
     str.includes('Traceback') ||
@@ -59,6 +77,21 @@ export function sanitizeParentErrorMessage(raw: any): string {
   }
 
   const lower = str.toLowerCase();
+  if (lower.includes('1223') || lower.includes('cancel')) {
+    return 'Administrator approval was cancelled. No changes were made.';
+  }
+
+  if (
+    lower.includes('userhelper') ||
+    lower.includes('helper') ||
+    lower.includes('session 0') ||
+    lower.includes('wts') ||
+    lower.includes('pipe') ||
+    lower.includes('ipc')
+  ) {
+    return 'SafeBrowse could not start secure Windows approval. Please close and reopen SafeBrowse and try again.';
+  }
+
   if (
     lower.includes('dns') ||
     lower.includes('interfaceindex') ||
@@ -91,6 +124,138 @@ export class GuiServer {
   private cachedSystemStatus: any = null;
   private lastSystemStatusTime: number = 0;
   private isEvaluatingSystemStatus: boolean = false;
+  private interactiveElevationTestingEnabled: boolean = false;
+  private helperRecoveryHook?: (sessionId?: number) => void;
+  private ipcServer: BlockIpcServer;
+
+  public setInteractiveElevationTestingEnabled(enabled: boolean): void {
+    this.interactiveElevationTestingEnabled = enabled;
+  }
+
+  public setHelperRecoveryHook(hook: (sessionId?: number) => void): void {
+    this.helperRecoveryHook = hook;
+  }
+
+  public setBlockIpcServerForTesting(server: BlockIpcServer): void {
+    this.ipcServer = server;
+  }
+
+  public async requestInteractiveElevation(
+    action: InteractiveDesktopAction,
+    options?: { code?: string; deviceName?: string }
+  ): Promise<{ success: boolean; status: InteractiveActionResultStatus; error?: string; message?: string; requestId?: string }> {
+    if (process.env.NODE_ENV === 'test' && !this.interactiveElevationTestingEnabled && !this.ipcServer.isRunning()) {
+      const actionMsg =
+        action === 'ATTACH_DEVICE'
+          ? 'Windows administrator approval prompt requested in the active desktop session.'
+          : action === 'SETUP_PIN'
+          ? 'Administrator approval requested for Parent PIN setup in the active Windows desktop session.'
+          : 'Administrator approval requested in the active Windows desktop session.';
+      return {
+        success: true,
+        status: 'ELEVATED_PROCESS_STARTED',
+        message: actionMsg,
+        requestId: 'test-simulated-req',
+      };
+    }
+
+    let activeConsole: { sid: string | null; username: string | null; sessionId?: number | null } | null = null;
+    try {
+      activeConsole = await this.accountMgr.getActiveConsoleSession();
+    } catch {}
+
+    const sessionId = typeof activeConsole?.sessionId === 'number' ? activeConsole.sessionId : undefined;
+    const username = activeConsole?.username || undefined;
+
+    let helper = this.ipcServer.getRegisteredHelper(sessionId, username);
+    if (!helper) {
+      if (this.helperRecoveryHook) {
+        try {
+          this.helperRecoveryHook(sessionId);
+        } catch (e: any) {
+          logServiceMessage('WARN', `[SafeBrowse GUI] Helper recovery hook error: ${e?.message || e}`);
+        }
+      }
+
+      try {
+        const hostExe = path.join(this.configMgr.getInstallDir(), 'SafeBrowseServiceHost.exe');
+        if (fs.existsSync(hostExe) && process.platform === 'win32') {
+          const args = sessionId !== undefined ? ['--recover-helper', String(sessionId)] : ['--recover-helper'];
+          await safeExecFileAsync(hostExe, args, { windowsHide: true });
+        }
+      } catch (e: any) {
+        logServiceMessage('WARN', `[SafeBrowse GUI] ServiceHost --recover-helper invocation error: ${e?.message || e}`);
+      }
+
+      try {
+        helper = await this.ipcServer.waitForRegisteredHelper(sessionId, username, 7000);
+      } catch (waitErr: any) {
+        logServiceMessage('WARN', `[SafeBrowse GUI] Helper registration timed out for session ${sessionId ?? 'N/A'}: ${waitErr?.message || waitErr}`);
+        return {
+          success: false,
+          status: 'TIMEOUT',
+          error: 'SafeBrowse could not start secure Windows approval. Please close and reopen SafeBrowse and try again.',
+        };
+      }
+    }
+
+    const result = await this.ipcServer.dispatchInteractiveDesktopActionWithCorrelation(
+      action,
+      sessionId,
+      username,
+      options,
+      30000
+    );
+
+    if (result.success && result.status === 'ELEVATED_PROCESS_STARTED') {
+      const actionMsg =
+        action === 'ATTACH_DEVICE'
+          ? 'Windows administrator approval prompt requested in the active desktop session.'
+          : action === 'SETUP_PIN'
+          ? 'Administrator approval requested for Parent PIN setup in the active Windows desktop session.'
+          : 'Administrator approval requested in the active Windows desktop session.';
+      return {
+        success: true,
+        status: 'ELEVATED_PROCESS_STARTED',
+        message: actionMsg,
+        requestId: result.requestId,
+      };
+    }
+
+    if (result.status === 'UAC_CANCELLED') {
+      return {
+        success: false,
+        status: 'UAC_CANCELLED',
+        error: 'Administrator approval was cancelled. No changes were made.',
+        requestId: result.requestId,
+      };
+    }
+
+    if (result.status === 'TIMEOUT') {
+      return {
+        success: false,
+        status: 'TIMEOUT',
+        error: 'SafeBrowse administrator approval timed out. Please try again.',
+        requestId: result.requestId,
+      };
+    }
+
+    if (result.status === 'HELPER_DISCONNECTED') {
+      return {
+        success: false,
+        status: 'HELPER_DISCONNECTED',
+        error: 'SafeBrowse helper disconnected. Please try again.',
+        requestId: result.requestId,
+      };
+    }
+
+    return {
+      success: false,
+      status: result.status || 'ACTION_FAILED',
+      error: sanitizeParentErrorMessage(result.error || 'Failed to start Windows administrator approval.'),
+      requestId: result.requestId,
+    };
+  }
 
   public async getOrRefreshSystemStatus(): Promise<any> {
     const now = Date.now();
@@ -117,12 +282,14 @@ export class GuiServer {
     customConfigMgr?: ConfigManager,
     customAccountMgr?: WindowsAccountManager,
     customNetworkMgr?: WindowsNetworkManager,
-    customPinMgr?: ParentPinManager
+    customPinMgr?: ParentPinManager,
+    customBlockIpcServer?: BlockIpcServer
   ) {
     this.configMgr = customConfigMgr || configManager;
     this.accountMgr = customAccountMgr || accountManager;
     this.networkMgr = customNetworkMgr || networkManager;
     this.pinMgr = customPinMgr || (customConfigMgr ? new ParentPinManager(customConfigMgr) : parentPinManager);
+    this.ipcServer = customBlockIpcServer || blockIpcServer;
     if (this.networkMgr.setConfigManagerForTesting) {
       this.networkMgr.setConfigManagerForTesting(this.configMgr);
     }
@@ -163,7 +330,7 @@ export class GuiServer {
             JSON.stringify({
               status: 'ok',
               service: 'SafeBrowse',
-              version: '1.0.4.15',
+              version: '1.0.4.16',
             })
           );
           return;
@@ -201,36 +368,15 @@ export class GuiServer {
         const dispatchInteractiveAction = async (
           action: InteractiveDesktopAction,
           options?: { code?: string; deviceName?: string }
-        ): Promise<{ sent: boolean; reason: string; requestId?: string }> => {
-          // Unit/integration tests do not have a real Windows desktop helper.
-          if (process.env.NODE_ENV === 'test') {
-            return { sent: true, reason: 'TEST_SIMULATED_INTERACTIVE_DISPATCH', requestId: 'test-request' };
-          }
-
-          const sessionId = typeof activeConsole?.sessionId === 'number' ? activeConsole.sessionId : undefined;
-          const username = activeConsole?.username || undefined;
-          let result = blockIpcServer.dispatchInteractiveDesktopAction(action, sessionId, username, options);
-          if (result.sent || process.platform !== 'win32') return result;
-
-          // Self-heal the interactive bridge if it is not registered yet.
-          try {
-            const hostExe = path.join(this.configMgr.getInstallDir(), 'SafeBrowseServiceHost.exe');
-            if (fs.existsSync(hostExe)) {
-              const args = sessionId !== undefined
-                ? ['--launch-helper', String(sessionId)]
-                : ['--launch-helper'];
-              await safeExecFileAsync(hostExe, args, { windowsHide: true });
-              for (let attempt = 0; attempt < 10; attempt++) {
-                await new Promise((resolve) => setTimeout(resolve, 200));
-                result = blockIpcServer.dispatchInteractiveDesktopAction(action, sessionId, username, options);
-                if (result.sent) return result;
-              }
-            }
-          } catch (e: any) {
-            logServiceMessage('WARN', `[SafeBrowse GUI] Interactive helper recovery failed: ${e.message}`);
-          }
-
-          return result;
+        ): Promise<{ sent: boolean; reason: string; requestId?: string; status?: InteractiveActionResultStatus; error?: string }> => {
+          const elev = await this.requestInteractiveElevation(action, options);
+          return {
+            sent: elev.success,
+            reason: elev.success ? 'DISPATCHED_TO_INTERACTIVE_HELPER' : (elev.status || 'FAILED'),
+            status: elev.status,
+            error: elev.error,
+            requestId: elev.requestId,
+          };
         };
 
         // Endpoint: POST /api/verify-pin (Parent lock unlock)
@@ -647,10 +793,14 @@ export class GuiServer {
                 deviceName: safeName || 'Family Laptop',
               });
               if (!dispatch.sent) {
-                res.writeHead(503, { 'Content-Type': 'application/json' });
+                const isCancelled = dispatch.status === 'UAC_CANCELLED';
+                const statusCode = isCancelled ? 403 : (dispatch.status === 'TIMEOUT' ? 504 : 503);
+                res.writeHead(statusCode, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({
-                  error: 'SafeBrowse could not open the Windows administrator approval prompt in your desktop session. Please sign in to Windows and try again.',
+                  error: dispatch.error || (isCancelled ? 'Administrator approval was cancelled. No changes were made.' : 'SafeBrowse could not start secure Windows approval. Please close and reopen SafeBrowse and try again.'),
+                  status: dispatch.status,
                   reason: dispatch.reason,
+                  requestId: dispatch.requestId,
                 }));
                 return;
               }
@@ -668,8 +818,8 @@ export class GuiServer {
               res.end(
                 JSON.stringify({
                   error: isCancelled
-                    ? 'Administrator approval is required to attach this device.'
-                    : e.message,
+                    ? 'Administrator approval was cancelled. No changes were made.'
+                    : sanitizeParentErrorMessage(e.message),
                 })
               );
             }
@@ -688,10 +838,14 @@ export class GuiServer {
           try {
             const dispatch = await dispatchInteractiveAction('CONFIGURE_ACCOUNTS');
             if (!dispatch.sent) {
-              res.writeHead(503, { 'Content-Type': 'application/json' });
+              const isCancelled = dispatch.status === 'UAC_CANCELLED';
+              const statusCode = isCancelled ? 403 : (dispatch.status === 'TIMEOUT' ? 504 : 503);
+              res.writeHead(statusCode, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({
-                error: 'SafeBrowse could not open the account settings approval prompt in your Windows desktop session.',
+                error: dispatch.error || (isCancelled ? 'Administrator approval was cancelled. No changes were made.' : 'SafeBrowse could not start secure Windows approval. Please close and reopen SafeBrowse and try again.'),
+                status: dispatch.status,
                 reason: dispatch.reason,
+                requestId: dispatch.requestId,
               }));
               return;
             }
@@ -709,8 +863,8 @@ export class GuiServer {
             res.end(
               JSON.stringify({
                 error: isCancelled
-                  ? 'Administrator approval is required to reconfigure accounts.'
-                  : e.message,
+                  ? 'Administrator approval was cancelled. No changes were made.'
+                  : sanitizeParentErrorMessage(e.message),
               })
             );
           }
@@ -736,10 +890,14 @@ export class GuiServer {
           try {
             const dispatch = await dispatchInteractiveAction('SETUP_PIN');
             if (!dispatch.sent) {
-              res.writeHead(503, { 'Content-Type': 'application/json' });
+              const isCancelled = dispatch.status === 'UAC_CANCELLED';
+              const statusCode = isCancelled ? 403 : (dispatch.status === 'TIMEOUT' ? 504 : 503);
+              res.writeHead(statusCode, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({
-                error: 'SafeBrowse could not open the Parent PIN setup approval prompt in your Windows desktop session.',
+                error: dispatch.error || (isCancelled ? 'Administrator approval was cancelled. No changes were made.' : 'SafeBrowse could not start secure Windows approval. Please close and reopen SafeBrowse and try again.'),
+                status: dispatch.status,
                 reason: dispatch.reason,
+                requestId: dispatch.requestId,
               }));
               return;
             }
@@ -757,8 +915,8 @@ export class GuiServer {
             res.end(
               JSON.stringify({
                 error: isCancelled
-                  ? 'Administrator approval is required to set up Parent PIN.'
-                  : e.message,
+                  ? 'Administrator approval was cancelled. No changes were made.'
+                  : sanitizeParentErrorMessage(e.message),
               })
             );
           }
@@ -1707,8 +1865,31 @@ export class GuiServer {
         str.includes('DNS read-back') ||
         str.includes('trapped at 127') ||
         str.includes('Program Files') ||
-        str.includes('packages/agent-windows')
+        str.includes('packages/agent-windows') ||
+        str.includes('UserHelper') ||
+        str.includes('Session 0') ||
+        str.includes('WTS') ||
+        str.includes('Win32Exception') ||
+        str.includes('1223') ||
+        str.includes('NO_CONNECTED_HELPER') ||
+        str.includes('HELPER_DISCONNECTED') ||
+        str.includes('PIPE_SECURITY') ||
+        str.includes('Pipe')
       ) {
+        const lower = str.toLowerCase();
+        if (lower.includes('1223') || lower.includes('cancel')) {
+          return 'Administrator approval was cancelled. No changes were made.';
+        }
+        if (
+          lower.includes('userhelper') ||
+          lower.includes('helper') ||
+          lower.includes('session 0') ||
+          lower.includes('wts') ||
+          lower.includes('pipe') ||
+          lower.includes('ipc')
+        ) {
+          return 'SafeBrowse could not start secure Windows approval. Please close and reopen SafeBrowse and try again.';
+        }
         return "SafeBrowse could not safely restore this computer's network settings. No device settings were removed. Please try again.";
       }
       return str;
@@ -1751,17 +1932,24 @@ export class GuiServer {
       const btn = document.getElementById('btnSetupPin');
       if (btn) {
         btn.disabled = true;
-        btn.innerText = 'Opening Windows approval...';
+        btn.innerText = 'Preparing secure Windows approval...';
       }
       showAlert('Approve the Windows administrator prompt to create your SafeBrowse Parent PIN.', false);
 
+      const promptTimer = setTimeout(() => {
+        if (btn && btn.disabled) btn.innerText = 'Waiting for administrator approval...';
+      }, 1000);
+
       try {
         const res = await fetch('/api/launch-pin-setup', { method: 'POST' });
+        clearTimeout(promptTimer);
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.success) {
           showAlert(data.error || 'Unable to open Parent PIN setup.', true);
           return;
         }
+
+        showAlert('Windows administrator approval granted. Creating Parent PIN...', false);
 
         if (pollInterval) clearInterval(pollInterval);
         let attempts = 0;
@@ -1785,7 +1973,8 @@ export class GuiServer {
           }
         }, 1500);
       } catch (e) {
-        showAlert('Unable to start Parent PIN setup: ' + e.message, true);
+        clearTimeout(promptTimer);
+        showAlert('Unable to start Parent PIN setup: ' + sanitizeParentErrorMessageClient(e.message), true);
       } finally {
         if (btn) {
           btn.disabled = false;
@@ -1801,17 +1990,23 @@ export class GuiServer {
       const btn = document.getElementById('btnReconfigure');
       if (btn) {
         btn.disabled = true;
-        btn.innerText = 'Requesting elevation...';
+        btn.innerText = 'Preparing secure Windows approval...';
       }
       showAlert('Approve the Windows administrator prompt. SafeBrowse will open account settings and refresh this screen after Save.', false);
+
+      const promptTimer = setTimeout(() => {
+        if (btn && btn.disabled) btn.innerText = 'Waiting for administrator approval...';
+      }, 1000);
 
       try {
         const res = await fetch('/api/reconfigure', {
           method: 'POST',
           headers: { ...(managementSessionToken ? { 'x-management-session': managementSessionToken } : {}) }
         });
+        clearTimeout(promptTimer);
         const data = await res.json().catch(() => ({}));
         if (res.ok && data.success) {
+          showAlert('Windows administrator approval granted. Account settings opened.', false);
           if (pollInterval) clearInterval(pollInterval);
           let attempts = 0;
           pollInterval = setInterval(async () => {
@@ -1826,7 +2021,8 @@ export class GuiServer {
           showAlert(data.error || 'Failed to launch elevated configuration.', true);
         }
       } catch (e) {
-        showAlert('Error launching configuration: ' + e.message, true);
+        clearTimeout(promptTimer);
+        showAlert('Error launching configuration: ' + sanitizeParentErrorMessageClient(e.message), true);
       } finally {
         if (btn) {
           btn.disabled = false;
@@ -1846,9 +2042,13 @@ export class GuiServer {
 
       if (btn) {
         btn.disabled = true;
-        btn.innerText = 'Requesting elevation...';
+        btn.innerText = 'Preparing secure Windows approval...';
       }
-      showAlert('Administrator approval requested... Please approve the Windows UAC prompt to attach this device.', false);
+      showAlert('Approve the Windows administrator prompt to attach this device.', false);
+
+      const promptTimer = setTimeout(() => {
+        if (btn && btn.disabled) btn.innerText = 'Waiting for administrator approval...';
+      }, 1000);
 
       try {
         const res = await fetch('/api/launch-pair', {
@@ -1856,10 +2056,11 @@ export class GuiServer {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ code, deviceName })
         });
+        clearTimeout(promptTimer);
         const data = await res.json().catch(() => ({}));
 
         if (res.ok && data.success) {
-          showAlert('Administrator pairing wizard launched. Please complete pairing in the elevated SafeBrowse window.', false);
+          showAlert('Windows administrator approval granted. SafeBrowse is pairing this device...', false);
           if (pollInterval) clearInterval(pollInterval);
           let attempts = 0;
           pollInterval = setInterval(async () => {
@@ -1884,7 +2085,8 @@ export class GuiServer {
           showAlert(data.error || 'Administrator approval is required to attach this device.', true);
         }
       } catch (e) {
-        showAlert('Error requesting administrator setup: ' + e.message, true);
+        clearTimeout(promptTimer);
+        showAlert('Error requesting administrator setup: ' + sanitizeParentErrorMessageClient(e.message), true);
       } finally {
         if (btn) {
           btn.disabled = false;
