@@ -821,7 +821,8 @@ describe('SafeBrowse Windows Pilot — Account Mapping Reliability & Secure Save
       assert.strictEqual(resp.status, 200);
       const data: any = await resp.json();
       assert.strictEqual(data.success, true);
-      assert.ok(data.message.includes('elevation requested'));
+      assert.ok(data.message.includes('approval requested'));
+      assert.match(data.message, /active Windows desktop session/i);
     } finally {
       server.stop();
     }
