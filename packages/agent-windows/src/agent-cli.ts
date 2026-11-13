@@ -237,6 +237,16 @@ async function runServiceMode(): Promise<void> {
     logServiceMessage('WARN', `[SafeBrowse Service] Notice: GUI server port 8885 bind notice: ${guiErr.message}`);
   }
 
+  // Start the interactive desktop IPC bridge before pairing. This keeps the very
+  // first parent action (Connect Computer / PIN setup) fully GUI-driven even
+  // while the enforcement engine is still waiting for device credentials.
+  try {
+    await blockIpcServer.start();
+    logServiceMessage('INFO', `[BlockIpcServer] Interactive desktop bridge listening early on ${blockIpcServer.getPipePath()}`);
+  } catch (ipcErr: any) {
+    logServiceMessage('WARN', `[BlockIpcServer] Early interactive bridge startup notice: ${ipcErr.message}`);
+  }
+
   // Graceful shutdown handling
   let isShuttingDown = false;
   let currentEngineStatus: EngineOperationalStatus = 'DEGRADED_DNS_NOT_ENFORCED';

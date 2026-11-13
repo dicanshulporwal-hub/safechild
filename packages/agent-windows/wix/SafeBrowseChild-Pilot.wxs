@@ -1,7 +1,7 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <?ifndef ProductVersion?>
-  <?define ProductVersion = "1.0.4.13" ?>
+  <?define ProductVersion = "1.0.4.14" ?>
   <?endif?>
   <Package
       Name="SafeBrowse Child Pilot"
@@ -18,6 +18,13 @@
       <Directory Id="INSTALLFOLDER" Name="SafeBrowse">
         <!-- Main Node SEA Binary -->
         <Component Id="MainExecutable" Guid="3F8A682D-E8C2-4E51-87BE-189A84B30411" Bitness="always64">
+          <!--
+            Remove legacy Node-hosted SEA keypaths before InstallFiles.
+            Some older pilot builds exposed Node's 20.x FileVersion, which Windows
+            Installer can incorrectly treat as newer than SafeBrowse 1.x and retain.
+            This makes a normal major upgrade deterministic without requiring /fa.
+          -->
+          <RemoveFile Id="RemoveLegacySafeBrowseChildExeOnInstall" Name="SafeBrowseChild-Pilot.exe" On="install" />
           <File Id="SafeBrowseChildExe" Source="$(var.SourceDir)\SafeBrowseChild-Pilot.exe" KeyPath="yes" />
         </Component>
 

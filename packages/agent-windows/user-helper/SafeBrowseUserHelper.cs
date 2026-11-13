@@ -19,9 +19,9 @@ using System.Threading;
 [assembly: AssemblyCulture("")]
 [assembly: ComVisible(false)]
 [assembly: Guid("5E1F82A3-B4C5-6D7E-8F90-123456789ABC")]
-[assembly: AssemblyVersion("1.0.4.13")]
-[assembly: AssemblyFileVersion("1.0.4.13")]
-[assembly: AssemblyInformationalVersion("1.0.4.13")]
+[assembly: AssemblyVersion("1.0.4.14")]
+[assembly: AssemblyFileVersion("1.0.4.14")]
+[assembly: AssemblyInformationalVersion("1.0.4.14")]
 
 namespace SafeBrowse.UserHelper
 {
@@ -140,6 +140,33 @@ namespace SafeBrowse.UserHelper
                     return;
                 }
 
+                if (msgType == "INTERACTIVE_DESKTOP_ACTION")
+                {
+                    Match actionMatch = Regex.Match(rawMessage, "\"action\"\\s*:\\s*\"([^\"]+)\"");
+                    Match requestIdMatch = Regex.Match(rawMessage, "\"requestId\"\\s*:\\s*\"([^\"]+)\"");
+                    string action = actionMatch.Success ? actionMatch.Groups[1].Value : "";
+                    string requestId = requestIdMatch.Success ? UnescapeJson(requestIdMatch.Groups[1].Value) : "";
+
+                    string error;
+                    bool success = LaunchElevatedSafeBrowseAction(action, rawMessage, out error);
+                    if (writer != null)
+                    {
+                        try
+                        {
+                            string resultMsg = string.Format(
+                                "{{\"type\":\"INTERACTIVE_DESKTOP_ACTION_RESULT\",\"requestId\":\"{0}\",\"action\":\"{1}\",\"success\":{2},\"error\":\"{3}\"}}\n",
+                                EscapeJson(requestId),
+                                EscapeJson(action),
+                                success ? "true" : "false",
+                                EscapeJson(error ?? "")
+                            );
+                            writer.Write(resultMsg);
+                        }
+                        catch { }
+                    }
+                    return;
+                }
+
                 if (msgType == "PRESENT_BLOCK")
                 {
                     Match domainMatch = Regex.Match(rawMessage, "\"domain\"\\s*:\\s*\"([^\"]+)\"");
@@ -191,6 +218,83 @@ namespace SafeBrowse.UserHelper
             catch (Exception ex)
             {
                 LogMessage("WARN", string.Format("Error processing IPC message: {0}", ex.Message));
+            }
+        }
+
+        private static bool LaunchElevatedSafeBrowseAction(string action, string rawMessage, out string error)
+        {
+            error = "";
+            try
+            {
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                string targetExe = Path.Combine(baseDir, "SafeBrowseChild-Pilot.exe");
+                if (!File.Exists(targetExe))
+                {
+                    error = "SafeBrowseChild-Pilot.exe is missing from the installation directory.";
+                    LogMessage("WARN", error);
+                    return false;
+                }
+
+                string arguments;
+                if (action == "SETUP_PIN")
+                {
+                    arguments = "--setup-pin";
+                }
+                else if (action == "CONFIGURE_ACCOUNTS")
+                {
+                    arguments = "--configure-accounts";
+                }
+                else if (action == "ATTACH_DEVICE")
+                {
+                    Match codeMatch = Regex.Match(rawMessage, "\"code\"\\s*:\\s*\"([^\"]*)\"");
+                    Match nameMatch = Regex.Match(rawMessage, "\"deviceName\"\\s*:\\s*\"([^\"]*)\"");
+                    string code = codeMatch.Success ? UnescapeJson(codeMatch.Groups[1].Value) : "";
+                    string deviceName = nameMatch.Success ? UnescapeJson(nameMatch.Groups[1].Value) : "Family Laptop";
+
+                    if (!Regex.IsMatch(code, "^[A-Za-z0-9_-]{4,32}$"))
+                    {
+                        error = "Pairing code format is invalid.";
+                        return false;
+                    }
+                    if (!Regex.IsMatch(deviceName, "^[A-Za-z0-9 _-]{1,50}$"))
+                    {
+                        deviceName = "Family Laptop";
+                    }
+
+                    arguments = "--attach-device --code " + code + " --name \"" + deviceName + "\"";
+                }
+                else
+                {
+                    error = "Interactive action is not allow-listed.";
+                    LogMessage("WARN", "Rejected non-allow-listed interactive action: " + action);
+                    return false;
+                }
+
+                ProcessStartInfo psi = new ProcessStartInfo(targetExe, arguments)
+                {
+                    UseShellExecute = true,
+                    Verb = "runas",
+                    WorkingDirectory = baseDir,
+                    WindowStyle = ProcessWindowStyle.Normal
+                };
+
+                Process.Start(psi);
+                LogMessage("INFO", string.Format("Interactive action '{0}' dispatched through Windows UAC.", action));
+                return true;
+            }
+            catch (System.ComponentModel.Win32Exception ex)
+            {
+                error = ex.NativeErrorCode == 1223
+                    ? "Windows administrator approval was cancelled."
+                    : ex.Message;
+                LogMessage("WARN", string.Format("Interactive action '{0}' failed: {1}", action, error));
+                return false;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                LogMessage("WARN", string.Format("Interactive action '{0}' failed: {1}", action, error));
+                return false;
             }
         }
 

@@ -33,6 +33,25 @@ export interface HelperRegisterAck {
   message?: string;
 }
 
+export type InteractiveDesktopAction = 'SETUP_PIN' | 'CONFIGURE_ACCOUNTS' | 'ATTACH_DEVICE';
+
+export interface InteractiveDesktopActionMessage {
+  type: 'INTERACTIVE_DESKTOP_ACTION';
+  action: InteractiveDesktopAction;
+  requestId: string;
+  timestamp: number;
+  code?: string;
+  deviceName?: string;
+}
+
+export interface InteractiveDesktopActionResult {
+  type: 'INTERACTIVE_DESKTOP_ACTION_RESULT';
+  action: InteractiveDesktopAction;
+  requestId: string;
+  success: boolean;
+  error?: string;
+}
+
 export interface ConnectedHelper {
   socket: net.Socket;
   accountName: string;
@@ -286,6 +305,12 @@ export class BlockIpcServer {
 
         // Bounded retry of any pending presentation for this helper session/account
         this.flushPendingPresentationsForHelper(helper);
+      } else if (data.type === 'INTERACTIVE_DESKTOP_ACTION_RESULT') {
+        const helper = this.helpers.get(socket);
+        logServiceMessage(
+          data.success ? 'INFO' : 'WARN',
+          `[BlockIpcServer] Interactive desktop action result from helper (PID=${helper?.pid || 'N/A'}, SessionId=${helper?.sessionId ?? 'N/A'}): action='${data.action || 'unknown'}', requestId='${data.requestId || 'unknown'}', success=${Boolean(data.success)}${data.error ? `, error='${data.error}'` : ''}`
+        );
       } else if (data.type === 'PRESENTATION_RESULT') {
         const helper = this.helpers.get(socket);
         logServiceMessage(
@@ -346,6 +371,105 @@ export class BlockIpcServer {
         );
       }
     }
+  }
+
+  private getMatchingHelperSockets(sessionId?: number | null, accountName?: string | null): net.Socket[] {
+    const targetName = accountName ? accountName.split('\\').pop()?.toLowerCase() : undefined;
+    const sessionMatches: net.Socket[] = [];
+
+    if (typeof sessionId === 'number') {
+      for (const [socket, helper] of this.helpers.entries()) {
+        if (!socket.destroyed && helper.sessionId === sessionId) {
+          sessionMatches.push(socket);
+        }
+      }
+      if (sessionMatches.length > 0) {
+        return sessionMatches;
+      }
+    }
+
+    if (targetName) {
+      const accountMatches: net.Socket[] = [];
+      for (const [socket, helper] of this.helpers.entries()) {
+        if (socket.destroyed) continue;
+        const helperName = helper.accountName ? helper.accountName.split('\\').pop()?.toLowerCase() : undefined;
+        if (helperName === targetName) {
+          accountMatches.push(socket);
+        }
+      }
+      if (accountMatches.length > 0) {
+        return accountMatches;
+      }
+    }
+
+    // Safe fallback only when exactly one interactive helper is connected.
+    if (this.helpers.size === 1) {
+      const [socket] = Array.from(this.helpers.keys());
+      if (!socket.destroyed) return [socket];
+    }
+
+    return [];
+  }
+
+  /**
+   * Sends a tightly allow-listed desktop-management action to SafeBrowseUserHelper
+   * in the logged-in interactive Windows session. The helper is responsible only
+   * for presenting the Windows UAC consent flow; privileged work remains in the
+   * existing elevated SafeBrowse executable paths.
+   */
+  public dispatchInteractiveDesktopAction(
+    action: InteractiveDesktopAction,
+    sessionId?: number | null,
+    accountName?: string | null,
+    options?: { code?: string; deviceName?: string }
+  ): { sent: boolean; reason: string; requestId?: string } {
+    if (!['SETUP_PIN', 'CONFIGURE_ACCOUNTS', 'ATTACH_DEVICE'].includes(action)) {
+      return { sent: false, reason: 'ACTION_NOT_ALLOWED' };
+    }
+
+    const sockets = this.getMatchingHelperSockets(sessionId, accountName);
+    if (sockets.length === 0) {
+      return { sent: false, reason: 'NO_CONNECTED_HELPER' };
+    }
+
+    const requestId = `mgmt-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+    const payload: InteractiveDesktopActionMessage = {
+      type: 'INTERACTIVE_DESKTOP_ACTION',
+      action,
+      requestId,
+      timestamp: Date.now(),
+    };
+
+    if (action === 'ATTACH_DEVICE') {
+      const code = String(options?.code || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32);
+      const deviceName = String(options?.deviceName || 'Family Laptop')
+        .replace(/[^A-Za-z0-9 _-]/g, '')
+        .slice(0, 50);
+      if (code) payload.code = code;
+      payload.deviceName = deviceName || 'Family Laptop';
+    }
+
+    const message = JSON.stringify(payload) + '\n';
+    let delivered = false;
+    for (const socket of sockets) {
+      try {
+        socket.write(message);
+        delivered = true;
+      } catch {
+        this.helpers.delete(socket);
+      }
+    }
+
+    logServiceMessage(
+      delivered ? 'INFO' : 'WARN',
+      `[BlockIpcServer] Interactive desktop action '${action}' delivery ${delivered ? 'dispatched' : 'failed'} for Session ${sessionId ?? 'N/A'} (account: '${accountName || 'N/A'}', requestId: '${requestId}').`
+    );
+
+    return {
+      sent: delivered,
+      reason: delivered ? 'DISPATCHED_TO_INTERACTIVE_HELPER' : 'HELPER_WRITE_FAILED',
+      requestId,
+    };
   }
 
   public presentBlock(

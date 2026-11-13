@@ -1198,8 +1198,47 @@ describe('SafeBrowse Stage C.5 — Family-Level Onboarding, Cloud Truth & Parent
     assert.ok(elevatedSource.includes("'--start-maximized'"), 'Elevated GUI must request maximized Edge app mode');
     assert.strictEqual(guiSource.includes('--window-size='), false, 'Main GUI must not force an 880x720 window');
     assert.strictEqual(elevatedSource.includes('--window-size='), false, 'Elevated GUI must not force an 820x700 window');
-    assert.ok(guiSource.includes('-WindowStyle Hidden'), 'Elevated SEA launch must hide its console window');
-    assert.ok(guiSource.includes('{ windowsHide: true }'), 'PowerShell/browser launch helpers must suppress console windows');
+    assert.strictEqual(guiSource.includes('-Verb RunAs'), false,
+      'Main service GUI must never try to raise UAC directly from Windows Session 0');
+    assert.ok(guiSource.includes('dispatchInteractiveAction'),
+      'Privileged GUI actions must hand off to the interactive desktop helper');
+  });
+
+  it('18. P0-9 frontend: missing PIN has a clickable setup path, compact status UI, and no Session-0 UAC dead-end', async () => {
+    const guiServer = new GuiServer(configMgr, accountMgr, networkManager, pinMgr);
+    const html = (guiServer as any).renderHtml() as string;
+    const guiSource = fs.readFileSync(path.resolve(__dirname, '../src/gui-server.ts'), 'utf8');
+    const agentSource = fs.readFileSync(path.resolve(__dirname, '../src/agent-cli.ts'), 'utf8');
+
+    assert.ok(html.includes('id="pinSetupBanner"'), 'Status page must surface missing Parent PIN');
+    assert.ok(html.includes('Set Up Parent PIN'), 'Status page must provide a direct PIN setup button');
+    assert.ok(html.includes('launchParentPinSetup()'), 'PIN setup button must have a frontend handler');
+    assert.ok(html.includes('id="statPin"'), 'Status page must show Parent Lock state');
+    assert.ok(html.includes('class="accounts-scroll"'), 'Long account lists must scroll independently');
+    assert.ok(html.includes('@media (max-height: 800px)'), 'Compact-height desktop layout must be supported');
+
+    assert.ok(
+      guiSource.includes("dispatchInteractiveAction('SETUP_PIN')"),
+      'PIN setup must dispatch through the interactive desktop helper'
+    );
+    assert.ok(
+      guiSource.includes("dispatchInteractiveAction('CONFIGURE_ACCOUNTS')"),
+      'Account configuration must dispatch through the interactive desktop helper'
+    );
+    assert.ok(
+      guiSource.includes("dispatchInteractiveAction('ATTACH_DEVICE'"),
+      'Fresh device attachment must dispatch through the interactive desktop helper'
+    );
+    assert.strictEqual(
+      guiSource.includes("showAlert('SafeBrowse Parent PIN is not configured on this device. Protected management is locked.'"),
+      false,
+      'Missing PIN must not dead-end at an alert'
+    );
+
+    const bridgeStart = agentSource.indexOf('Interactive desktop bridge listening early');
+    const pairingWait = agentSource.indexOf('Await valid pairing credentials if not yet paired');
+    assert.ok(bridgeStart !== -1 && pairingWait !== -1 && bridgeStart < pairingWait,
+      'Interactive IPC bridge must start before the unpaired-device wait loop');
   });
 
 });

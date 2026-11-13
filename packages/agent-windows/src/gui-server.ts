@@ -17,6 +17,7 @@ import { evaluateSystemStatus } from './agent-cli';
 import { networkManager, WindowsNetworkManager, logServiceMessage } from './network-manager';
 import { parentPinManager, ParentPinManager } from './parent-pin-manager';
 import { normalizePairingCode, CURRENT_WINDOWS_PROTOCOL_VERSION } from '@safebrowse/shared';
+import { blockIpcServer, InteractiveDesktopAction } from './block-ipc';
 
 
 export class GuiServer {
@@ -101,7 +102,7 @@ export class GuiServer {
             JSON.stringify({
               status: 'ok',
               service: 'SafeBrowse',
-              version: '1.0.4.13',
+              version: '1.0.4.14',
             })
           );
           return;
@@ -134,6 +135,41 @@ export class GuiServer {
             };
           }
           return { authorized: true };
+        };
+
+        const dispatchInteractiveAction = async (
+          action: InteractiveDesktopAction,
+          options?: { code?: string; deviceName?: string }
+        ): Promise<{ sent: boolean; reason: string; requestId?: string }> => {
+          // Unit/integration tests do not have a real Windows desktop helper.
+          if (process.env.NODE_ENV === 'test') {
+            return { sent: true, reason: 'TEST_SIMULATED_INTERACTIVE_DISPATCH', requestId: 'test-request' };
+          }
+
+          const sessionId = typeof activeConsole?.sessionId === 'number' ? activeConsole.sessionId : undefined;
+          const username = activeConsole?.username || undefined;
+          let result = blockIpcServer.dispatchInteractiveDesktopAction(action, sessionId, username, options);
+          if (result.sent || process.platform !== 'win32') return result;
+
+          // Self-heal the interactive bridge if it is not registered yet.
+          try {
+            const hostExe = path.join(this.configMgr.getInstallDir(), 'SafeBrowseServiceHost.exe');
+            if (fs.existsSync(hostExe)) {
+              const args = sessionId !== undefined
+                ? ['--launch-helper', String(sessionId)]
+                : ['--launch-helper'];
+              await safeExecFileAsync(hostExe, args, { windowsHide: true });
+              for (let attempt = 0; attempt < 10; attempt++) {
+                await new Promise((resolve) => setTimeout(resolve, 200));
+                result = blockIpcServer.dispatchInteractiveDesktopAction(action, sessionId, username, options);
+                if (result.sent) return result;
+              }
+            }
+          } catch (e: any) {
+            logServiceMessage('WARN', `[SafeBrowse GUI] Interactive helper recovery failed: ${e.message}`);
+          }
+
+          return result;
         };
 
         // Endpoint: POST /api/verify-pin (Parent lock unlock)
@@ -524,42 +560,33 @@ export class GuiServer {
                 parsedBody = JSON.parse(body || '{}');
               } catch {}
 
-              const exePath = process.argv[0];
-              const isNode = exePath.toLowerCase().endsWith('node.exe') || exePath.toLowerCase().endsWith('node');
-              const psPath = this.configMgr.getPowerShellPath();
+              const safeCode = String(parsedBody.code || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32);
+              const safeName = String(parsedBody.deviceName || 'Family Laptop').replace(/[^A-Za-z0-9 _-]/g, '').slice(0, 50);
+              if (!safeCode) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Pairing code is required.' }));
+                return;
+              }
 
-              if (process.platform === 'win32' && process.env.NODE_ENV !== 'test') {
-                let extraArgs = '';
-                if (parsedBody.code && typeof parsedBody.code === 'string') {
-                  const safeCode = parsedBody.code.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32);
-                  if (safeCode) extraArgs += ` --code ${safeCode}`;
-                }
-                if (parsedBody.deviceName && typeof parsedBody.deviceName === 'string') {
-                  const safeName = parsedBody.deviceName.replace(/[^A-Za-z0-9 _-]/g, '').slice(0, 50);
-                  if (safeName) extraArgs += ` --name "${safeName}"`;
-                }
-
-                const args = isNode
-                  ? `"${process.argv[1]}" --attach-device${extraArgs}`
-                  : `--attach-device${extraArgs}`;
-                const psCmd = `Start-Process -FilePath "${exePath}" -ArgumentList '${args}' -Verb RunAs -WindowStyle Hidden`;
-                await safeExecFileAsync(
-                  psPath,
-                  [
-                    '-NoLogo',
-                    '-NoProfile',
-                    '-NonInteractive',
-                    '-ExecutionPolicy',
-                    'Bypass',
-                    '-Command',
-                    psCmd,
-                  ],
-                  { windowsHide: true }
-                );
+              const dispatch = await dispatchInteractiveAction('ATTACH_DEVICE', {
+                code: safeCode,
+                deviceName: safeName || 'Family Laptop',
+              });
+              if (!dispatch.sent) {
+                res.writeHead(503, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                  error: 'SafeBrowse could not open the Windows administrator approval prompt in your desktop session. Please sign in to Windows and try again.',
+                  reason: dispatch.reason,
+                }));
+                return;
               }
 
               res.writeHead(200, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ success: true, message: 'Administrator elevation requested' }));
+              res.end(JSON.stringify({
+                success: true,
+                message: 'Windows administrator approval prompt requested in the active desktop session.',
+                requestId: dispatch.requestId,
+              }));
             } catch (e: any) {
               const msg = (e.stderr || e.message || '').toString();
               const isCancelled = msg.includes('canceled by the user') || msg.includes('1223');
@@ -585,32 +612,22 @@ export class GuiServer {
           }
 
           try {
-            const exePath = process.argv[0];
-            const isNode = exePath.toLowerCase().endsWith('node.exe') || exePath.toLowerCase().endsWith('node');
-            const psPath = this.configMgr.getPowerShellPath();
-
-            if (process.platform === 'win32' && process.env.NODE_ENV !== 'test') {
-              const args = isNode
-                ? `"${process.argv[1]}" --configure-accounts`
-                : `--configure-accounts`;
-              const psCmd = `Start-Process -FilePath "${exePath}" -ArgumentList '${args}' -Verb RunAs -WindowStyle Hidden`;
-              await safeExecFileAsync(
-                psPath,
-                [
-                  '-NoLogo',
-                  '-NoProfile',
-                  '-NonInteractive',
-                  '-ExecutionPolicy',
-                  'Bypass',
-                  '-Command',
-                  psCmd,
-                ],
-                { windowsHide: true }
-              );
+            const dispatch = await dispatchInteractiveAction('CONFIGURE_ACCOUNTS');
+            if (!dispatch.sent) {
+              res.writeHead(503, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({
+                error: 'SafeBrowse could not open the account settings approval prompt in your Windows desktop session.',
+                reason: dispatch.reason,
+              }));
+              return;
             }
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: true, message: 'Administrator elevation requested' }));
+            res.end(JSON.stringify({
+              success: true,
+              message: 'Administrator approval requested in the active Windows desktop session.',
+              requestId: dispatch.requestId,
+            }));
           } catch (e: any) {
             const msg = (e.stderr || e.message || '').toString();
             const isCancelled = msg.includes('canceled by the user') || msg.includes('1223');
@@ -643,32 +660,22 @@ export class GuiServer {
           }
 
           try {
-            const exePath = process.argv[0];
-            const isNode = exePath.toLowerCase().endsWith('node.exe') || exePath.toLowerCase().endsWith('node');
-            const psPath = this.configMgr.getPowerShellPath();
-
-            if (process.platform === 'win32' && process.env.NODE_ENV !== 'test') {
-              const args = isNode
-                ? `"${process.argv[1]}" --setup-pin`
-                : `--setup-pin`;
-              const psCmd = `Start-Process -FilePath "${exePath}" -ArgumentList '${args}' -Verb RunAs -WindowStyle Hidden`;
-              await safeExecFileAsync(
-                psPath,
-                [
-                  '-NoLogo',
-                  '-NoProfile',
-                  '-NonInteractive',
-                  '-ExecutionPolicy',
-                  'Bypass',
-                  '-Command',
-                  psCmd,
-                ],
-                { windowsHide: true }
-              );
+            const dispatch = await dispatchInteractiveAction('SETUP_PIN');
+            if (!dispatch.sent) {
+              res.writeHead(503, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({
+                error: 'SafeBrowse could not open the Parent PIN setup approval prompt in your Windows desktop session.',
+                reason: dispatch.reason,
+              }));
+              return;
             }
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: true, message: 'Administrator elevation requested for Parent PIN setup' }));
+            res.end(JSON.stringify({
+              success: true,
+              message: 'Administrator approval requested for Parent PIN setup in the active Windows desktop session.',
+              requestId: dispatch.requestId,
+            }));
           } catch (e: any) {
             const msg = (e.stderr || e.message || '').toString();
             const isCancelled = msg.includes('canceled by the user') || msg.includes('1223');
@@ -732,13 +739,8 @@ export class GuiServer {
           try {
             const config = await this.configMgr.loadSanitizedConfig();
             const dashUrl = config?.backendUrl || 'https://safebrowse.porwal.online';
-            if (process.platform === 'win32') {
-              await safeExecAsync(`start "" /max "${dashUrl}"`, { windowsHide: true });
-            } else if (process.env.NODE_ENV !== 'test') {
-              try {
-                await safeExecAsync(`xdg-open "${dashUrl}" || open "${dashUrl}"`);
-              } catch {}
-            }
+            // Return the validated dashboard URL to the interactive GUI.
+            // The browser must be opened by the logged-in user's frontend, not Session 0.
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, url: dashUrl }));
           } catch (e: any) {
@@ -955,7 +957,7 @@ export class GuiServer {
       background: radial-gradient(circle at 50% 10%, #1e1b4b 0%, var(--bg) 100%);
       color: var(--text);
       margin: 0;
-      padding: 24px;
+      padding: 14px;
       min-height: 100vh;
       display: flex;
       justify-content: center;
@@ -966,8 +968,8 @@ export class GuiServer {
       width: 100%;
       background: var(--card-bg);
       border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 28px;
-      padding: 40px;
+      border-radius: 20px;
+      padding: 24px;
       box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
       backdrop-filter: blur(20px);
     }
@@ -985,12 +987,12 @@ export class GuiServer {
     .brand {
       display: flex;
       align-items: center;
-      gap: 14px;
-      margin-bottom: 28px;
+      gap: 10px;
+      margin-bottom: 16px;
     }
     .brand-icon {
-      width: 48px;
-      height: 48px;
+      width: 40px;
+      height: 40px;
       background: linear-gradient(135deg, #2563eb, #1e40af);
       border-radius: 14px;
       display: flex;
@@ -999,8 +1001,8 @@ export class GuiServer {
       color: white;
       box-shadow: 0 10px 20px -5px rgba(37, 99, 235, 0.5);
     }
-    h1 { font-size: 26px; font-weight: 800; margin: 0; letter-spacing: -0.5px; }
-    .subtitle { color: var(--text-muted); font-size: 14px; margin-top: 4px; }
+    h1 { font-size: 22px; font-weight: 800; margin: 0; letter-spacing: -0.5px; }
+    .subtitle { color: var(--text-muted); font-size: 12px; margin-top: 4px; }
     .screen { display: none; }
     .screen.active { display: block; animation: fadeIn 0.25s ease-out; }
     .startup-loader {
@@ -1030,8 +1032,9 @@ export class GuiServer {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      padding: 14px 28px;
-      font-size: 15px;
+      padding: 11px 18px;
+      min-height: 40px;
+      font-size: 13px;
       font-weight: 700;
       border-radius: 14px;
       border: none;
@@ -1051,7 +1054,7 @@ export class GuiServer {
       border: 1px solid #334155;
     }
     .btn-secondary:hover { background: #334155; }
-    .button-row { display: flex; gap: 12px; margin-top: 28px; }
+    .button-row { display: flex; gap: 10px; margin-top: 16px; }
 
     /* Inputs */
     .input-group { margin-bottom: 20px; text-align: left; }
@@ -1074,8 +1077,8 @@ export class GuiServer {
     .account-table {
       width: 100%;
       border-collapse: separate;
-      border-spacing: 0 10px;
-      margin: 20px 0;
+      border-spacing: 0 6px;
+      margin: 10px 0;
     }
     .account-row {
       background: #0f172a;
@@ -1083,7 +1086,7 @@ export class GuiServer {
       transition: all 0.2s;
     }
     .account-row td {
-      padding: 16px;
+      padding: 10px 12px;
       border-top: 1px solid #1e293b;
       border-bottom: 1px solid #1e293b;
     }
@@ -1096,19 +1099,19 @@ export class GuiServer {
     /* Status cards */
     .status-grid {
       display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 16px;
-      margin: 24px 0;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin: 14px 0;
     }
     .status-card {
       background: #0f172a;
       border: 1px solid #1e293b;
-      border-radius: 16px;
-      padding: 18px;
+      border-radius: 14px;
+      padding: 12px 14px;
       text-align: left;
     }
     .status-label { font-size: 12px; color: var(--text-muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
-    .status-val { font-size: 16px; font-weight: 800; margin-top: 6px; }
+    .status-val { font-size: 14px; font-weight: 800; margin-top: 6px; }
     .status-sub { font-size: 12px; color: #64748b; margin-top: 4px; }
 
     .tag-protected { color: var(--success); }
@@ -1151,6 +1154,44 @@ export class GuiServer {
     }
     .alert-error { background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; }
     .alert-success { background: rgba(34, 197, 94, 0.15); border: 1px solid rgba(34, 197, 94, 0.3); color: #86efac; }
+    .accounts-scroll {
+      max-height: 180px;
+      overflow: auto;
+      padding-right: 4px;
+      scrollbar-width: thin;
+    }
+    .pin-setup-banner {
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+      border: 1px solid rgba(245, 158, 11, 0.45);
+      border-radius: 12px;
+      background: rgba(245, 158, 11, 0.12);
+      text-align: left;
+    }
+    .pin-setup-copy { min-width: 0; }
+    .pin-setup-title { font-size: 13px; font-weight: 800; color: #fde68a; }
+    .pin-setup-text { font-size: 12px; color: #cbd5e1; margin-top: 2px; line-height: 1.35; }
+    @media (max-width: 900px) {
+      .status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-height: 800px) {
+      body { padding: 8px; }
+      .container { padding: 18px 20px; border-radius: 16px; }
+      .brand { margin-bottom: 10px; }
+      .brand-icon { width: 36px; height: 36px; }
+      h1 { font-size: 20px; }
+      .subtitle { font-size: 11px; }
+      .status-grid { margin: 10px 0; gap: 8px; }
+      .status-card { padding: 9px 11px; }
+      .account-row td { padding: 8px 10px; }
+      .button-row { margin-top: 12px; gap: 8px; }
+      .btn { padding: 9px 14px; min-height: 38px; font-size: 12px; }
+      .accounts-scroll { max-height: 145px; }
+    }
   </style>
 </head>
 <body>
@@ -1269,10 +1310,18 @@ export class GuiServer {
           <div style="font-size:12px; color:#94a3b8; margin-top:3px;">Please wait. SafeBrowse is checking the active account, mappings and protection service.</div>
         </div>
       </div>
-      <h2 style="font-size: 22px; font-weight: 800; margin: 0 0 8px 0;">Protection Status</h2>
-      <p style="color: var(--text-muted); font-size: 14px; margin-bottom: 24px;">
-        Active protection telemetry and live console session state.
+      <h2 style="font-size: 19px; font-weight: 800; margin: 0 0 4px 0;">Protection Status</h2>
+      <p style="color: var(--text-muted); font-size: 12px; margin: 0 0 12px 0;">
+        Live protection, account and device status.
       </p>
+
+      <div id="pinSetupBanner" class="pin-setup-banner">
+        <div class="pin-setup-copy">
+          <div class="pin-setup-title">Parent PIN setup required</div>
+          <div class="pin-setup-text">Create a 6–8 digit Parent PIN before changing SafeBrowse settings.</div>
+        </div>
+        <button class="btn btn-primary" id="btnSetupPin" onclick="launchParentPinSetup()">Set Up Parent PIN</button>
+      </div>
 
       <div id="syncBanner" style="display:none; background: rgba(37, 99, 235, 0.15); border: 1px solid rgba(37, 99, 235, 0.35); border-radius: 16px; padding: 14px 18px; margin-bottom: 20px; text-align: left;">
         <div style="display: flex; align-items: center; gap: 12px;">
@@ -1319,12 +1368,19 @@ export class GuiServer {
           <div class="status-val" id="statDns">Checking protection...</div>
           <div class="status-sub" id="statService">SafeBrowseChildService</div>
         </div>
+
+        <div class="status-card">
+          <div class="status-label">Parent Lock</div>
+          <div class="status-val" id="statPin">Checking...</div>
+          <div class="status-sub" id="statPinSub">Management protection</div>
+        </div>
       </div>
 
-      <div style="margin-top: 24px; text-align: left;">
+      <div style="margin-top: 12px; text-align: left;">
         <div style="font-size: 13px; font-weight: 700; color: #cbd5e1; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px;">
           Configured Laptop Accounts & Protection
         </div>
+        <div class="accounts-scroll">
         <table class="account-table">
           <thead>
             <tr style="color: var(--text-muted); font-size: 12px; font-weight: 700; text-transform: uppercase; text-align: left;">
@@ -1338,6 +1394,7 @@ export class GuiServer {
             <!-- Populated dynamically -->
           </tbody>
         </table>
+        </div>
       </div>
 
       <div class="button-row" style="flex-wrap: wrap;">
@@ -1381,7 +1438,7 @@ export class GuiServer {
     function ensureManagementUnlocked() {
       return new Promise((resolve) => {
         if (!appState.pinConfigured) {
-          showAlert('SafeBrowse Parent PIN is not configured on this device. Protected management is locked.', true);
+          launchParentPinSetup();
           return resolve(false);
         }
         if (managementSessionToken) {
@@ -1505,6 +1562,53 @@ export class GuiServer {
       }
     }
 
+    async function launchParentPinSetup() {
+      const btn = document.getElementById('btnSetupPin');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = 'Opening Windows approval...';
+      }
+      showAlert('Approve the Windows administrator prompt to create your SafeBrowse Parent PIN.', false);
+
+      try {
+        const res = await fetch('/api/launch-pin-setup', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.success) {
+          showAlert(data.error || 'Unable to open Parent PIN setup.', true);
+          return;
+        }
+
+        if (pollInterval) clearInterval(pollInterval);
+        let attempts = 0;
+        pollInterval = setInterval(async () => {
+          attempts++;
+          try {
+            const statusRes = await fetch('/api/status', { cache: 'no-store' });
+            const status = await statusRes.json();
+            if (status.pinConfigured) {
+              clearInterval(pollInterval);
+              pollInterval = null;
+              appState.pinConfigured = true;
+              showAlert('Parent PIN configured. Protected settings are now secured.');
+              await loadStatusScreen(true);
+              return;
+            }
+          } catch {}
+          if (attempts >= 80) {
+            clearInterval(pollInterval);
+            pollInterval = null;
+          }
+        }, 1500);
+      } catch (e) {
+        showAlert('Unable to start Parent PIN setup: ' + e.message, true);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerText = 'Set Up Parent PIN';
+        }
+      }
+    }
+
     async function launchElevatedReconfigure() {
       const unlocked = await ensureManagementUnlocked();
       if (!unlocked) return;
@@ -1514,7 +1618,7 @@ export class GuiServer {
         btn.disabled = true;
         btn.innerText = 'Requesting elevation...';
       }
-      showAlert('Windows administrator approval is required to change account mappings. Approve the UAC prompt; SafeBrowse will open a secure settings window and refresh this status automatically after Save.', false);
+      showAlert('Approve the Windows administrator prompt. SafeBrowse will open account settings and refresh this screen after Save.', false);
 
       try {
         const res = await fetch('/api/reconfigure', {
@@ -1862,6 +1966,22 @@ export class GuiServer {
         appState.pinConfigured = Boolean(data.pinConfigured);
         appState.managementUnlocked = Boolean(data.managementUnlocked);
 
+        const pinBanner = document.getElementById('pinSetupBanner');
+        const pinRequired = Boolean(data.parentPinSetupRequired || (data.isPaired && !data.pinConfigured));
+        if (pinBanner) pinBanner.style.display = pinRequired ? 'flex' : 'none';
+        const statPin = document.getElementById('statPin');
+        const statPinSub = document.getElementById('statPinSub');
+        if (statPin) {
+          statPin.innerHTML = data.pinConfigured
+            ? '<span class="tag-protected">● Configured</span>'
+            : '<span class="tag-warning" style="color:#f59e0b;">● Setup Required</span>';
+        }
+        if (statPinSub) {
+          statPinSub.innerText = data.pinConfigured
+            ? (data.managementUnlocked ? 'Parent settings temporarily unlocked' : 'Protected management locked')
+            : 'Set a 6–8 digit Parent PIN';
+        }
+
         const user = data.activeSession?.username || 'System Console';
         const role = data.activeSession?.accountType || (data.activeSession?.isManaged ? 'CHILD' : 'NOT_ASSIGNED');
         const isChild = role === 'CHILD';
@@ -2022,9 +2142,11 @@ export class GuiServer {
 
     async function openParentDashboard() {
       try {
-        await fetch('/api/open-dashboard', { method: 'POST' });
+        const res = await fetch('/api/open-dashboard', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        window.open(data.url || 'https://safebrowse.porwal.online', '_blank', 'noopener');
       } catch {
-        window.open('https://safebrowse.porwal.online', '_blank');
+        window.open('https://safebrowse.porwal.online', '_blank', 'noopener');
       }
     }
 

@@ -76,12 +76,14 @@ describe('SafeBrowse Windows Stage C.3.1: Service Block IPC Integration Suite', 
     socket: net.Socket;
     receivedAcks: HelperRegisterAck[];
     receivedMessages: BlockPresentationMessage[];
+    receivedInteractiveActions: any[];
     close: () => Promise<void>;
   }> {
     return new Promise((resolve, reject) => {
       const socket = net.createConnection(pipePath);
       const receivedAcks: HelperRegisterAck[] = [];
       const receivedMessages: BlockPresentationMessage[] = [];
+      const receivedInteractiveActions: any[] = [];
       let buffer = '';
 
       socket.on('connect', () => {
@@ -114,6 +116,7 @@ describe('SafeBrowse Windows Stage C.3.1: Service Block IPC Integration Suite', 
                 socket,
                 receivedAcks,
                 receivedMessages,
+                receivedInteractiveActions,
                 close: () =>
                   new Promise<void>((res) => {
                     socket.end(() => res());
@@ -121,6 +124,8 @@ describe('SafeBrowse Windows Stage C.3.1: Service Block IPC Integration Suite', 
               });
             } else if (data.type === 'PRESENT_BLOCK') {
               receivedMessages.push(data);
+            } else if (data.type === 'INTERACTIVE_DESKTOP_ACTION') {
+              receivedInteractiveActions.push(data);
             }
           } catch {}
         }
@@ -986,6 +991,51 @@ describe('SafeBrowse Windows Stage C.3.1: Service Block IPC Integration Suite', 
       );
     } finally {
       await recoveredClient.close();
+    }
+  });
+
+  test('11. Parent desktop helper receives allow-listed management UAC actions independently of child block presentation', async () => {
+    await ipcServer.start();
+    const parentClient = await createHelperClient(testSockPath, 'AnshulPorwal', 8001, 8);
+
+    try {
+      // Parent/unmanaged sessions must still suppress child block-page presentation.
+      activePolicyState = {
+        accountName: 'AnshulPorwal',
+        isManaged: false,
+        childId: null,
+        childName: null,
+        sid: 'S-1-5-21-2000-1001',
+        sessionId: 8,
+      };
+      const blockResult = ipcServer.presentBlock('example-blocked.test', 'POLICY_BLOCKED', 8880);
+      assert.strictEqual(blockResult.sent, false);
+      assert.strictEqual(blockResult.reason, 'PARENT_OR_UNMANAGED_USER');
+
+      // But the same interactive helper is the correct bridge for explicit parent management UAC.
+      const setupResult = ipcServer.dispatchInteractiveDesktopAction('SETUP_PIN', 8, 'AnshulPorwal');
+      const configResult = ipcServer.dispatchInteractiveDesktopAction('CONFIGURE_ACCOUNTS', 8, 'AnshulPorwal');
+      assert.strictEqual(setupResult.sent, true);
+      assert.strictEqual(configResult.sent, true);
+
+      await new Promise((r) => setTimeout(r, 60));
+      assert.strictEqual(parentClient.receivedInteractiveActions.length, 2);
+      assert.strictEqual(parentClient.receivedInteractiveActions[0].action, 'SETUP_PIN');
+      assert.strictEqual(parentClient.receivedInteractiveActions[1].action, 'CONFIGURE_ACCOUNTS');
+      assert.ok(parentClient.receivedInteractiveActions[0].requestId);
+
+      // Routing is session-scoped: a nonexistent session must not be silently broadcast
+      // when multiple helpers are connected.
+      const otherClient = await createHelperClient(testSockPath, 'OtherUser', 9001, 9);
+      try {
+        const missing = ipcServer.dispatchInteractiveDesktopAction('SETUP_PIN', 99, 'MissingUser');
+        assert.strictEqual(missing.sent, false);
+        assert.strictEqual(missing.reason, 'NO_CONNECTED_HELPER');
+      } finally {
+        await otherClient.close();
+      }
+    } finally {
+      await parentClient.close();
     }
   });
 });

@@ -299,12 +299,12 @@ describe('SafeBrowse Windows Pilot — Inline Script Syntax & GUI Launcher Suite
         `${path.basename(f.path)} must declare copyright notice`
       );
       assert.ok(
-        content.includes('AssemblyFileVersion("1.0.4.13")'),
-        `${path.basename(f.path)} must declare AssemblyFileVersion("1.0.4.13")`
+        content.includes('AssemblyFileVersion("1.0.4.14")'),
+        `${path.basename(f.path)} must declare AssemblyFileVersion("1.0.4.14")`
       );
       assert.ok(
-        content.includes('AssemblyVersion("1.0.4.13")'),
-        `${path.basename(f.path)} must declare AssemblyVersion("1.0.4.13")`
+        content.includes('AssemblyVersion("1.0.4.14")'),
+        `${path.basename(f.path)} must declare AssemblyVersion("1.0.4.14")`
       );
     }
   });
@@ -335,8 +335,8 @@ describe('SafeBrowse Windows Pilot — Inline Script Syntax & GUI Launcher Suite
     const wxsContent = fs.readFileSync(wxsPath, 'utf8');
 
     assert.ok(
-      wxsContent.includes('<?define ProductVersion = "1.0.4.13" ?>'),
-      'SafeBrowseChild-Pilot.wxs must declare ProductVersion 1.0.4.13'
+      wxsContent.includes('<?define ProductVersion = "1.0.4.14" ?>'),
+      'SafeBrowseChild-Pilot.wxs must declare ProductVersion 1.0.4.14'
     );
     assert.ok(
       wxsContent.includes('Schedule="afterInstallInitialize"'),
@@ -377,7 +377,7 @@ describe('SafeBrowse Windows Pilot — Inline Script Syntax & GUI Launcher Suite
       const body = await res.json();
       assert.strictEqual(body.status, 'ok', 'Status must be "ok"');
       assert.strictEqual(body.service, 'SafeBrowse', 'Service must be "SafeBrowse"');
-      assert.strictEqual(body.version, '1.0.4.13', 'Version must be 1.0.4.13');
+      assert.strictEqual(body.version, '1.0.4.14', 'Version must be 1.0.4.14');
 
       // 2. Response time must be ultra fast (sub-100ms) because it does zero PowerShell/CIM/DNS calls
       assert.ok(elapsed < 200, `/api/health must respond in < 200ms, elapsed: ${elapsed}ms`);
@@ -484,7 +484,7 @@ describe('SafeBrowse Windows Pilot — Inline Script Syntax & GUI Launcher Suite
       assert.strictEqual(healthRes.status, 200);
       const healthData = await healthRes.json();
       assert.strictEqual(healthData.status, 'ok');
-      assert.strictEqual(healthData.version, '1.0.4.13');
+      assert.strictEqual(healthData.version, '1.0.4.14');
 
       // 3. Status probe also succeeds without blocking launcher
       const statusRes = await fetch(`http://127.0.0.1:${port}/api/status`);
