@@ -199,7 +199,8 @@ describe('SafeBrowse Windows Pilot — Elevated Pairing & Privilege Separation S
       assert.strictEqual(res.status, 200);
       const data: any = await res.json();
       assert.strictEqual(data.success, true);
-      assert.strictEqual(data.message, 'Administrator elevation requested');
+      assert.match(data.message, /administrator approval prompt requested/i);
+      assert.match(data.message, /active desktop session/i);
     } finally {
       await gui.stop();
     }
